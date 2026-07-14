@@ -1,0 +1,5 @@
+﻿task_id,model_id,feature_set,oof_accuracy,oof_macro_f1,final_fit_time_sec,model_path,model_size_mb
+contact_detector,logistic_regression,current_shape,1.0,1.0,0.005923799995798618,models\contact_detector.joblib,0.006934165954589844
+position_classifier,extra_trees,current_shape,1.0,1.0,0.4049559999839403,models\position_classifier.joblib,0.6193456649780273
+manual_force_classifier,extra_trees,engineered,0.9777777777777777,0.9777750339548094,0.3933233999996446,models\manual_force_classifier.joblib,0.5751724243164062
+position_conditioned_force_classifier,extra_trees,engineered,0.9777777777777777,0.9777750339548094,3.508010000048671,models\position_conditioned_force_classifier.joblib,0.3913698196411133

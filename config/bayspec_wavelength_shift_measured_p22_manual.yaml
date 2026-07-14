@@ -1,0 +1,12 @@
+profile: single_p22_existing
+demodulation_mode: fbg_wavelength_shift
+channels:
+  P22:
+    enabled: true
+    target_wavelength_nm: 1546.7124
+    measured_wavelength_nm: 1546.89
+    measured_wavelength_source: manual_user_observation
+    measured_wavelength_status: provisional_manual
+    clean_no_contact_confirmed: false
+    search_half_width_nm: 0.8
+    approval_status: provisional_pending_clean_spectrum_confirmation

@@ -1,0 +1,291 @@
+app:
+  mode: bayspec_global_9fbg_hybrid_spectral_fingerprint
+  edition: wavelength_shift_demodulation
+  recognition_scope: global_3x3_hybrid_spectral_fingerprint
+  array_mode: global_spectrum_unmapped
+  default_channel: null
+  carrier_channel: P22
+  carrier_channel_role: legacy_full_spectrum_transport_only
+  primary_signal: full_spectrum_9fbg_mixed_wavelength_intensity_shape
+  physical_channel_mapping_final: false
+  real_3x3_enabled: false
+  calibrated_force_output: false
+  calibrated_pressure_output: false
+  strain_temperature_decoupled: false
+
+wavelength_shift_demodulation:
+  primary_method: cross_correlation
+  fallback_method: weighted_centroid
+  consistency_method: parabolic_peak_fit
+  feature_mode: auto
+  search_half_width_nm: 0.8
+  maximum_correlation_shift_pm: 500.0
+  minimum_cross_correlation: 0.65
+  estimator_disagreement_warning_pm: 80.0
+  frame_jump_warning_pm: 300.0
+  visualization_full_scale_pm: 500.0
+  baseline_noise_warning_pm: 8.0
+  temperature_strain_decoupled: false
+  interpretation: uncalibrated Bragg wavelength displacement; strain and temperature are coupled
+  response_thresholds_pm:
+    no_contact_max_abs_shift_pm: 10.0
+    small_shift_max_abs_pm: 75.0
+    moderate_shift_max_abs_pm: 250.0
+    noise_gate_k: 3.0
+
+global_candidate_baseline:
+  enabled: true
+  minimum_unique_frames: 30
+  maximum_latest_ingest_age_sec: 2.5
+  minimum_ingest_span_sec: 0.5
+  require_single_source: true
+  expected_candidate_count: 9
+  maximum_candidate_noise_pm_warning: 8.0
+  maximum_candidate_range_pm: 30.0
+  maximum_candidate_frame_jump_pm: 15.0
+  reject_unstable_baseline: true
+  scope: display_and_diagnostics_only
+  note: Formal hybrid-model inference uses its own stricter full-spectrum baseline gate.
+
+array_wavelength_plan:
+  wavelength_unit: nm
+  wavelength_start_nm: 1540.0
+  wavelength_stop_nm: 1580.0
+  wavelength_spacing_nm: 5.0
+  number_of_fbg_peaks: 9
+  status: preliminary_target_plan
+  note: "Target wavelengths are preliminary and must be replaced by measured no-contact Bragg wavelengths after fabrication."
+
+profiles:
+  single_p22_existing:
+    description: Current single-point P22 fallback using a provisional manual no-contact wavelength.
+    array_enabled: false
+    real_3x3_enabled: false
+    channel_ids: [P22]
+  future_3x3_plan:
+    description: Future preliminary 9-FBG wavelength-shift plan.
+    array_enabled: false
+    real_3x3_enabled: false
+    channel_ids: [P11, P12, P13, P21, P22, P23, P31, P32, P33]
+  current_real_9fbg_candidate:
+    description: Current live 100-frame nine-FBG cluster; channel identities require labelled point-press confirmation.
+    array_enabled: false
+    real_3x3_enabled: false
+    channel_ids: [P11, P12, P13, P21, P22, P23, P31, P32, P33]
+
+current_real_9fbg_candidate:
+  profile: current_real_9fbg_candidate
+  status: candidate_pending_labelled_point_press_confirmation
+  source: live_direct_sdk_100_frame_no_contact_cluster_20260712
+  mapping_basis: ascending_fabrication_order_candidate
+  expected_peak_count: 9
+  expected_first_peak_nm: 1528.0
+  first_peak_tolerance_nm: 1.5
+  discovery_search_start_nm: 1526.5
+  discovery_search_stop_nm: 1561.5
+  search_half_width_nm: 1.0
+  apply_to_real_array: false
+  channels:
+    P11: {candidate_id: FBG01, candidate_measured_wavelength_nm: 1527.813917}
+    P12: {candidate_id: FBG02, candidate_measured_wavelength_nm: 1532.074029}
+    P13: {candidate_id: FBG03, candidate_measured_wavelength_nm: 1536.272630}
+    P21: {candidate_id: FBG04, candidate_measured_wavelength_nm: 1540.087209}
+    P22: {candidate_id: FBG05, candidate_measured_wavelength_nm: 1544.339792}
+    P23: {candidate_id: FBG06, candidate_measured_wavelength_nm: 1547.790240}
+    P31: {candidate_id: FBG07, candidate_measured_wavelength_nm: 1551.672060}
+    P32: {candidate_id: FBG08, candidate_measured_wavelength_nm: 1555.766698}
+    P33: {candidate_id: FBG09, candidate_measured_wavelength_nm: 1559.838208}
+
+single_p22_existing:
+  profile: single_p22_existing
+  description: Current P22 profile, separate from the future 3x3 wavelength plan.
+  channels:
+    P22:
+      enabled: true
+      target_wavelength_nm: 1546.7124
+      measured_wavelength_nm: 1544.339792
+      measured_wavelength_source: live_100_frame_nine_peak_cluster_order_candidate
+      measured_wavelength_status: provisional_cluster_candidate
+      clean_no_contact_confirmed: false
+      search_half_width_nm: 1.0
+      peak_search_half_width_nm: 1.0
+      approval_status: provisional_pending_labelled_p22_press_confirmation
+
+future_3x3_plan:
+  profile: future_3x3_plan
+  enabled: false
+  real_3x3_enabled: false
+  status: preliminary_target_plan
+  channels:
+    P11: {target_wavelength_nm: 1540.0}
+    P12: {target_wavelength_nm: 1545.0}
+    P13: {target_wavelength_nm: 1550.0}
+    P21: {target_wavelength_nm: 1555.0}
+    P22: {target_wavelength_nm: 1560.0}
+    P23: {target_wavelength_nm: 1565.0}
+    P31: {target_wavelength_nm: 1570.0}
+    P32: {target_wavelength_nm: 1575.0}
+    P33: {target_wavelength_nm: 1580.0}
+
+channels:
+  P11:
+    enabled: false
+    role: future_array_placeholder
+    display_name: P11
+    target_wavelength_nm: 1540.0
+    search_half_width_nm: 1.0
+    x: -1
+    y: 1
+  P12:
+    enabled: false
+    role: future_array_placeholder
+    display_name: P12
+    target_wavelength_nm: 1545.0
+    search_half_width_nm: 1.0
+    x: -1
+    y: 0
+  P13:
+    enabled: false
+    role: future_array_placeholder
+    display_name: P13
+    target_wavelength_nm: 1550.0
+    search_half_width_nm: 1.0
+    x: -1
+    y: -1
+  P21:
+    enabled: false
+    role: future_array_placeholder
+    display_name: P21
+    target_wavelength_nm: 1555.0
+    search_half_width_nm: 1.0
+    x: 0
+    y: 1
+  P22:
+    enabled: true
+    role: single_point_demo
+    display_name: P22
+    target_wavelength_nm: 1560.0
+    search_half_width_nm: 1.0
+    peak_top_n_average: 5
+    x: 0
+    y: 0
+  P23:
+    enabled: false
+    role: future_array_placeholder
+    display_name: P23
+    target_wavelength_nm: 1565.0
+    search_half_width_nm: 1.0
+    x: 0
+    y: -1
+  P31:
+    enabled: false
+    role: future_array_placeholder
+    display_name: P31
+    target_wavelength_nm: 1570.0
+    search_half_width_nm: 1.0
+    x: 1
+    y: 1
+  P32:
+    enabled: false
+    role: future_array_placeholder
+    display_name: P32
+    target_wavelength_nm: 1575.0
+    search_half_width_nm: 1.0
+    x: 1
+    y: 0
+  P33:
+    enabled: false
+    role: future_array_placeholder
+    display_name: P33
+    target_wavelength_nm: 1580.0
+    search_half_width_nm: 1.0
+    x: 1
+    y: -1
+
+peak_extraction_method:
+  default: weighted_centroid_intensity
+  options:
+    - top_peak_max
+    - top5_mean
+    - top5_mean_peak_marker
+    - window_integrated_intensity
+    - weighted_centroid_intensity
+    - parabolic_peak_fit
+
+p22_spectral_feature_mode:
+  mode: auto
+  options: [peak, dip, auto]
+
+auto_peak_finder:
+  enabled: true
+  wavelength_min_nm: 1538.0
+  wavelength_max_nm: 1582.0
+  expected_peak_count: 9
+  min_peak_distance_nm: 3.0
+  max_peak_distance_nm: 7.0
+  min_prominence_ratio: 0.03
+  min_height_ratio: 0.05
+  smoothing_window_points: 7
+  max_allowed_offset_nm: 1.5
+  peak_width_min_nm: 0.02
+  peak_width_max_nm: 2.0
+  peak_snr_min: 3.0
+  min_abs_peak_intensity_counts: 100
+  min_match_peak_snr: 0.75
+  reject_zero_intensity_peaks: true
+  reject_dark_region_peaks: true
+  reject_peak_width_abnormal: warning_only
+  baseline_subtraction: true
+  allow_manual_review: true
+
+array_coupling:
+  enabled: false
+  model_type: none
+  simulation_model_type: shared_elastomer_mechanical_shift_proxy
+  calibration_matrix_file:
+  coupling_status: uncalibrated_mechanically_coupled_wavelength_shift
+  coupling_compensated: false
+  coupling_sources:
+    - shared_elastomer_mechanical_coupling
+    - fingertip_contact_area_coverage
+  calibration_required: true
+  notes: >
+    Wavelength-shift mode does not reuse the directional same-fiber optical
+    attenuation cascade from the intensity edition. Simulated neighboring
+    responses represent only contact-area coverage and mechanical coupling.
+
+baseline:
+  default_mode: frozen_baseline
+  available_modes: [manual_latest, frozen_baseline]
+  semantic_role: post_press_release_recovery_no_contact
+  operator_instruction: release contact, wait for the spectrum to stabilize, then set baseline
+  rolling_window_sec: 2.0
+  rolling_min_samples: 20
+  full_spectrum_minimum_samples: 20
+  full_spectrum_minimum_span_sec: 0.6
+  full_spectrum_noise_warning_ratio: 0.01
+  full_spectrum_noise_fail_ratio: 0.04
+  full_spectrum_drift_warning_ratio: 0.015
+  full_spectrum_drift_fail_ratio: 0.06
+  noise_warning_ratio: 0.04
+  noise_fail_ratio: 0.12
+
+quality:
+  dark_count_max: 20
+  saturation_count_min: 65000
+  saturation_fraction_warning: 0.02
+  low_signal_relative_warning: 0.05
+  peak_edge_margin_points: 3
+
+surface:
+  default_display_mode: raw_coupled_wavelength_shift_surface
+  visualization_mode_default: physical_proxy
+  surface_input_mode: raw_coupled_response_surface
+  surface_grid_size: 80
+  surface_sigma: 0.38
+  surface_clip_min: 0
+  surface_clip_max: 1
+  active_threshold: 0.02
+  active_absolute_threshold: 0.04
+  active_relative_threshold: 0.25
+  fallback_note: single-point P22 wavelength-shift fallback, not measured 3x3 array

@@ -1,0 +1,77 @@
+﻿thumb_holder_scene:
+  enabled: true
+  default_geometry_mode: thumb_holder
+  model_asset_url: ""
+  fallback_asset_url: /static/assets/models/thumb_holder.stl
+  fallback_placeholder_enabled: false
+  model_load_policy: glb_then_stl_else_blocked
+  source_step_path: ""
+  source_stl_path: "frontend/assets/models/thumb_holder.stl"
+  source_geometry_note: "Original CAD source remains private and is not included in this repository."
+  note: "The real thumb holder is a carrier. The existing deformable oval tactile surface is inserted into the thumb holder oval-like groove. The response is uncalibrated optical attenuation with no calibrated-force output."
+
+thumb_model:
+  visible: true
+  asset_path: frontend/assets/models/thumb_holder.glb
+  fallback_asset_path: frontend/assets/models/thumb_holder.stl
+  scale: [1.0, 1.0, 1.0]
+  rotation_deg: [0.0, 0.0, 90.0]
+  position: [0.0, -0.55, 0.0]
+
+thumb_model_transform:
+  scale: [1.0, 1.0, 1.0]
+  rotation_deg: [0.0, 0.0, 90.0]
+  position: [0.0, -0.55, 0.0]
+  holder_local_rotation_deg: [0.0, 0.0, -14.098]
+  holder_local_position: [0.0, 0.06, 0.0]
+  holder_local_scale: [1.0, 1.0, 1.0]
+  opacity: 0.42
+  wireframe: false
+  visible: true
+
+sensor_slot_surface:
+  visible: true
+  coordinate_space: thumb_model_local
+  slot_shape: stl_irregular_oval
+  position: [0.546, 0.674, -0.007]
+  rotation_deg: [0.0, 0.0, 90.0]
+  vertical_lift: 0.22
+  width_mm: 10.0
+  height_mm: 7.0
+  depth_mm: 1.0
+  z_offset_mm: 0.08
+
+sensor_slot_transform:
+  coordinate_space: thumb_model_local
+  slot_shape: stl_irregular_oval
+  position: [0.546, 0.674, -0.007]
+  rotation_deg: [0.0, 0.0, 90.0]
+  vertical_lift: 0.22
+  width_mm: 10.0
+  height_mm: 7.0
+  depth_mm: 1.0
+  z_offset_mm: 0.08
+  surface_scene_scale: [0.482, 0.268, 0.460]
+  boundary_profile:
+    source: stl_diff_groove_faces
+    angular_samples: 64
+    radial_scale: [0.998, 0.986, 0.954, 0.931, 0.910, 0.895, 0.886, 0.879, 0.872, 0.867, 0.868, 0.878, 0.894, 0.910, 0.945, 0.976, 0.994, 0.984, 0.966, 0.948, 0.940, 0.944, 0.960, 0.982, 1.022, 1.068, 1.068, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.063, 1.062, 1.022, 0.983, 0.949, 0.934, 0.932, 0.943, 0.962, 0.991, 0.993, 0.993, 0.948, 0.926, 0.904, 0.891, 0.885, 0.885, 0.888, 0.894, 0.899, 0.909, 0.921, 0.934, 0.963, 0.991]
+    note: "Extracted by differencing the original STL against the grooved STL; the groove is a non-regular capsule-like recess."
+  visible: true
+  opacity: 1.0
+
+scene_camera:
+  position: [5.4, 3.2, 5.2]
+  target: [0.0, -1.20, 0.0]
+
+visual_style:
+  thumb_material_color: "#d9e1e7"
+  thumb_slot_color: "#8fd0dc"
+  slot_outline_color: "#37a8c7"
+  response_surface_label: "Sensor slot surface"
+  allowed_operator_terms:
+    - Thumb holder mode
+    - Sensor slot surface
+    - Fingertip-scale planar tactile surface
+    - Raw optical attenuation response
+    - Not force-calibrated

@@ -1,0 +1,66 @@
+{
+  "validation_date": "2026-07-13",
+  "edition": "TOUCH System - Trained Static Spectrum Twin",
+  "port": 8640,
+  "primary_domain": "manual_broad_fingertip_static_spectrum",
+  "model_loaded_from_packaged_exe": true,
+  "model_error": null,
+  "runtime_baseline": {
+    "semantic_role": "post_press_release_recovery_no_contact",
+    "frames_ingested": 24,
+    "span_sec": 0.92,
+    "status": "stable_post_release_recovery_baseline",
+    "ready": true
+  },
+  "packaged_exe_inference_cases": [
+    {
+      "fixture": "P13_light_manual.csv",
+      "contact": "contact",
+      "position": "P13",
+      "force_level": "light",
+      "center_x": -1.0,
+      "center_y": -1.0,
+      "deformation_proxy": 0.3,
+      "passed": true
+    },
+    {
+      "fixture": "P22_hard_manual.csv",
+      "contact": "contact",
+      "position": "P22",
+      "force_level": "hard",
+      "center_x": 0.0,
+      "center_y": 0.0,
+      "deformation_proxy": 1.0,
+      "passed": true
+    },
+    {
+      "fixture": "P31_normal_manual.csv",
+      "contact": "contact",
+      "position": "P31",
+      "force_level": "normal",
+      "center_x": 1.0,
+      "center_y": 1.0,
+      "deformation_proxy": 0.62,
+      "passed": true
+    },
+    {
+      "fixture": "baseline_no_contact_late.csv",
+      "contact": "no_contact",
+      "position": null,
+      "force_level": null,
+      "deformation_proxy": 0.0,
+      "passed": true
+    }
+  ],
+  "browser_validation": {
+    "viewport": "1366x768",
+    "packaged_exe_page_title": "TOUCH System - Trained Static Spectrum Twin",
+    "trained_model_label_visible": true,
+    "position_label_visible": true,
+    "response_level_visible": true,
+    "console_errors": [],
+    "page_errors": [],
+    "forbidden_force_N_wording_absent": true
+  },
+  "all_checks_passed": true
+}

@@ -1,0 +1,49 @@
+{
+  "schema_version": "sense_static_data_audit_v1",
+  "data_root": "E:\\\u91cd\u8981\u6587\u6863\\\u5b9e\u9a8c\\\u67d4\u6027\u4f20\u611f\\\u5149\u7ea4\\Micro-FBG\\\u666e\u901aFBG\\data",
+  "dataset_sha256": "d1ffeac3433391c0ab678dbb7f17426b710feb3607da8dc1f39a928da1f9f56d",
+  "raw_files_are_immutable": true,
+  "file_count": 240,
+  "counts_by_sample_kind": {
+    "manual_press": 135,
+    "gauge_press": 90,
+    "no_contact": 15
+  },
+  "counts_by_manual_force": {
+    "hard": 45,
+    "normal": 45,
+    "light": 45
+  },
+  "counts_by_position": {
+    "P21": 25,
+    "P23": 25,
+    "P22": 25,
+    "P31": 25,
+    "P33": 25,
+    "P32": 25,
+    "P11": 25,
+    "P13": 25,
+    "P12": 25
+  },
+  "counts_by_gauge_force": {
+    "0.1N": 45,
+    "0.2N": 45
+  },
+  "quality_flag_counts": {},
+  "fatal_quality_record_count": 0,
+  "baseline_cluster_count": 2,
+  "baseline_cluster_sizes": [
+    10,
+    5
+  ],
+  "capture_start": "2026-07-13 15:15:32",
+  "capture_stop": "2026-07-13 16:20:57",
+  "device_temperature_min_c": 32.46,
+  "device_temperature_max_c": 33.16,
+  "engineered_feature_count": 216,
+  "full_hybrid_feature_count": 472,
+  "static_snapshot_not_time_series": true,
+  "no_contact_semantics": "post_press_release_recovery_no_contact",
+  "ideal_cold_start_baseline_available": false,
+  "cross_session_validation_available": false
+}

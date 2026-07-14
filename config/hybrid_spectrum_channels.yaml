@@ -1,0 +1,169 @@
+edition: bayspec_hybrid_spectral_recognition
+status: candidate_peak_map_pending_labelled_point_press_confirmation
+
+operating_scope:
+  primary_mode: global_3x3_hybrid_spectral_fingerprint
+  primary_input_scope: all_nine_wavelength_order_candidates_jointly
+  required_candidate_ids: [FBG01, FBG02, FBG03, FBG04, FBG05, FBG06, FBG07, FBG08, FBG09]
+  diagnostic_fallback_mode: single_p22_only
+  diagnostic_fallback_deployment_eligible: false
+  legacy_transport_channel: P22
+  legacy_transport_role: full_spectrum_transport_only
+  spatial_mapping_status: locked_pending_labelled_point_press_confirmation
+  real_array_activation_status: disabled_pending_mapping_and_real_contact_acceptance
+  semantics: global nine-peak spectral fingerprint is primary; P22 is legacy full-spectrum transport and diagnostic fallback only, never the recognition scope
+
+acquisition:
+  api_url: http://127.0.0.1:8630
+  expected_spectrum_points: 512
+  wavelength_unit: nm
+  intensity_unit: counts
+  group_key: trial_id
+  minimum_unique_frames_per_segment: 30
+  random_frame_split_allowed: false
+
+real_peak_cluster:
+  expected_peak_count: 9
+  expected_first_peak_nm: 1528.0
+  first_peak_tolerance_nm: 1.5
+  search_start_nm: 1526.5
+  search_stop_nm: 1561.5
+  mapping_status: wavelength_order_candidates_only
+  source: live_direct_sdk_100_frame_capture_20260712
+
+candidate_peak_discovery:
+  smoothing_window_points: 7
+  smoothing_polynomial_order: 2
+  minimum_peak_distance_nm: 2.5
+  minimum_absolute_prominence_counts: 1000.0
+  minimum_prominence_fraction_of_range: 0.03
+  minimum_peak_snr: 5.0
+  minimum_edge_margin_nm: 0.35
+  minimum_peak_width_nm: 0.05
+  maximum_peak_width_nm: 2.0
+  maximum_reference_offset_nm: 0.35
+  validation_block_frames: 100
+  minimum_block_match_rate: 1.0
+  maximum_block_center_std_pm: 20.0
+  semantics: wavelength-order candidates only; physical P11-P33 identity requires labelled point presses
+
+wavelength_order_candidates:
+  - {candidate_id: FBG01, provisional_channel_id: P11, center_nm: 1527.813917}
+  - {candidate_id: FBG02, provisional_channel_id: P12, center_nm: 1532.074029}
+  - {candidate_id: FBG03, provisional_channel_id: P13, center_nm: 1536.272630}
+  - {candidate_id: FBG04, provisional_channel_id: P21, center_nm: 1540.087209}
+  - {candidate_id: FBG05, provisional_channel_id: P22, center_nm: 1544.339792}
+  - {candidate_id: FBG06, provisional_channel_id: P23, center_nm: 1547.790240}
+  - {candidate_id: FBG07, provisional_channel_id: P31, center_nm: 1551.672060}
+  - {candidate_id: FBG08, provisional_channel_id: P32, center_nm: 1555.766698}
+  - {candidate_id: FBG09, provisional_channel_id: P33, center_nm: 1559.838208}
+
+feature_extraction:
+  peak_search_half_width_nm: 0.9
+  local_baseline_edge_fraction: 0.2
+  minimum_positive_weight: 1.0e-9
+  include_full_spectrum_residual_summary: true
+  feature_semantics:
+    - wavelength_shift
+    - peak_height_ratio
+    - integrated_area_ratio
+    - peak_width_change
+    - local_shape_change
+    - full_spectrum_residual
+
+peak_tracking_quality:
+  primary_shift_estimator: quality_fused_centroid_parabolic
+  supporting_estimators: [local_cross_correlation, weighted_centroid, parabolic_peak_fit]
+  maximum_cross_correlation_shift_nm: 0.5
+  minimum_peak_height_counts: 100.0
+  minimum_peak_snr: 3.0
+  minimum_cross_correlation: 0.65
+  maximum_estimator_disagreement_pm: 80.0
+  maximum_morphology_estimator_disagreement_pm: 30.0
+  physical_channel_identity_required_for_deployment: true
+  common_mode_correction:
+    enabled: true
+    method: median_of_valid_candidate_shifts
+    minimum_valid_peaks: 5
+    retain_raw_shift_features: true
+    interpretation: nuisance drift feature only, not temperature-strain decoupling
+
+engineering_acceptance:
+  no_contact_baseline_frames: 60
+  minimum_evaluation_frames: 300
+  minimum_valid_peak_rate: 0.995
+  maximum_cross_correlation_shift_std_pm: 3.0
+  maximum_quality_fused_shift_std_pm: 3.0
+  maximum_common_mode_corrected_shift_std_pm: 3.0
+  maximum_cross_correlation_frame_jump_pm: 10.0
+  minimum_median_cross_correlation: 0.98
+  maximum_estimator_disagreement_p95_pm: 20.0
+  maximum_frame_period_p99_sec: 0.75
+  maximum_between_segment_baseline_shift_pm: 10.0
+  maximum_between_segment_common_mode_corrected_shift_pm: 10.0
+  maximum_between_segment_peak_height_change_fraction: 0.10
+  minimum_between_segment_shape_correlation: 0.98
+  response_noise_gate_k: 5.0
+  minimum_response_gate_pm: 10.0
+  live_preflight:
+    minimum_unique_frames: 60
+    timeout_sec: 45.0
+    maximum_live_frame_age_sec: 2.0
+    maximum_frame_period_p99_sec: 0.75
+    required_candidate_peak_count: 9
+    require_direct_sdk_source: true
+    require_pending_physical_mapping: true
+    duplicate_polls_are_not_frame_drops: true
+  injected_shift_validation:
+    shift_values_pm: [-200, -100, -50, -20, -10, 10, 20, 50, 100, 200]
+    peak_amplitude_scales: [0.6, 1.0, 1.4]
+    replicates_per_condition: 12
+    minimum_valid_rate: 0.995
+    minimum_direction_accuracy: 0.99
+    maximum_quality_fused_p95_absolute_error_pm: 10.0
+  status: provisional_until_real_labelled_press_validation
+
+runtime_guard:
+  baseline_minimum_unique_frames: 60
+  maximum_baseline_age_sec: 120.0
+  maximum_backend_session_start_delta_sec: 1.0
+  integration_tolerance_ms: 1.0e-6
+  evaluation_unique_frames: 60
+  minimum_valid_peaks: 9
+  minimum_spectral_input_valid_rate: 0.995
+  maximum_no_contact_common_mode_shift_pm: 10.0
+  maximum_no_contact_corrected_shift_pm: 10.0
+  required_model_bundle_schema: hybrid_spectral_model_bundle_v2
+  require_feature_schema_fingerprint_match: true
+  require_config_fingerprint_match: true
+  require_grouped_trial_evaluation: true
+  require_real_contact_acceptance: true
+  require_final_physical_channel_mapping: true
+  block_synthetic_training_sources: true
+  require_segment_integrity_manifest: true
+  require_operator_no_contact_attestation: true
+  require_baseline_quality_pass: true
+  require_feature_provenance_verified: true
+  require_held_out_session_evaluation: true
+  require_global_array_feature_scope: true
+  prohibit_single_channel_fallback_deployment: true
+
+training:
+  labels: [no_contact, P11, P12, P13, P21, P22, P23, P31, P32, P33]
+  recognition_scope: global_3x3_hybrid_spectral_fingerprint
+  input_scope: all_nine_wavelength_order_candidates_jointly
+  split_strategy: grouped_by_trial_id
+  minimum_independent_trials_per_class: 5
+  minimum_backend_sessions_for_formal_evaluation: 3
+  transition_phases_included: false
+  eligible_phases: [no_contact, contact]
+  models: [logistic_regression, random_forest, extra_trees]
+  synthetic_results_validity: synthetic_dryrun_only
+
+physical_boundaries:
+  real_3x3_enabled: false
+  calibrated_force: false
+  force_N_output: false
+  channel_assignment_final: false
+  p22_fallback_role: legacy_transport_and_diagnostic_only
+  coupling_interpretation: mixed mechanical and optical coupling, not independent force pixels

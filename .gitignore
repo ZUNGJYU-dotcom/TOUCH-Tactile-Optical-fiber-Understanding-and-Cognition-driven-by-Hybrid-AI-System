@@ -1,0 +1,32 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Desktop packaging artifacts
+bayspec_wavelength_shift_app/build/
+bayspec_wavelength_shift_app/dist/
+bayspec_wavelength_shift_app/runtime_logs/
+bayspec_wavelength_shift_app/sdk_probe/
+bayspec_wavelength_shift_app/pyinstaller_build*.log
+
+# Runtime and editor state
+*.log
+*.tmp
+*.bak
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# Raw acquisition data belongs outside this software repository
+data/
+data collection/
+*.DAT
+
+# Delivery archives are published separately when needed
+*.zip

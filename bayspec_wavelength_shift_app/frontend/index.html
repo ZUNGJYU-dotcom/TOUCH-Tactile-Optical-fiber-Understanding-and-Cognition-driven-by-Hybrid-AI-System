@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TOUCH System - Trained Static Spectrum Twin</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/static/styles.css?v=fbg-wavelength-shift-pass1" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/static/vendor/three/build/three.module.js",
+          "three/addons/": "/static/vendor/three/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div class="app-shell operator-mode">
+      <header class="topbar">
+        <div class="title-zone">
+          <h1 class="touch-brand-title">
+            <span class="touch-brand-main">TOUCH</span>
+            <span class="touch-brand-tag">System</span>
+          </h1>
+          <div class="subline touch-brand-subtitle">BaySpec trained full-spectrum position and response-level edition</div>
+        </div>
+
+        <div class="status-strip" aria-label="Current system mode">
+          <span><small>Data source</small><strong id="sourceChip">SDK idle</strong></span>
+          <span><small>Mode</small><strong id="surfaceModeChip">Trained 9-position spectrum</strong></span>
+          <span><small>QA status</small><strong id="topQaStatus">waiting</strong></span>
+          <span class="diagnostics-only"><small>Peak map</small><strong id="peakMapChip">manual provisional</strong></span>
+          <span class="diagnostics-only"><small>Spectral windows</small><strong id="wavelengthPlanChip">model windows loading</strong></span>
+        </div>
+
+        <div class="control-zone">
+          <div class="control-inputs">
+            <label>
+              <span>Input source</span>
+              <select id="inputSourceSelect">
+                <option value="direct_sdk" selected>BaySpec direct SDK</option>
+                <option value="export_watch">Sense export watch</option>
+                <option value="http_ingest">HTTP decoded ingest</option>
+              </select>
+            </label>
+            <label>
+              <span>Channel</span>
+              <select id="channelSelect">
+                <option value="P11">P11</option>
+                <option value="P21">P21</option>
+                <option value="P31">P31</option>
+                <option value="P12">P12</option>
+                <option value="P22" selected>P22</option>
+                <option value="P32">P32</option>
+                <option value="P13">P13</option>
+                <option value="P23">P23</option>
+                <option value="P33">P33</option>
+                <option value="CH1">CH1</option>
+              </select>
+            </label>
+            <div class="view-toggle" aria-label="Display mode">
+              <button id="operatorModeButton" class="active" type="button">Operator</button>
+              <button id="diagnosticsModeButton" type="button">Diagnostics</button>
+            </div>
+          </div>
+          <div class="control-actions">
+            <button id="liveTwinButton" type="button" aria-pressed="false" title="Start direct BaySpec SDK acquisition">Live</button>
+            <button id="exportWatchButton" type="button" aria-pressed="false" title="Watch the Sense export folder for new spectra">Watch</button>
+            <button id="baselineButton" type="button" title="Release contact, wait for stable spectra, then set the recovery-state baseline">Set baseline</button>
+            <button id="pauseButton" type="button" aria-pressed="false" title="Hold the current display without stopping acquisition">Hold</button>
+            <button id="demoMenuButton" class="operator-only" type="button" aria-expanded="false" aria-pressed="false" aria-controls="demoModule" title="Open simulated single-finger response scenarios">Demo</button>
+            <button id="spectrumToggleButton" class="operator-only" type="button" aria-expanded="false" aria-controls="spectrumDrawer" title="Open spectrum evidence">Spectrum</button>
+            <button id="operatorDiagnosticsButton" class="operator-only" type="button" title="Open the diagnostic workspace">Diagnostics</button>
+          <button id="resetButton" class="diagnostics-only" type="button" title="Clear the current trace buffer">Reset</button>
+            <button id="settingsButton" type="button" aria-expanded="false" aria-controls="settingsPanel" title="Open display and camera settings">Settings</button>
+          <button id="ingestExportButton" class="diagnostics-only" type="button" title="Load the newest Sense export file">Ingest</button>
+          </div>
+        </div>
+      </header>
+
+      <div id="commandFeedback" class="command-feedback" role="status" aria-live="polite" aria-atomic="true" aria-hidden="true">
+        <span class="command-feedback-indicator" aria-hidden="true"></span>
+        <span id="commandFeedbackText">Ready</span>
+      </div>
+
+      <aside id="spectrumDrawer" class="spectrum-drawer" data-spectrum-state="missing" role="dialog" aria-label="Spectrum evidence" aria-hidden="true">
+        <div class="drawer-header">
+          <div>
+            <strong>Spectrum Evidence</strong>
+            <span id="spectrumStatusMain">Spectrum status: waiting</span>
+          </div>
+          <span id="spectrumChip" class="chip">overview</span>
+          <button id="spectrumCloseButton" type="button" aria-label="Close spectrum evidence" title="Close">&times;</button>
+        </div>
+        <div class="spectrum-empty-state">
+          <strong>No spectrum frame</strong>
+          <span>Start Live, Watch, ingest, or Demo to load optical evidence.</span>
+        </div>
+        <div class="drawer-spectrum-grid">
+          <div>
+            <div class="panel-heading compact">
+              <div>
+                <h2>9-FBG spectrum overview</h2>
+                <p id="spectrumAxisNote">FBG target peaks and detected peak markers</p>
+              </div>
+            </div>
+            <canvas id="spectrumCanvas" class="spectrum-canvas"></canvas>
+            <div class="spectrum-legend" aria-label="Spectrum marker legend">
+              <span><i class="target"></i>preliminary target</span>
+              <span><i class="detected"></i>detected / simulated peak</span>
+              <span><i class="dominant"></i>dominant channel</span>
+            </div>
+          </div>
+          <div>
+            <div class="panel-heading compact">
+              <div>
+                <h2 id="selectedSpectrumTitle">Selected peak zoom</h2>
+                <p id="selectedSpectrumStatus">Selected channel local peak view</p>
+              </div>
+              <span id="selectedSpectrumChip" class="chip">--</span>
+            </div>
+            <canvas id="selectedSpectrumCanvas" class="selected-spectrum-canvas"></canvas>
+            <div id="spectrumDiagnosticNote" class="axis-note">Wavelength calibration diagnostic: waiting.</div>
+          </div>
+        </div>
+      </aside>
+
+      <aside
+        id="settingsPanel"
+        class="settings-panel"
+        role="dialog"
+        aria-modal="false"
+        aria-labelledby="settingsPanelTitle"
+        aria-hidden="true"
+      >
+        <div class="settings-header">
+          <div>
+            <strong id="settingsPanelTitle">Display Settings</strong>
+            <span>View, evidence, and camera controls</span>
+          </div>
+          <button id="settingsCloseButton" type="button" aria-label="Close settings">Close</button>
+        </div>
+
+        <section class="settings-section">
+          <div class="section-label">SENSOR VIEW</div>
+          <div class="settings-button-grid">
+            <button id="settingsThumbHolderButton" type="button">Thumb holder</button>
+            <button id="settingsSurfaceOnlyButton" type="button">Surface only</button>
+          </div>
+          <button id="settingsResetCameraButton" class="settings-wide-button" type="button">Reset 3D view</button>
+        </section>
+
+        <section class="settings-section">
+          <div class="section-label">WORKSPACE</div>
+          <div class="settings-button-grid">
+            <button id="settingsOperatorModeButton" type="button">Operator</button>
+            <button id="settingsDiagnosticsModeButton" type="button">Diagnostics</button>
+          </div>
+          <button id="settingsSpectrumButton" class="settings-wide-button" type="button">Open spectrum evidence</button>
+        </section>
+
+        <div class="settings-footer-status" aria-label="Current display settings">
+          <span>Lab light</span>
+          <span>Free rotate enabled</span>
+        </div>
+      </aside>
+
+      <main class="dashboard">
+        <section class="left-panel panel">
+          <div class="hud-card response-hud">
+            <div class="hud-title-row">
+              <div>
+                <h2>Response Trace</h2>
+                <p id="signalQaSummary">waiting for wavelength data</p>
+              </div>
+              <span id="traceChip" class="chip">GLOBAL · IDLE</span>
+            </div>
+            <div class="trace-kpi-strip" aria-label="Response trace summary">
+              <span><small>Current</small><strong id="traceCurrentValue">--</strong></span>
+              <span><small>Peak</small><strong id="tracePeakValue">--</strong></span>
+              <span><small>History</small><strong id="traceHistoryValue">--</strong></span>
+            </div>
+            <canvas id="traceCanvas" class="chart-canvas"></canvas>
+          </div>
+
+          <div
+            class="hud-card summary-hud"
+            role="button"
+            tabindex="0"
+            aria-label="Open spectrum drawer"
+            aria-controls="spectrumDrawer"
+            aria-expanded="false"
+            title="Open spectrum evidence"
+          >
+            <div class="hud-title-row">
+              <div>
+                <h2>Full Spectrum Summary</h2>
+                <p id="opticalSummaryState">No spectrum frame</p>
+              </div>
+              <span class="chip">Spectrum</span>
+            </div>
+            <div class="optical-preview-shell" aria-label="Current optical spectrum preview">
+              <canvas id="opticalPreviewCanvas" class="optical-preview-canvas"></canvas>
+            </div>
+            <div class="optical-kpi-grid" aria-label="Full spectrum evidence summary values">
+              <div><span>Dominant λ</span><strong id="metricIntensity">--</strong></div>
+              <div><span>Δλ</span><strong id="metricRelative">--</strong></div>
+              <div><span>|Δλ|</span><strong id="metricLoss">--</strong></div>
+              <div><span>FBG candidates</span><strong id="numChangedPeaks">--</strong></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="twin-stage">
+          <div class="stage-header">
+            <div>
+              <h2 id="tactileSurfaceTitle">Thumb Tactile Surface</h2>
+              <span id="surfaceProxyCaption">Sensor slot response surface</span>
+            </div>
+            <div class="stage-actions">
+              <button id="thumbHolderModeButton" class="active" type="button">Thumb holder mode</button>
+              <button id="surfaceOnlyModeButton" type="button">Surface Only</button>
+              <button id="physicalProxyModeButton" class="diagnostics-only active" type="button">Physical proxy</button>
+              <button id="responseTerrainModeButton" class="diagnostics-only" type="button">Response terrain</button>
+              <div
+                id="couplingViewBadge"
+                class="coupling-badge"
+                title="Fingertip-sized array: one contact patch can cover multiple pixels and change multiple FBG peaks."
+              >Coupled wavelength response</div>
+              <div id="levelBadge" class="level-badge">Global spectral fingerprint</div>
+            </div>
+          </div>
+
+          <div class="surface-cockpit-grid">
+            <div id="threeMount" class="three-mount">
+              <div class="scene-caption">
+                <strong id="scenePrimaryCaption">Single-finger contact patch</strong>
+                <span id="surfaceModeNote">Raw coupled Bragg wavelength-shift response</span>
+              </div>
+              <div class="surface-orientation-cue" aria-label="Surface channel orientation">
+                <span class="surface-orientation-title">ARRAY ORIENTATION</span>
+                <span><b>P11</b><i>&rarr;</i><b>P21</b><i>&rarr;</i><b>P31</b></span>
+                <span><b>P11</b><i>&darr;</i><b>P12</b><i>&darr;</i><b>P13</b></span>
+              </div>
+              <div id="operatorAlert" class="operator-alert operator-only" role="status" aria-live="assertive" aria-atomic="true" aria-hidden="true">
+                <span id="operatorAlertSeverity" class="operator-alert-severity">WARNING</span>
+                <span id="operatorAlertMessage" class="operator-alert-message">Review signal status.</span>
+                <button id="operatorAlertDiagnosticsButton" type="button">Diagnostics</button>
+              </div>
+              <div class="pressure-scale" aria-hidden="true">
+                <span>large global |Δλ|</span>
+                <i></i>
+                <span>zero shift</span>
+              </div>
+            </div>
+            <div class="heatmap-panel diagnostics-only">
+              <div class="panel-heading compact">
+                <h2>2D Response Map</h2>
+                <span id="heatmapChip" class="chip">spatial mapping pending</span>
+              </div>
+              <canvas id="heatmapCanvas" class="heatmap-canvas"></canvas>
+              <div class="axis-note" id="heatmapAxisNote">Global FBG01-FBG09 spectrum only. Physical P11-P33 mapping is pending.</div>
+            </div>
+          </div>
+
+          <div class="stage-metrics diagnostics-only">
+            <div><span>Frame scope</span><strong id="stageChannel">GLOBAL 9-FBG</strong></div>
+            <div><span>Dominant channel</span><strong id="dominantChannel">--</strong></div>
+            <div class="diagnostics-only"><span>Frame sync</span><strong id="selectedView">--</strong></div>
+            <div class="diagnostics-only"><span>Peak wavelength / axis</span><strong id="stagePeak">--</strong></div>
+            <div><span>Wavelength shift</span><strong id="stageAttenuation">--</strong></div>
+            <div><span>Shift direction</span><strong id="stageRelative">--</strong></div>
+          </div>
+
+          <div id="demoReadout" class="demo-readout diagnostics-only">
+            <span>Demo: <strong id="demoCurrentLevel">off</strong></span>
+            <span>λ0: <strong id="demoBaseline">--</strong></span>
+            <span>λB: <strong id="demoCurrentIntensity">--</strong></span>
+            <span>Δλ: <strong id="demoCurrentAttenuation">--</strong></span>
+            <span id="demoReadoutNote">Synthetic wavelength-shift frames only; not live data and not physical calibration.</span>
+          </div>
+        </section>
+
+        <section class="right-panel panel">
+          <div class="operator-summary-card">
+            <div class="section-label">SURFACE SUMMARY</div>
+            <h3 id="surfaceResponseLevel">waiting</h3>
+            <div class="status-grid operator-summary-grid">
+              <div><span id="surfacePeakLabel">Peak |Δλ|</span><strong id="surfacePeak">--</strong></div>
+              <div><span>Active area</span><strong id="surfaceActiveArea">--</strong></div>
+              <div><span>Center position</span><strong id="surfaceCenter">--</strong></div>
+              <div><span>Dominant channel</span><strong id="surfaceDominantChannel">--</strong></div>
+              <div><span>Coupling status</span><strong id="surfaceRuleSource">coupled response</strong></div>
+              <div><span>Frame state</span><strong id="surfaceFrameState">IDLE</strong></div>
+            </div>
+          </div>
+
+          <div class="operator-footprint-card">
+            <div id="footprintTitle" class="section-label">GLOBAL FBG FINGERPRINT</div>
+            <div class="mini-array-grid" aria-label="Nine FBG wavelength-order fingerprint">
+              <div id="footprintP11" class="mini-pixel"><strong>FBG01</strong><span>--</span></div>
+              <div id="footprintP21" class="mini-pixel"><strong>FBG02</strong><span>--</span></div>
+              <div id="footprintP31" class="mini-pixel"><strong>FBG03</strong><span>--</span></div>
+              <div id="footprintP12" class="mini-pixel"><strong>FBG04</strong><span>--</span></div>
+              <div id="footprintP22" class="mini-pixel"><strong>FBG05</strong><span>--</span></div>
+              <div id="footprintP32" class="mini-pixel"><strong>FBG06</strong><span>--</span></div>
+              <div id="footprintP13" class="mini-pixel"><strong>FBG07</strong><span>--</span></div>
+              <div id="footprintP23" class="mini-pixel"><strong>FBG08</strong><span>--</span></div>
+              <div id="footprintP33" class="mini-pixel"><strong>FBG09</strong><span>--</span></div>
+            </div>
+            <p id="footprintNote">Wavelength-order candidates; physical P11-P33 mapping pending</p>
+          </div>
+
+          <div class="operator-band-card">
+            <div class="section-label">RESPONSE BAND</div>
+            <div class="response-band-track" aria-label="Normalized Bragg wavelength-shift response band">
+              <span id="responseBandMarker"></span>
+            </div>
+            <div class="response-band-labels">
+              <span>zero</span>
+              <span>small</span>
+              <span>moderate</span>
+              <span>large</span>
+            </div>
+            <strong id="responseBandValue">--</strong>
+          </div>
+
+          <nav class="diagnostic-tabs diagnostics-only" aria-label="Diagnostic workspaces" role="tablist">
+            <button class="active" data-diagnostic-tab="signal" type="button" role="tab" aria-selected="true">Signal</button>
+            <button data-diagnostic-tab="surface" type="button" role="tab" aria-selected="false">Surface</button>
+            <button data-diagnostic-tab="acquisition" type="button" role="tab" aria-selected="false">Acquisition</button>
+            <button data-diagnostic-tab="geometry" type="button" role="tab" aria-selected="false">Geometry</button>
+          </nav>
+
+          <div class="diagnostic-card-stack diagnostics-only">
+
+          <details class="prediction-card hero-card diagnostics-only diagnostic-card diagnostic-surface-state" data-diagnostic-group="surface">
+            <summary class="section-label">SURFACE STATE</summary>
+            <h3 id="diagnosticSurfaceResponseLevel">waiting</h3>
+            <p id="surfaceText" class="diagnostics-only">Global nine-FBG spectrum pending. Physical P11-P33 mapping is not approved.</p>
+            <div class="status-grid operator-summary-grid">
+              <div><span>Data source</span><strong>Global FBG01-FBG09 spectrum</strong></div>
+              <div><span>Coupling status</span><strong>coupled response</strong></div>
+              <div><span>Peak |Δλ|</span><strong>--</strong></div>
+              <div><span>Active area</span><strong>--</strong></div>
+              <div><span>Center x/y</span><strong>--</strong></div>
+              <div><span>Dominant channel</span><strong>--</strong></div>
+              <div class="diagnostics-only"><span>Response type</span><strong id="surfaceResponseType">Raw coupled Bragg wavelength-shift surface</strong></div>
+              <div class="diagnostics-only"><span>Coupling path</span><strong id="surfaceCouplingPath">contact area + mechanical coupling</strong></div>
+              <div class="diagnostics-only"><span>Strain / temperature decoupled</span><strong id="surfaceForceDecoupled">No</strong></div>
+              <div class="diagnostics-only"><span>Local map</span><strong id="surfaceLocalMapStatus">Not available yet</strong></div>
+              <div class="diagnostics-only"><span>Response level</span><strong id="responseLevel">waiting</strong></div>
+              <div class="diagnostics-only"><span>Live status</span><strong id="liveFreshness">--</strong></div>
+            </div>
+            <p id="responseText" class="small-note diagnostics-only">Waiting for decoded BaySpec Bragg wavelength input.</p>
+          </details>
+
+          <details class="prediction-card diagnostics-only diagnostic-card diagnostic-metrics-card" data-diagnostic-group="surface">
+            <summary class="section-label">SURFACE OVERVIEW</summary>
+            <div class="diagnostic-surface-kpi-grid" aria-label="Primary surface metrics">
+              <div><span>Peak response</span><strong id="surfacePeakDiagnostic">--</strong></div>
+              <div><span>Active area</span><strong id="surfaceActiveAreaDiagnostic">--</strong></div>
+              <div><span>Center x/y</span><strong id="surfaceCenterDiagnostic">--</strong></div>
+              <div><span>Dominant channel</span><strong id="surfaceDominantChannelDiagnostic">--</strong></div>
+            </div>
+            <div class="diagnostic-surface-state-row">
+              <div class="diagnostic-surface-interpretation"><span>Current interpretation</span><strong id="eventInterpretation">--</strong></div>
+              <div class="diagnostic-surface-quality"><span>QA</span><strong id="surfaceQualityStatus">--</strong></div>
+            </div>
+            <section class="diagnostic-coupling-evidence" aria-label="Coupling evidence">
+              <div class="diagnostic-evidence-heading"><strong>COUPLING EVIDENCE</strong><span>raw observed</span></div>
+              <div class="diagnostic-coupling-route"><span>Observed route</span><strong id="surfaceCouplingPathsDiagnostic">--</strong></div>
+              <div class="diagnostic-evidence-grid">
+                <div><span>Changed peaks</span><strong id="numChangedPeaksDiagnostic">--</strong></div>
+                <div><span>Path depth</span><strong id="surfaceMaxCouplingHopDiagnostic">--</strong></div>
+                <div><span>Primary peak</span><strong id="primaryObservedChannel">--</strong></div>
+                <div><span>Secondary peaks</span><strong id="secondaryChangedChannels">--</strong></div>
+              </div>
+            </section>
+            <details class="diagnostic-subsection diagnostic-advanced-surface">
+              <summary>Advanced surface morphology</summary>
+              <div class="status-grid">
+                <div><span>Mean response</span><strong id="surfaceMean">--</strong></div>
+                <div><span>Spread</span><strong id="surfaceSpread">--</strong></div>
+                <div><span>Observed peak sum</span><strong id="coupledPeakAttenuationSum">--</strong></div>
+                <div><span>Entropy</span><strong id="surfaceEntropy">--</strong></div>
+                <div><span>Responding channels</span><strong id="surfaceActiveChannels">--</strong></div>
+                <div><span>Trajectory</span><strong id="trajectoryNote">--</strong></div>
+                <div class="diagnostic-wide"><span>Raw coupling status</span><strong id="couplingStatus">--</strong></div>
+              </div>
+            </details>
+          </details>
+
+          <details class="prediction-card diagnostics-only diagnostic-card diagnostic-array-card" data-diagnostic-group="surface">
+            <summary class="section-label">ARRAY STATUS</summary>
+            <div class="status-grid">
+              <div><span>Real active channels</span><strong id="realActiveChannels">1</strong></div>
+              <div><span>Simulated channels</span><strong id="simulatedChannels">0</strong></div>
+              <div><span>Disabled channels</span><strong id="disabledChannels">8</strong></div>
+              <div><span>Wavelength grid</span><strong id="peakAxisTypeMirror">--</strong></div>
+              <div><span>Frame sync</span><strong id="arrayFrameSyncMirror">--</strong></div>
+              <div><span>QA warnings</span><strong id="qaWarningCount">--</strong></div>
+              <div class="diagnostics-only"><span>L/R asymmetry</span><strong id="surfaceLRAsymmetry">--</strong></div>
+              <div class="diagnostics-only"><span>T/B asymmetry</span><strong id="surfaceTBAsymmetry">--</strong></div>
+            </div>
+            <p id="surfaceQualityNote" class="small-note">single-point fallback surface</p>
+          </details>
+
+          <details class="prediction-card diagnostics-only diagnostic-card diagnostic-coupling-card" data-diagnostic-group="surface">
+            <summary class="section-label">COUPLING / RAW FRAME</summary>
+            <details class="diagnostic-subsection diagnostic-coupling-controls">
+              <summary>Coupling model controls</summary>
+              <div class="coupling-view-control">
+                <span>Coupling View</span>
+                <button id="rawCoupledViewButton" class="active" type="button">Raw coupled response</button>
+                <button id="idealIndependentViewButton" type="button">Ideal decoupled simulation</button>
+                <button id="couplingCompensatedViewButton" type="button" disabled>Coupling-compensated response</button>
+              </div>
+              <p id="couplingDiagnosticNote" class="small-note">Calibration matrix missing. Showing raw mechanically coupled wavelength-shift response.</p>
+              <p id="denseCouplingExplanation" class="small-note">
+                One fingertip patch can shift several FBG peaks through shared-elastomer mechanical coupling. The optical-intensity edition's directional bend-loss cascade is not reused here. A measured coupling matrix is required before local-response inversion.
+              </p>
+            </details>
+            <details class="diagnostic-raw-block">
+              <summary>Channel map and raw frame payload</summary>
+              <div id="channelGrid" class="channel-grid"></div>
+              <table id="arrayRawTable" class="raw-table"></table>
+              <pre id="arrayJsonPreview" class="json-preview">{}</pre>
+            </details>
+          </details>
+
+          <details class="prediction-card diagnostics-only diagnostic-card diagnostic-channel-card" data-diagnostic-group="signal" open>
+            <summary class="section-label">SIGNAL OVERVIEW</summary>
+            <div class="diagnostic-signal-identity" aria-label="Observed signal identity">
+              <div><span>Observed channel</span><strong id="diagnosticCurrentChannel">P22</strong></div>
+              <div><span>Frame source</span><strong id="diagnosticFrameSource">--</strong></div>
+            </div>
+            <div class="diagnostic-signal-kpi-grid" aria-label="Primary optical signal metrics">
+              <div><span>λ0 baseline</span><strong id="baselineIntensity">--</strong></div>
+              <div><span>Tracked λB</span><strong id="currentIntensity">--</strong></div>
+              <div><span>Signed Δλ</span><strong id="relativeIntensity">--</strong></div>
+              <div><span>Absolute |Δλ|</span><strong id="attenuationPercent">--</strong></div>
+            </div>
+            <details class="diagnostic-subsection diagnostic-derived-signal">
+              <summary>Wavelength tracking evidence</summary>
+              <div class="status-grid">
+                <div><span>Cross-correlation</span><strong id="deltaIntensity">--</strong></div>
+                <div><span>Normalized response</span><strong id="attenuationRatio">--</strong></div>
+                <div><span>Estimator agreement</span><strong id="intensityLoss">--</strong></div>
+                <div><span>Tracking method</span><strong id="responseBasis">--</strong></div>
+              </div>
+            </details>
+            <details class="diagnostic-subsection diagnostic-wavelength-provenance">
+              <summary>Wavelength provenance</summary>
+              <div class="status-grid">
+                <div><span>Current target wavelength</span><strong id="p22TargetWavelength">--</strong></div>
+                <div><span>Current measured wavelength</span><strong id="p22MeasuredWavelength">--</strong></div>
+                <div><span>Demodulation wavelength</span><strong id="p22DemodulationWavelength">--</strong></div>
+                <div><span>Measured source</span><strong id="p22MeasuredSource">--</strong></div>
+                <div><span>Measured status</span><strong id="p22MeasuredStatus">--</strong></div>
+                <div><span>Peak source</span><strong id="p22PeakSource">--</strong></div>
+              </div>
+            </details>
+          </details>
+
+          <details class="prediction-card diagnostics-only diagnostic-card diagnostic-frame-card" data-diagnostic-group="acquisition">
+            <summary class="section-label">ACQUISITION HEALTH</summary>
+            <div class="status-grid diagnostic-health-grid">
+              <div><span>Source</span><strong id="diagnosticSourceState">--</strong></div>
+              <div><span>Stream</span><strong id="diagnosticStreamState">--</strong></div>
+              <div><span>Current frame</span><strong id="diagnosticFrameState">--</strong></div>
+              <div><span>λ0 baseline</span><strong id="diagnosticBaselineState">--</strong></div>
+              <div><span>Frame sync</span><strong id="diagnosticFrameSyncState">--</strong></div>
+              <div><span>Spectrum</span><strong id="diagnosticSpectrumState">--</strong></div>
+              <div><span>Axis</span><strong id="diagnosticAxisState">--</strong></div>
+              <div><span>Data QA</span><strong id="diagnosticQaState">--</strong></div>
+            </div>
+            <details class="diagnostic-subsection diagnostic-advanced-frame">
+              <summary>Advanced frame evidence</summary>
+              <div class="status-grid">
+                <div><span>λ0 noise</span><strong id="baselineNoise">--</strong></div>
+                <div><span>Raw λ0 status</span><strong id="baselineStatus">--</strong></div>
+                <div><span>Raw QA status</span><strong id="qaStatus">--</strong></div>
+                <div><span>Axis type</span><strong id="peakAxisType">--</strong></div>
+                <div><span>Live frame count</span><strong id="datFrameCount">--</strong></div>
+                <div><span>Polarity status</span><strong id="polarityStatus">--</strong></div>
+                <div><span>Integration</span><strong id="integrationMs">--</strong></div>
+                <div><span>Buffered records</span><strong id="bufferedRecords">--</strong></div>
+                <div><span>Surface frame</span><strong id="surfaceFrameId">--</strong></div>
+                <div><span>Spectrum frame</span><strong id="spectrumFrameId">--</strong></div>
+                <div><span>Trace frame</span><strong id="traceFrameId">--</strong></div>
+                <div><span>Frame sync</span><strong id="frameSyncStatus">--</strong></div>
+                <div><span>Last frame time</span><strong id="lastUpdateTimestamp">--</strong></div>
+              </div>
+            </details>
+          </details>
+
+          <section class="prediction-card diagnostics-only diagnostic-card diagnostic-alignment-card" data-diagnostic-group="geometry">
+            <div class="section-label diagnostic-static-header">THUMB MODEL ALIGNMENT</div>
+            <div class="geometry-controls-scroll">
+            <div class="geometry-health-block">
+              <div class="status-grid compact-grid geometry-health-grid">
+                <div><span>Model load status</span><strong id="thumbModelLoadStatus">not_loaded</strong></div>
+                <div><span>Model asset</span><strong id="thumbModelAssetUrl">--</strong></div>
+                <div><span>Model message</span><strong id="thumbModelMessage">--</strong></div>
+              </div>
+              <button id="layoutCheckButton" type="button">Show layout check</button>
+              <div id="layoutCheckOverlay" class="layout-check hidden">
+                <strong>Layout check</strong>
+                <div class="layout-matrix">
+                  <span>P11</span><span>P21</span><span>P31</span>
+                  <span>P12</span><span>P22</span><span>P32</span>
+                  <span>P13</span><span>P23</span><span>P33</span>
+                </div>
+                <p>P11 to P12 to P13 is vertical downward.</p>
+                <p>P11 to P21 to P31 is horizontal rightward.</p>
+              </div>
+            </div>
+
+            <details class="geometry-control-group geometry-visibility-group" open>
+              <summary>Visibility &amp; inspection</summary>
+              <div class="alignment-grid geometry-toggle-grid">
+                <label><input id="thumbModelVisible" data-thumb-align-input type="checkbox" checked /> thumb model visible</label>
+                <label><input id="thumbSurfaceVisible" data-thumb-align-input type="checkbox" checked /> sensor surface visible</label>
+                <label><input id="thumbWireframeToggle" data-thumb-align-input type="checkbox" /> wireframe</label>
+              </div>
+              <div class="alignment-actions geometry-inspection-actions">
+                <button id="thumbShowSlotButton" type="button">Show Slot Surface</button>
+                <button id="thumbHideMeshButton" type="button">Hide Thumb Mesh</button>
+                <button id="thumbWireframeButton" type="button">Wireframe Thumb</button>
+              </div>
+            </details>
+
+            <details class="geometry-control-group">
+              <summary>Thumb mesh transform</summary>
+              <div class="alignment-grid">
+                <label>scale x<input id="thumbModelScaleX" data-thumb-align-input type="number" step="0.01" /></label>
+                <label>scale y<input id="thumbModelScaleY" data-thumb-align-input type="number" step="0.01" /></label>
+                <label>scale z<input id="thumbModelScaleZ" data-thumb-align-input type="number" step="0.01" /></label>
+                <label>rot x<input id="thumbModelRotX" data-thumb-align-input type="number" step="0.1" /></label>
+                <label>rot y<input id="thumbModelRotY" data-thumb-align-input type="number" step="0.1" /></label>
+                <label>rot z<input id="thumbModelRotZ" data-thumb-align-input type="number" step="0.1" /></label>
+                <label>pos x<input id="thumbModelPosX" data-thumb-align-input type="number" step="0.01" /></label>
+                <label>pos y<input id="thumbModelPosY" data-thumb-align-input type="number" step="0.01" /></label>
+                <label>pos z<input id="thumbModelPosZ" data-thumb-align-input type="number" step="0.01" /></label>
+                <label>opacity<input id="thumbModelOpacity" data-thumb-align-input type="number" min="0" max="1" step="0.01" /></label>
+              </div>
+            </details>
+
+            <details class="geometry-control-group">
+              <summary>Sensor slot transform</summary>
+              <div class="alignment-grid">
+                <label>slot pos x<input id="thumbSlotPosX" data-thumb-align-input type="number" step="0.01" /></label>
+                <label>slot pos y<input id="thumbSlotPosY" data-thumb-align-input type="number" step="0.01" /></label>
+                <label>slot pos z<input id="thumbSlotPosZ" data-thumb-align-input type="number" step="0.01" /></label>
+                <label>slot rot x<input id="thumbSlotRotX" data-thumb-align-input type="number" step="0.1" /></label>
+                <label>slot rot y<input id="thumbSlotRotY" data-thumb-align-input type="number" step="0.1" /></label>
+                <label>slot rot z<input id="thumbSlotRotZ" data-thumb-align-input type="number" step="0.1" /></label>
+                <label>slot scale x<input id="thumbSlotScaleX" data-thumb-align-input type="number" step="0.01" /></label>
+                <label>slot scale y<input id="thumbSlotScaleY" data-thumb-align-input type="number" step="0.01" /></label>
+                <label>slot scale z<input id="thumbSlotScaleZ" data-thumb-align-input type="number" step="0.01" /></label>
+                <label>slot width mm<input id="thumbSlotWidthMm" data-thumb-align-input type="number" step="0.1" /></label>
+                <label>slot height mm<input id="thumbSlotHeightMm" data-thumb-align-input type="number" step="0.1" /></label>
+                <label>slot depth mm<input id="thumbSlotDepthMm" data-thumb-align-input type="number" step="0.1" /></label>
+              </div>
+            </details>
+            </div>
+
+            <div class="geometry-save-bar">
+              <div class="alignment-actions">
+                <button id="thumbAlignmentSaveButton" type="button">Save Alignment</button>
+                <button id="thumbAlignmentResetButton" type="button">Reset Alignment</button>
+              </div>
+              <p id="thumbAlignmentSaveStatus" class="small-note">alignment config writes to config/thumb_holder_scene.yaml</p>
+            </div>
+          </section>
+
+          <details class="prediction-card diagnostics-only diagnostic-card diagnostic-bridge-card" data-diagnostic-group="acquisition">
+            <summary class="section-label">SOURCE ADAPTER</summary>
+            <div class="status-grid compact-grid">
+              <div><span>Sense process</span><strong id="senseProcess">--</strong></div>
+              <div><span>Frame age</span><strong id="frameAge">--</strong></div>
+              <div><span>Acquisition adapter</span><strong id="watchStatus">--</strong></div>
+              <div><span>Input detail</span><strong id="latestExport">--</strong></div>
+              <div><span>Frames ingested</span><strong id="watchIngestCount">--</strong></div>
+              <div><span>Channels seen</span><strong id="channelsSeen">--</strong></div>
+              <div><span>Adapter message</span><strong id="watchError">--</strong></div>
+            </div>
+          </details>
+          </div>
+
+          <details id="demoModule" class="demo-module prediction-card" data-diagnostic-group="surface">
+            <summary>
+              <strong>Demo</strong>
+              <span id="demoStatusChip">ready</span>
+            </summary>
+            <div class="demo-buttons">
+              <button class="demo-step" data-demo-level="no_contact" type="button">Legacy P22 fallback</button>
+              <button class="array-demo-step" data-array-scenario="center_press" type="button">Center contact</button>
+              <button class="array-demo-step" data-array-scenario="off_center_fingertip_contact" type="button">Off-center contact</button>
+              <button class="array-demo-step" data-array-scenario="broad_fingertip_contact" type="button">Broad contact</button>
+              <button class="array-demo-step" data-array-scenario="vertical_slide_p11_p12_p13" type="button">Vertical slide</button>
+              <button class="array-demo-step" data-array-scenario="horizontal_slide_p11_p21_p31" type="button">Horizontal slide</button>
+              <button class="array-demo-step" data-array-scenario="diagonal_slide_p11_p22_p33" type="button">Diagonal slide</button>
+              <button class="array-demo-step" data-array-scenario="tap" type="button">Fingertip tap</button>
+              <button class="array-demo-step" data-array-scenario="release" type="button">Release</button>
+              <button id="demoAutoButton" class="diagnostics-only" type="button">Start auto demo</button>
+              <button id="demoResetButton" class="diagnostics-only" type="button">Reset demo</button>
+              <button id="nodeDebugButton" class="diagnostics-only" type="button">Node overlay</button>
+            </div>
+          </details>
+        </section>
+      </main>
+
+    </div>
+    <script type="module" src="/static/app.js?v=response-consistency-bottom-logic-v4"></script>
+  </body>
+</html>

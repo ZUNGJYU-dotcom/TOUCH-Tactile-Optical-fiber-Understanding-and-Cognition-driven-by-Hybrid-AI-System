@@ -1,0 +1,29 @@
+TOUCH System - Trained Static Spectrum Twin
+Validation date: 2026-07-13
+
+Python regression suite:
+- 27 tests passed
+- 0 failed
+- command: python -m unittest discover -s tests -p test_*.py -v
+
+Frontend syntax:
+- app.js passed node --check
+
+Packaged EXE smoke test:
+- API health ready
+- trained model loaded from _internal/models
+- model error: none
+- real_3x3_enabled: false
+- 24-frame recovery baseline accepted
+- P13 light passed
+- P22 hard passed
+- P31 normal passed
+- no-contact deformation suppression passed
+
+Packaged browser validation:
+- viewport 1366x768
+- title correct
+- trained model, P22, and hard labels visible
+- console errors: 0
+- page errors: 0
+- force_N wording absent

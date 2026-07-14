@@ -1,0 +1,37 @@
+{
+  "ok": true,
+  "output_dir": "E:\\\u91cd\u8981\u6587\u6863\\\u5b9e\u9a8c\\\u67d4\u6027\u4f20\u611f\\\u5149\u7ea4\\Micro-FBG\\\u666e\u901aFBG\\\u7b97\u6cd5\\bayspec_hybrid_spectral_recognition_edition\\outputs\\ordinary_fbg_static_baseline_20260713_v4_recovery_final",
+  "bundle_path": "E:\\\u91cd\u8981\u6587\u6863\\\u5b9e\u9a8c\\\u67d4\u6027\u4f20\u611f\\\u5149\u7ea4\\Micro-FBG\\\u666e\u901aFBG\\\u7b97\u6cd5\\bayspec_hybrid_spectral_recognition_edition\\outputs\\ordinary_fbg_static_baseline_20260713_v4_recovery_final\\models\\static_spectral_recognition_bundle.joblib",
+  "selected_models": {
+    "contact_detector": {
+      "model_id": "logistic_regression",
+      "feature_set": "current_shape",
+      "accuracy": 1.0,
+      "macro_f1": 1.0
+    },
+    "position_classifier": {
+      "model_id": "extra_trees",
+      "feature_set": "current_shape",
+      "accuracy": 1.0,
+      "macro_f1": 1.0
+    },
+    "manual_force_classifier": {
+      "model_id": "extra_trees",
+      "feature_set": "engineered",
+      "accuracy": 0.9777777777777777,
+      "macro_f1": 0.9777750339548094
+    },
+    "position_conditioned_force_classifier": {
+      "model_id": "extra_trees",
+      "feature_set": "engineered",
+      "accuracy": 0.9777777777777777,
+      "macro_f1": 0.9777750339548094
+    }
+  },
+  "hierarchical_manual_oof": {
+    "num_manual_spectra": 135,
+    "position_and_force_both_correct_accuracy": 0.9777777777777777,
+    "joint_27_class_macro_f1": 0.9777029554807333
+  },
+  "deployment_status": "baseline_pending_cross_session_validation"
+}

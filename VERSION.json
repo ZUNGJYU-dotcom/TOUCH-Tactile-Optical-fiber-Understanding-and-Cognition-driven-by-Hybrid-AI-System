@@ -1,0 +1,23 @@
+{
+  "product": "TOUCH System",
+  "edition": "Ordinary FBG Trained Static Spectrum Twin",
+  "build_id": "static-spectrum-v4-recovery-baseline",
+  "release_channel": "private_research",
+  "primary_signal": "512_point_bayspec_full_spectrum",
+  "primary_method": "hierarchical_static_spectral_classification",
+  "contact_model": "logistic_regression_current_shape",
+  "position_model": "extra_trees_current_shape",
+  "response_level_model": "position_conditioned_extra_trees_engineered",
+  "runtime_baseline": "stable_multiframe_post_release_recovery_median",
+  "training_no_contact_semantics": "post_press_release_recovery_no_contact",
+  "local_port": 8640,
+  "pd_voltage_edition_included": false,
+  "optical_intensity_edition_included": false,
+  "provisional_wavelength_shift_edition_included": false,
+  "position_classes": 9,
+  "response_level_classes": ["light", "normal", "hard"],
+  "hybrid_spectral_model_trained": true,
+  "evaluation_scope": "single_session_leave_one_repeat_index_out",
+  "real_3x3_enabled": false,
+  "calibrated_force_output": false
+}

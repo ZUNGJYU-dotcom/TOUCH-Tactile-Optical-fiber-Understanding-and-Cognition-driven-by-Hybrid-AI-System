@@ -1,0 +1,90 @@
+schema_version: sense_static_spectrum_training_v1
+
+data_root: "E:/重要文档/实验/柔性传感/光纤/Micro-FBG/普通FBG/data"
+data_semantics: one_static_full_spectrum_snapshot_per_csv
+no_contact_semantics: post_press_release_recovery_no_contact
+no_contact_capture_context: baseline spectra were generally captured after a press was released and the sensor recovered
+expected_spectrum_points: 512
+expected_peak_count: 9
+saturation_threshold_counts: 65500
+cv_folds: 5
+
+dataset_folders:
+  no_contact: 无接触
+  manual_press: 人手按压局部区域
+  gauge_press: 推拉力计按压光栅点
+
+position_folder_mapping:
+  左上: P11
+  左中: P12
+  左下: P13
+  中上: P21
+  中中: P22
+  中下: P23
+  右上: P31
+  右中: P32
+  右下: P33
+
+manual_force_mapping:
+  轻微力: light
+  正常力: normal
+  大力: hard
+
+feature_extraction:
+  common_grid_points: 512
+  full_spectrum_bins: 64
+  baseline_cluster_gap_minutes: 15
+  baseline_strategy: time_local_cluster_median_with_linear_interpolation
+  no_contact_strategy: leave_one_out_within_baseline_cluster
+  runtime_baseline_strategy: stable_multiframe_post_release_recovery_median
+
+evaluation:
+  split_strategy: leave_one_repeat_index_out
+  random_snapshot_split_allowed: false
+  cross_session_validation_available: false
+  model_selection_metric: macro_f1
+  repeat_groups: [1, 2, 3, 4, 5]
+
+training_tasks:
+  contact_detector:
+    labels: [no_contact, contact]
+    sources: [no_contact, manual_press]
+  position_classifier:
+    labels: [P11, P21, P31, P12, P22, P32, P13, P23, P33]
+    sources: [manual_press]
+    semantics: primary_hand_press_position_model
+  manual_force_classifier:
+    labels: [light, normal, hard]
+    sources: [manual_press]
+    semantics: subjective_manual_force_level_not_calibrated_force
+  position_conditioned_force_classifier:
+    labels: [light, normal, hard]
+    sources: [manual_press]
+    conditioning_key: predicted_position
+    semantics: position_specific_manual_force_level_not_calibrated_force
+  gauge_position_reference:
+    labels: [P11, P21, P31, P12, P22, P32, P13, P23, P33]
+    sources: [gauge_press]
+    semantics: separate_gauge_contact_domain_reference
+  gauge_force_reference:
+    labels: [0.1N, 0.2N]
+    sources: [gauge_press]
+    semantics: separate_calibrated_force_reference_task
+
+digital_twin_contract:
+  no_contact_position: null
+  position_coordinates:
+    P11: [-1.0, 1.0]
+    P21: [0.0, 1.0]
+    P31: [1.0, 1.0]
+    P12: [-1.0, 0.0]
+    P22: [0.0, 0.0]
+    P32: [1.0, 0.0]
+    P13: [-1.0, -1.0]
+    P23: [0.0, -1.0]
+    P33: [1.0, -1.0]
+  deformation_proxy:
+    light: 0.30
+    normal: 0.62
+    hard: 1.00
+  force_output_semantics: approximate_manual_level_not_force_N
