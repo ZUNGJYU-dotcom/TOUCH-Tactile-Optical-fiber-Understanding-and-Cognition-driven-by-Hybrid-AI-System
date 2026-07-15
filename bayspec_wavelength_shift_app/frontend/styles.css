@@ -233,7 +233,7 @@ button.active-watch,
 }
 
 .diagnostics-mode .status-strip {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .operator-mode .diagnostics-only {
@@ -307,6 +307,39 @@ button.active-watch,
 .demo-buttons button {
   height: 28px;
   font-size: 12px;
+}
+
+.demo-speed-control {
+  flex: 1 0 100%;
+  display: grid;
+  grid-template-columns: minmax(96px, auto) minmax(96px, 1fr) 48px;
+  gap: 8px;
+  align-items: center;
+  min-height: 34px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f7fbfe;
+  color: #31536b;
+}
+
+.demo-speed-control label {
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.demo-speed-control input[type="range"] {
+  width: 100%;
+  accent-color: var(--blue);
+}
+
+.demo-speed-control output {
+  color: #0b7eae;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 900;
+  text-align: right;
 }
 
 #demoAutoButton {
@@ -1426,6 +1459,12 @@ button.active-watch,
   padding: 9px;
 }
 
+.operator-mode .demo-speed-control {
+  grid-column: 1 / -1;
+  background: #f4f9fc;
+  border-color: #c8dce9;
+}
+
 .operator-mode .demo-buttons button {
   width: 100%;
   justify-content: center;
@@ -2027,6 +2066,19 @@ button.active-watch,
 .operator-mode #operatorDiagnosticsButton,
 .operator-mode #settingsButton {
   display: inline-flex !important;
+}
+
+.operator-mode #operatorDiagnosticsButton.attention-required {
+  border-color: #b82f3a !important;
+  background: #c93f49 !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 0 3px rgba(201, 63, 73, 0.14) !important;
+}
+
+.operator-mode #operatorDiagnosticsButton.attention-required:hover,
+.operator-mode #operatorDiagnosticsButton.attention-required:focus-visible {
+  border-color: #94242d !important;
+  background: #af303b !important;
 }
 
 .operator-mode #spectrumToggleButton {

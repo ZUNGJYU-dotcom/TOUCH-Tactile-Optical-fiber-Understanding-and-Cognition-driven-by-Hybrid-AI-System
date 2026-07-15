@@ -1,0 +1,77 @@
+schema_version: sense_dynamic_press_sequence_v1
+
+data_root: "../../data/时间序列数据"
+reference_spectrum_csv: "../../data/无接触/Spectrum_F1871328_20260713151534.csv"
+peak_config_path: "config/hybrid_spectrum_channels.yaml"
+
+source_semantics:
+  sequence_order: [no_contact, light, normal, hard, release]
+  force_semantics: approximate_manual_response_level_not_force_N
+  filename_semantics: position_only
+  real_3x3_enabled: false
+
+acquisition:
+  spectrum_points: 512
+  frame_interval_sec: 0.04
+  frame_interval_status: estimated_from_40_ms_sense_integration_setting
+  dat_layout: auto_detect_512_or_513_words
+  immutable_source_files: true
+
+capture_group_mapping:
+  第一组: G1
+  第二组: G2
+  第三组: G3
+
+position_mapping:
+  左上: P11
+  左中: P12
+  左下: P13
+  中上: P21
+  中中: P22
+  中下: P23
+  右上: P31
+  右中: P32
+  右下: P33
+
+baseline:
+  initial_seconds: 1.5
+  minimum_frames: 30
+  maximum_frames: 60
+  semantics: initial_no_contact_before_light_press
+
+segmentation:
+  stage_order: [no_contact, light, normal, hard, release]
+  boundary_method: ordered_positive_transition_search
+  smoothing_sigma_frames: 4.0
+  minimum_segment_frames: 24
+  minimum_release_fraction: 0.10
+  release_search_start_fraction: 0.50
+  release_drop_min_absolute: 0.12
+  release_drop_min_hard_fraction: 0.20
+  recovered_tail_max_hard_fraction: 0.35
+  stable_trim_fraction: 0.18
+  transition_guard_frames: 8
+  minimum_stable_frames: 20
+  label_transition_frames_for_training: false
+  transition_gain_window_fraction: 0.02
+  transition_gain_min_window_frames: 12
+  transition_peak_min_prominence_absolute: 0.002
+  transition_peak_min_prominence_fraction: 0.004
+  transition_candidate_anchor_fractions: [0.22, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+  boundary_plateau_trim_fraction: 0.15
+  stage_level_min_increment_fraction: 0.025
+  stage_level_span_weight: 0.50
+  stage_monotonic_shortfall_weight: 8.0
+  stage_nonmonotonic_penalty_weight: 4.0
+  contact_duration_cv_penalty_weight: 0.70
+  plateau_variability_penalty_weight: 0.35
+  weak_transition_gain_fraction: 0.01
+  contact_duration_cv_warning: 0.65
+  boundary_score_margin_warning: 0.005
+
+windowing:
+  time_steps: 20
+  stride_frames: 4
+  frame_feature_scope: nine_peak_mixed_shift_intensity_shape
+  split_strategy: leave_one_capture_group_out
+  random_frame_split_allowed: false

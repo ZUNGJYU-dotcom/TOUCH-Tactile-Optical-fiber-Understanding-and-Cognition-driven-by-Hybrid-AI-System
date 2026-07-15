@@ -1,4 +1,4 @@
-"""Desktop launcher for the trained BaySpec static-spectrum digital twin."""
+"""Desktop launcher for the TOUCH temporal spectral validation twin."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import uvicorn
 import webview
 
 
-APP_TITLE = "TOUCH System - Trained Static Spectrum Twin"
+APP_TITLE = "TOUCH System - Temporal Spectral Validation"
 DEFAULT_PORT = 8640
 EXPECTED_BACKEND_APP = "TOUCH System Trained Static Spectrum Twin"
 EXPECTED_BACKEND_MODE = "standalone_bayspec_trained_static_spectrum_twin"
@@ -60,8 +60,15 @@ def show_error(title: str, message: str) -> None:
 def configure_runtime_paths() -> Path:
     app_root = bundle_root()
     os.environ["BAYSPEC_WAVELENGTH_APP_ROOT"] = str(app_root)
-    if str(app_root) not in sys.path:
-        sys.path.insert(0, str(app_root))
+    runtime_roots = [app_root]
+    if not is_frozen():
+        # Source launches import the shared recognition code from the project
+        # level ``src`` package. Frozen builds bundle that package beside the
+        # launcher and therefore continue to use app_root only.
+        runtime_roots.append(app_root.parent)
+    for runtime_root in reversed(runtime_roots):
+        if str(runtime_root) not in sys.path:
+            sys.path.insert(0, str(runtime_root))
     return app_root
 
 

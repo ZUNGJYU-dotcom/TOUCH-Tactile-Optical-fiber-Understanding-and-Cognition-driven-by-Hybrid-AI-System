@@ -15,13 +15,14 @@ import math
 import os
 from pathlib import Path
 import subprocess
-import struct
 import sys
 import threading
 import time
 from typing import Any
 
 import numpy as np
+
+from src.hybrid_spectrum.sense_fast_dat import read_sense_fast_dat
 
 try:
     import yaml
@@ -172,6 +173,15 @@ DEFAULT_CHANNEL_CONFIG = {
         "update_when_attenuation_below": 0.04,
         "noise_warning_ratio": 0.04,
         "noise_fail_ratio": 0.12,
+        "trusted_session_anchor": {
+            "enabled": True,
+            "normalized_shape_rms_warning": 0.015,
+            "normalized_shape_rms_fail": 0.03,
+            "normalized_shape_peak_warning": 0.08,
+            "normalized_shape_peak_fail": 0.18,
+            "shape_correlation_warning": 0.999,
+            "shape_correlation_fail": 0.995,
+        },
     },
     "quality": {
         "dark_count_max": 20,
@@ -484,6 +494,10 @@ class BaySpecWavelengthShiftBridge:
         self.baseline_spectrum_span_sec_by_channel: dict[str, float] = {}
         self.baseline_spectrum_status_by_channel: dict[str, str] = {}
         self.baseline_spectrum_semantic_role_by_channel: dict[str, str] = {}
+        self.trusted_baseline_anchor_spectrum_by_channel: dict[
+            str, dict[str, list[float]]
+        ] = {}
+        self.baseline_anchor_comparison_by_channel: dict[str, dict[str, Any]] = {}
         self.previous_tracked_wavelength_by_channel: dict[str, float] = {}
         self.baseline_noise_by_channel: dict[str, float] = {}
         self.baseline_noise_ratio_by_channel: dict[str, float] = {}
@@ -527,6 +541,8 @@ class BaySpecWavelengthShiftBridge:
                 self.baseline_spectrum_span_sec_by_channel.clear()
                 self.baseline_spectrum_status_by_channel.clear()
                 self.baseline_spectrum_semantic_role_by_channel.clear()
+                self.trusted_baseline_anchor_spectrum_by_channel.clear()
+                self.baseline_anchor_comparison_by_channel.clear()
                 self.baseline_noise_by_channel.clear()
                 self.baseline_noise_ratio_by_channel.clear()
                 self.baseline_sample_count_by_channel.clear()
@@ -558,6 +574,9 @@ class BaySpecWavelengthShiftBridge:
                 ),
                 "baseline_spectrum_status_by_channel": dict(
                     sorted(self.baseline_spectrum_status_by_channel.items())
+                ),
+                "baseline_anchor_comparison_by_channel": dict(
+                    sorted(self.baseline_anchor_comparison_by_channel.items())
                 ),
                 "global_candidate_baseline_ready": bool(
                     len(self.global_candidate_baseline_by_id) == 9
@@ -1201,10 +1220,7 @@ class BaySpecWavelengthShiftBridge:
         center = _median(wavelengths)
         if center is None:
             return False
-        self.baseline_wavelength_by_channel[channel_id] = float(center)
         noise_nm = _mad_std(wavelengths) or 0.0
-        self.baseline_wavelength_noise_pm_by_channel[channel_id] = float(noise_nm * 1000.0)
-        self.baseline_wavelength_sample_count_by_channel[channel_id] = len(wavelengths)
 
         spectrum_records: list[tuple[np.ndarray, np.ndarray, float | None]] = []
         for record in records:
@@ -1261,6 +1277,72 @@ class BaySpecWavelengthShiftBridge:
                 spectrum_status = "stable_post_release_recovery_baseline_with_warning"
             else:
                 spectrum_status = "stable_post_release_recovery_baseline"
+
+            accepted_internal_statuses = {
+                "stable_post_release_recovery_baseline",
+                "stable_post_release_recovery_baseline_with_warning",
+            }
+            anchor_assessment = self._assess_recovery_baseline_against_anchor(
+                channel_id,
+                reference_x,
+                median_spectrum,
+            )
+            self.baseline_anchor_comparison_by_channel[channel_id] = anchor_assessment
+            if spectrum_status in accepted_internal_statuses and anchor_assessment[
+                "status"
+            ] == "recovery_residual_detected":
+                self.baseline_spectrum_sample_count_by_channel[channel_id] = sample_count
+                self.baseline_spectrum_noise_ratio_by_channel[channel_id] = noise_ratio
+                self.baseline_spectrum_drift_ratio_by_channel[channel_id] = drift_ratio
+                self.baseline_spectrum_span_sec_by_channel[channel_id] = span_sec
+                self.baseline_spectrum_status_by_channel[channel_id] = (
+                    "recovery_residual_detected"
+                )
+                self.baseline_spectrum_semantic_role_by_channel[channel_id] = str(
+                    BAYSPEC_CHANNEL_CONFIG.get("baseline", {}).get("semantic_role")
+                    or "post_press_release_recovery_no_contact"
+                )
+                return False
+
+            if spectrum_status not in accepted_internal_statuses:
+                # Preserve the legacy single-spectrum wavelength-shift path,
+                # but keep the static classifier blocked until the multiframe
+                # baseline contract is satisfied.
+                self.baseline_wavelength_by_channel[channel_id] = float(center)
+                self.baseline_wavelength_noise_pm_by_channel[channel_id] = float(
+                    noise_nm * 1000.0
+                )
+                self.baseline_wavelength_sample_count_by_channel[channel_id] = len(
+                    wavelengths
+                )
+                self.baseline_spectrum_by_channel[channel_id] = {
+                    "wavelength_nm": reference_x.astype(float).tolist(),
+                    "intensity": median_spectrum.astype(float).tolist(),
+                }
+                self.baseline_spectrum_sample_count_by_channel[channel_id] = sample_count
+                self.baseline_spectrum_noise_ratio_by_channel[channel_id] = noise_ratio
+                self.baseline_spectrum_drift_ratio_by_channel[channel_id] = drift_ratio
+                self.baseline_spectrum_span_sec_by_channel[channel_id] = span_sec
+                self.baseline_spectrum_status_by_channel[channel_id] = spectrum_status
+                self.baseline_spectrum_semantic_role_by_channel[channel_id] = str(
+                    BAYSPEC_CHANNEL_CONFIG.get("baseline", {}).get("semantic_role")
+                    or "post_press_release_recovery_no_contact"
+                )
+                return False
+
+            if anchor_assessment["status"] == "trusted_anchor_initialized":
+                self.trusted_baseline_anchor_spectrum_by_channel[channel_id] = {
+                    "wavelength_nm": reference_x.astype(float).tolist(),
+                    "intensity": median_spectrum.astype(float).tolist(),
+                }
+            elif anchor_assessment["status"].endswith("with_warning"):
+                spectrum_status = "stable_post_release_recovery_baseline_with_warning"
+
+            self.baseline_wavelength_by_channel[channel_id] = float(center)
+            self.baseline_wavelength_noise_pm_by_channel[channel_id] = float(
+                noise_nm * 1000.0
+            )
+            self.baseline_wavelength_sample_count_by_channel[channel_id] = len(wavelengths)
             self.baseline_spectrum_by_channel[channel_id] = {
                 "wavelength_nm": reference_x.astype(float).tolist(),
                 "intensity": median_spectrum.astype(float).tolist(),
@@ -1274,7 +1356,103 @@ class BaySpecWavelengthShiftBridge:
                 BAYSPEC_CHANNEL_CONFIG.get("baseline", {}).get("semantic_role")
                 or "post_press_release_recovery_no_contact"
             )
+        else:
+            self.baseline_wavelength_by_channel[channel_id] = float(center)
+            self.baseline_wavelength_noise_pm_by_channel[channel_id] = float(
+                noise_nm * 1000.0
+            )
+            self.baseline_wavelength_sample_count_by_channel[channel_id] = len(wavelengths)
         return True
+
+    def _assess_recovery_baseline_against_anchor(
+        self,
+        channel_id: str,
+        wavelength_nm: np.ndarray,
+        candidate_spectrum: np.ndarray,
+    ) -> dict[str, Any]:
+        """Detect a stable but locally deformed recovery spectrum.
+
+        The first accepted baseline in an acquisition session is the trusted
+        anchor. Later baseline attempts are gain-normalized before comparison,
+        so a common optical gain change is tolerated while localized spectral
+        residuals remain visible.
+        """
+
+        config = BAYSPEC_CHANNEL_CONFIG.get("baseline", {}).get(
+            "trusted_session_anchor", {}
+        )
+        if not bool(config.get("enabled", True)):
+            return {"status": "trusted_anchor_check_disabled"}
+        anchor_payload = self.trusted_baseline_anchor_spectrum_by_channel.get(channel_id)
+        if not anchor_payload:
+            return {
+                "status": "trusted_anchor_initialized",
+                "common_gain_ratio": 1.0,
+                "normalized_shape_rms": 0.0,
+                "normalized_shape_peak": 0.0,
+                "shape_correlation": 1.0,
+            }
+
+        anchor_x = np.asarray(anchor_payload.get("wavelength_nm") or [], dtype=float)
+        anchor_y = np.asarray(anchor_payload.get("intensity") or [], dtype=float)
+        if anchor_x.size < 16 or anchor_x.size != anchor_y.size:
+            return {"status": "trusted_anchor_invalid"}
+        aligned_anchor = np.interp(wavelength_nm, anchor_x, anchor_y)
+        scale = max(float(np.mean(np.abs(aligned_anchor))), EPSILON)
+        valid = np.isfinite(aligned_anchor) & np.isfinite(candidate_spectrum)
+        valid &= np.abs(aligned_anchor) >= scale * 0.05
+        if int(np.sum(valid)) < 16:
+            return {"status": "trusted_anchor_invalid"}
+
+        ratios = candidate_spectrum[valid] / np.maximum(
+            np.abs(aligned_anchor[valid]), EPSILON
+        )
+        common_gain = float(np.median(ratios))
+        if not math.isfinite(common_gain) or common_gain <= EPSILON:
+            return {"status": "trusted_anchor_invalid"}
+        corrected = candidate_spectrum / common_gain
+        residual = (corrected - aligned_anchor) / scale
+        rms = float(np.sqrt(np.mean(residual[valid] ** 2)))
+        peak = float(np.max(np.abs(residual[valid])))
+        anchor_std = float(np.std(aligned_anchor[valid]))
+        corrected_std = float(np.std(corrected[valid]))
+        correlation = (
+            float(np.corrcoef(aligned_anchor[valid], corrected[valid])[0, 1])
+            if anchor_std > EPSILON and corrected_std > EPSILON
+            else 1.0 if rms <= EPSILON else 0.0
+        )
+
+        warning_rms = float(config.get("normalized_shape_rms_warning", 0.015))
+        fail_rms = float(config.get("normalized_shape_rms_fail", 0.03))
+        warning_peak = float(config.get("normalized_shape_peak_warning", 0.08))
+        fail_peak = float(config.get("normalized_shape_peak_fail", 0.18))
+        warning_correlation = float(config.get("shape_correlation_warning", 0.999))
+        fail_correlation = float(config.get("shape_correlation_fail", 0.995))
+        if rms >= fail_rms or peak >= fail_peak or correlation <= fail_correlation:
+            status = "recovery_residual_detected"
+        elif (
+            rms >= warning_rms
+            or peak >= warning_peak
+            or correlation <= warning_correlation
+        ):
+            status = "recovery_consistent_with_trusted_anchor_with_warning"
+        else:
+            status = "recovery_consistent_with_trusted_anchor"
+        return {
+            "status": status,
+            "common_gain_ratio": common_gain,
+            "normalized_shape_rms": rms,
+            "normalized_shape_peak": peak,
+            "shape_correlation": correlation,
+            "thresholds": {
+                "normalized_shape_rms_warning": warning_rms,
+                "normalized_shape_rms_fail": fail_rms,
+                "normalized_shape_peak_warning": warning_peak,
+                "normalized_shape_peak_fail": fail_peak,
+                "shape_correlation_warning": warning_correlation,
+                "shape_correlation_fail": fail_correlation,
+            },
+        }
 
     def _update_rolling_baseline_before_response(self, channel_id: str, timestamp: float, intensity_value: float) -> None:
         method = self.baseline_method_by_channel[channel_id]
@@ -1910,13 +2088,25 @@ class BaySpecWavelengthShiftBridge:
             surface_input_mode=str(section.get("surface_input_mode") or "raw_coupled_response_surface"),
         )
 
-    def _recent_records_for_baseline(self, channel_id: str) -> list[dict[str, Any]]:
+    def _recent_records_for_baseline(
+        self,
+        channel_id: str,
+        minimum_samples: int | None = None,
+    ) -> list[dict[str, Any]]:
         records = list(self.records_by_channel.get(channel_id, []))
         if not records:
             return []
+        configured_minimum = max(
+            _config_int("baseline", "rolling_min_samples", 20),
+            _config_int("baseline", "full_spectrum_minimum_samples", 20),
+        )
+        required_samples = max(
+            configured_minimum,
+            int(minimum_samples) if minimum_samples is not None else configured_minimum,
+        )
         latest_timestamp = _safe_float(records[-1].get("timestamp"))
         if latest_timestamp is None:
-            return records[-_config_int("baseline", "rolling_min_samples", 20) :]
+            return records[-required_samples:]
         rolling_window = _config_float("baseline", "rolling_window_sec", 2.0)
         recent = []
         for record in reversed(records):
@@ -1930,7 +2120,12 @@ class BaySpecWavelengthShiftBridge:
                 break
             recent.append(record)
         recent.reverse()
-        return recent or records[-_config_int("baseline", "rolling_min_samples", 20) :]
+        # Direct SDK throughput can be slower than the nominal integration rate.
+        # Keep the time-window preference, but never freeze an undersized model
+        # baseline when enough current-session records already exist.
+        if len(recent) < required_samples:
+            return records[-required_samples:]
+        return recent
 
     def build_array_frame(
         self,
@@ -2286,6 +2481,16 @@ class BaySpecWavelengthShiftBridge:
 
     def set_baseline(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
+        spectrum_attempted_channels: set[str] = set()
+        minimum_recent_samples_raw = payload.get("minimum_recent_samples")
+        try:
+            minimum_recent_samples = (
+                max(1, int(minimum_recent_samples_raw))
+                if minimum_recent_samples_raw is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            minimum_recent_samples = None
         with self.lock:
             requested_method = str(payload.get("baseline_method") or payload.get("method") or "frozen_baseline")
             intensity_map = payload.get("baseline_intensity_by_channel") or payload.get("baselines_intensity_counts")
@@ -2311,10 +2516,19 @@ class BaySpecWavelengthShiftBridge:
                 channel = str(channel_id)
                 intensity = _safe_float(payload.get("baseline_intensity_counts"))
                 wavelength = _safe_float(payload.get("baseline_wavelength_nm"))
-                recent_records = self._recent_records_for_baseline(channel)
-                if intensity is not None:
+                recent_records = self._recent_records_for_baseline(
+                    channel,
+                    minimum_samples=minimum_recent_samples,
+                )
+                wavelength_baseline_accepted = True
+                if recent_records:
+                    spectrum_attempted_channels.add(channel)
+                    wavelength_baseline_accepted = self._set_wavelength_baseline_from_records(
+                        channel, recent_records
+                    )
+                if intensity is not None and wavelength_baseline_accepted:
                     self._set_baseline_from_values(channel, [float(intensity)], method=requested_method)
-                elif recent_records:
+                elif recent_records and wavelength_baseline_accepted:
                     values = [
                         value
                         for record in recent_records
@@ -2322,29 +2536,33 @@ class BaySpecWavelengthShiftBridge:
                     ]
                     self._set_baseline_from_values(channel, values, method=requested_method)
                 if wavelength is not None:
-                    self.baseline_wavelength_by_channel[channel] = float(wavelength)
-                    self.baseline_wavelength_noise_pm_by_channel[channel] = 0.0
-                    self.baseline_wavelength_sample_count_by_channel[channel] = 1
-                    self._set_wavelength_baseline_from_records(channel, recent_records)
-                    self.baseline_wavelength_by_channel[channel] = float(wavelength)
-                elif recent_records:
-                    self._set_wavelength_baseline_from_records(channel, recent_records)
+                    if wavelength_baseline_accepted:
+                        self.baseline_wavelength_by_channel[channel] = float(wavelength)
+                        self.baseline_wavelength_noise_pm_by_channel[channel] = 0.0
+                        self.baseline_wavelength_sample_count_by_channel[channel] = 1
                 self._refresh_channel_records({channel})
             elif not intensity_map and not wavelength_map:
                 changed_channels: set[str] = set()
                 for channel, records in self.records_by_channel.items():
                     if not records:
                         continue
-                    recent_records = self._recent_records_for_baseline(channel)
+                    recent_records = self._recent_records_for_baseline(
+                        channel,
+                        minimum_samples=minimum_recent_samples,
+                    )
+                    spectrum_attempted_channels.add(channel)
+                    wavelength_baseline_accepted = self._set_wavelength_baseline_from_records(
+                        channel, recent_records
+                    )
                     values = [
                         value
                         for record in recent_records
                         if (value := _safe_float(record.get("intensity_counts"))) is not None
                     ]
-                    if values:
+                    if values and wavelength_baseline_accepted:
                         self._set_baseline_from_values(channel, values, method=requested_method)
                         changed_channels.add(channel)
-                    if self._set_wavelength_baseline_from_records(channel, recent_records):
+                    if wavelength_baseline_accepted:
                         changed_channels.add(channel)
                 self._refresh_channel_records(changed_channels)
             elif intensity_map or wavelength_map:
@@ -2375,7 +2593,6 @@ class BaySpecWavelengthShiftBridge:
             "stable_post_release_recovery_baseline",
             "stable_post_release_recovery_baseline_with_warning",
         }
-
         return {
             "ok": bool(baseline_set),
             "baseline_set": bool(baseline_set),
@@ -2385,6 +2602,10 @@ class BaySpecWavelengthShiftBridge:
             "static_model_spectrum_baseline_ready": static_model_spectrum_baseline_ready,
             "static_model_spectrum_baseline_channel": model_baseline_channel,
             "static_model_spectrum_baseline_status": model_baseline_status,
+            "static_model_spectrum_baseline_rejected": bool(
+                model_baseline_channel in spectrum_attempted_channels
+                and not static_model_spectrum_baseline_ready
+            ),
             "baseline_intensity_by_channel": dict(sorted(self.baseline_intensity_by_channel.items())),
             "baseline_wavelength_by_channel": dict(sorted(self.baseline_wavelength_by_channel.items())),
             "baseline_wavelength_noise_pm_by_channel": dict(
@@ -2414,9 +2635,112 @@ class BaySpecWavelengthShiftBridge:
             "baseline_spectrum_semantic_role_by_channel": dict(
                 sorted(self.baseline_spectrum_semantic_role_by_channel.items())
             ),
+            "baseline_anchor_comparison_by_channel": dict(
+                sorted(self.baseline_anchor_comparison_by_channel.items())
+            ),
             "baseline_status_by_channel": dict(sorted(self.baseline_status_by_channel.items())),
             "baseline_method_by_channel": dict(sorted(self.baseline_method_by_channel.items())),
             "demodulation_mode": "fbg_wavelength_shift",
+        }
+
+    def set_runtime_recovery_spectrum_baseline(
+        self,
+        channel_id: str,
+        wavelength_nm: list[float] | np.ndarray,
+        intensity: list[float] | np.ndarray,
+        *,
+        sample_count: int,
+        span_sec: float,
+        shape_motion_rms: float | None = None,
+        common_gain_motion: float | None = None,
+        policy: str = "multi_evidence_release_then_spectral_stationarity",
+    ) -> dict[str, Any]:
+        """Install a full-spectrum runtime baseline confirmed by the release guard.
+
+        This path deliberately does not replace the trusted session anchor. It
+        updates the operational model reference after a contact/release cycle,
+        while preserving the initial anchor for diagnostics and drift review.
+        """
+
+        channel = str(channel_id)
+        wavelength = np.asarray(wavelength_nm, dtype=float)
+        spectrum = np.asarray(intensity, dtype=float)
+        if (
+            wavelength.ndim != 1
+            or spectrum.shape != wavelength.shape
+            or wavelength.size < 16
+            or not np.all(np.isfinite(wavelength))
+            or not np.all(np.isfinite(spectrum))
+            or not np.all(np.diff(wavelength) > 0.0)
+            or float(np.max(np.abs(spectrum))) <= EPSILON
+        ):
+            return {
+                "ok": False,
+                "status": "runtime_recovery_baseline_invalid",
+                "channel_id": channel,
+            }
+
+        with self.lock:
+            self.baseline_spectrum_by_channel[channel] = {
+                "wavelength_nm": wavelength.astype(float).tolist(),
+                "intensity": spectrum.astype(float).tolist(),
+            }
+            self.baseline_spectrum_sample_count_by_channel[channel] = max(
+                1, int(sample_count)
+            )
+            self.baseline_spectrum_noise_ratio_by_channel[channel] = float(
+                max(0.0, shape_motion_rms or 0.0)
+            )
+            self.baseline_spectrum_drift_ratio_by_channel[channel] = float(
+                max(0.0, common_gain_motion or 0.0)
+            )
+            self.baseline_spectrum_span_sec_by_channel[channel] = float(
+                max(0.0, span_sec)
+            )
+            self.baseline_spectrum_status_by_channel[channel] = (
+                "stable_post_release_recovery_baseline"
+            )
+            self.baseline_spectrum_semantic_role_by_channel[channel] = (
+                "automatic_multi_evidence_post_release_stationary_recovery"
+            )
+
+            records = self.records_by_channel.get(channel)
+            latest = records[-1] if records else None
+            if latest is not None:
+                baseline_wavelength = _safe_float(
+                    latest.get("centroid_wavelength_nm")
+                    or latest.get("parabolic_peak_wavelength_nm")
+                    or latest.get("peak_marker_wavelength_nm")
+                    or latest.get("peak_wavelength_nm")
+                )
+                if baseline_wavelength is not None:
+                    self.baseline_wavelength_by_channel[channel] = baseline_wavelength
+                    self.baseline_wavelength_noise_pm_by_channel[channel] = 0.0
+                    self.baseline_wavelength_sample_count_by_channel[channel] = max(
+                        1, int(sample_count)
+                    )
+                baseline_intensity = _safe_float(latest.get("intensity_counts"))
+                if baseline_intensity is not None:
+                    self._set_baseline_from_values(
+                        channel,
+                        [baseline_intensity],
+                        method="automatic_stationary_release_recovery",
+                    )
+                self._refresh_channel_records({channel})
+
+        return {
+            "ok": True,
+            "status": "runtime_recovery_baseline_set",
+            "channel_id": channel,
+            "sample_count": max(1, int(sample_count)),
+            "span_sec": float(max(0.0, span_sec)),
+            "shape_motion_rms": shape_motion_rms,
+            "common_gain_motion": common_gain_motion,
+            "policy": policy,
+            "trusted_session_anchor_preserved": True,
+            "baseline_semantics": (
+                "automatic_multi_evidence_post_release_stationary_recovery"
+            ),
         }
 
     def latest(self, channel_id: str | None = None, include_spectrum: bool = False) -> Any:
@@ -2713,32 +3037,12 @@ class BaySpecWavelengthShiftBridge:
         source: str = "bayspec_sense2020_fast_record_dat",
     ) -> dict[str, Any]:
         dat_path = Path(path)
-        frame_points = 512
-        frame_bytes = frame_points * 2
         try:
-            size = dat_path.stat().st_size
-        except OSError as exc:
+            sequence = read_sense_fast_dat(dat_path)
+        except (OSError, ValueError) as exc:
             return {"ok": False, "reason": str(exc), "records_ingested": 0}
-        data_offset = 512 if size % frame_bytes == 512 and size >= frame_bytes + 512 else 0
-        data_bytes = max(size - data_offset, 0)
-        frame_count = data_bytes // frame_bytes
-        if frame_count <= 0:
-            return {"ok": False, "reason": "DAT file has no complete 512-point frame", "records_ingested": 0}
-
-        # Sense fast-recording DAT stores 512-point spectra as big-endian uint16.
-        # Some Sense DAT files include a 512-byte prefix before the spectral frames.
-        # Any trailing partial block is ignored while the file is still being written.
-        offset = data_offset + (frame_count - 1) * frame_bytes
-        try:
-            with dat_path.open("rb") as handle:
-                handle.seek(offset)
-                raw = handle.read(frame_bytes)
-        except OSError as exc:
-            return {"ok": False, "reason": str(exc), "records_ingested": 0}
-        if len(raw) != frame_bytes:
-            return {"ok": False, "reason": "latest DAT frame is incomplete", "records_ingested": 0}
-
-        intensity = [float(value) for value in struct.unpack(f">{frame_points}H", raw)]
+        frame_count = sequence.layout.frame_count
+        intensity = [float(value) for value in sequence.spectra[-1]]
         if not intensity:
             return {"ok": False, "reason": "DAT frame has no intensity data", "records_ingested": 0}
 
@@ -2775,8 +3079,17 @@ class BaySpecWavelengthShiftBridge:
         result["source_file"] = str(dat_path)
         result["dat_frame_count"] = frame_count
         result["dat_frame_index"] = frame_count - 1
-        result["dat_header_bytes"] = data_offset
-        result["dat_parser"] = "big_endian_uint16_512_points"
+        result["dat_header_bytes"] = sequence.layout.prefix_words * 2
+        result["dat_record_words"] = sequence.layout.record_words
+        result["dat_auxiliary_words_per_frame"] = (
+            sequence.layout.record_words - sequence.layout.spectrum_words
+        )
+        result["dat_trailing_words_ignored"] = sequence.layout.trailing_words
+        result["dat_layout_correlation"] = (
+            sequence.layout.median_adjacent_correlation
+        )
+        result["dat_layout_score_margin"] = sequence.layout.score_margin
+        result["dat_parser"] = sequence.layout.name
         return result
 
     def _latest_wavelength_grid(self, root: Path, expected_points: int = 512) -> list[float] | None:

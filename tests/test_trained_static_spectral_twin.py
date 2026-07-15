@@ -67,6 +67,74 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
         self.assertEqual(result["confidence_source"], "unavailable")
         self.assertTrue(result["review_needed"])
 
+    def test_strong_baseline_relative_change_overrides_legacy_no_contact(self) -> None:
+        model_contact = {
+            "label": "no_contact",
+            "confidence": 1.0,
+            "margin": 1.0,
+            "probabilities": {"contact": 0.0, "no_contact": 1.0},
+            "confidence_source": "uncalibrated_predict_proba",
+            "probability_calibrated": False,
+            "review_needed": False,
+        }
+        evidence = self.predictor._baseline_relative_contact_evidence(
+            {
+                "global_normalized_residual_rms": 0.060,
+                "global_normalized_residual_peak": 0.310,
+                "global_derivative_residual_energy": 0.0008,
+                "global_shape_correlation": 0.996,
+            }
+        )
+
+        result = self.predictor._resolve_contact_decision(model_contact, evidence)
+
+        self.assertEqual(result["label"], "contact")
+        self.assertEqual(result["decision_source"], "baseline_relative_spectral_change_gate")
+        self.assertTrue(result["model_rule_disagreement"])
+        self.assertIsNone(result["confidence"])
+        self.assertFalse(result["review_needed"])
+
+    def test_model_contact_without_baseline_change_is_suppressed(self) -> None:
+        model_contact = {
+            "label": "contact",
+            "confidence": 0.98,
+            "margin": 0.96,
+            "probabilities": {"contact": 0.98, "no_contact": 0.02},
+            "confidence_source": "uncalibrated_predict_proba",
+            "probability_calibrated": False,
+            "review_needed": False,
+        }
+        evidence = self.predictor._baseline_relative_contact_evidence(
+            {
+                "global_normalized_residual_rms": 0.006,
+                "global_normalized_residual_peak": 0.030,
+                "global_derivative_residual_energy": 0.00001,
+                "global_shape_correlation": 0.99998,
+            }
+        )
+
+        result = self.predictor._resolve_contact_decision(model_contact, evidence)
+
+        self.assertEqual(result["label"], "no_contact")
+        self.assertEqual(
+            result["decision_source"],
+            "model_contact_suppressed_without_baseline_change",
+        )
+        self.assertTrue(result["model_rule_disagreement"])
+
+    def test_representative_no_contact_is_below_physical_gate(self) -> None:
+        prediction = self.predictor.predict(
+            self.baseline_wavelength,
+            self.baseline_intensity,
+            baseline_wavelength_nm=self.baseline_wavelength,
+            baseline_intensity_counts=self.baseline_intensity,
+        )
+
+        evidence = prediction["contact"]["baseline_relative_evidence"]
+        self.assertFalse(evidence["strong_contact_evidence"])
+        self.assertFalse(evidence["supporting_contact_evidence"])
+        self.assertEqual(prediction["contact"]["label"], "no_contact")
+
     def test_representative_manual_position_and_level_contract(self) -> None:
         expected = {
             "P22_hard_manual.csv": ("P22", "hard", 0.0, 0.0),
@@ -196,7 +264,11 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
                 "source": "unit_test_fixture",
             }
         )
-        frame = backend_main.global_spectrum_frame(trace_limit=20, include_spectrum=True)
+        frame = backend_main.global_spectrum_frame(
+            trace_limit=20,
+            include_spectrum=True,
+            include_shadow=True,
+        )
         prediction = frame["trained_static_spectral_prediction"]
 
         self.assertTrue(frame["model_assisted_display_allowed"])
@@ -217,14 +289,43 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
         )
         self.assertFalse(model_status["future_3x3_target_plan_active"])
         self.assertFalse(frame["trained_static_spectral_frame"]["cache_hit"])
+        shadow = frame["trained_static_spectral_shadow"]
+        self.assertEqual(shadow["status"], "shadow_ready")
+        self.assertFalse(shadow["drives_operator_ui"])
+        self.assertFalse(shadow["drives_digital_twin"])
+        self.assertIsNotNone(frame["trained_static_spectral_shadow_prediction"])
+        self.assertEqual(
+            frame["trained_static_spectral_model"]["shadow_candidate"]["runtime_role"],
+            "shadow_only_not_driving_digital_twin",
+        )
         cached_frame = backend_main.global_spectrum_frame(
             trace_limit=20,
             include_spectrum=False,
+            include_shadow=True,
         )
         self.assertTrue(cached_frame["trained_static_spectral_frame"]["cache_hit"])
         self.assertEqual(
             cached_frame["trained_static_spectral_prediction"],
             prediction,
+        )
+        self.assertEqual(
+            cached_frame["trained_static_spectral_shadow_prediction"],
+            frame["trained_static_spectral_shadow_prediction"],
+        )
+        operator_frame = backend_main.global_spectrum_frame(
+            trace_limit=20,
+            include_spectrum=False,
+            include_shadow=False,
+        )
+        self.assertEqual(
+            operator_frame["trained_static_spectral_shadow"]["status"],
+            "shadow_not_requested",
+        )
+        self.assertIsNone(
+            operator_frame["trained_static_spectral_shadow_prediction"]
+        )
+        self.assertFalse(
+            operator_frame["trained_static_spectral_shadow"]["drives_operator_ui"]
         )
         backend_main.bridge.reset(keep_baseline=False)
 

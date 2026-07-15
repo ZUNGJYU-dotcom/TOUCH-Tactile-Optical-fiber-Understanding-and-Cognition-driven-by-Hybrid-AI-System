@@ -62,17 +62,41 @@ class BaselineCluster:
 
 
 @dataclass(frozen=True)
+class BaselineClusterAssessment:
+    """Quality and session-anchor interpretation of one no-contact cluster."""
+
+    cluster_id: str
+    session_id: str
+    status: str
+    trusted_for_reference: bool
+    eligible_for_no_contact_training: bool
+    anchor_cluster_id: str | None
+    sample_count: int
+    within_cluster_noise_ratio_median: float
+    within_cluster_noise_ratio_max: float
+    within_cluster_drift_ratio: float
+    common_gain_ratio_to_anchor: float | None
+    normalized_shape_rms_to_anchor: float | None
+    normalized_shape_peak_to_anchor: float | None
+    shape_correlation_to_anchor: float | None
+
+
+@dataclass(frozen=True)
 class StaticFeatureDataset:
     """Feature matrices plus immutable source records and baseline references."""
 
     records: tuple[SenseSpectrumRecord, ...]
     common_wavelength_nm: np.ndarray
     baseline_clusters: tuple[BaselineCluster, ...]
+    baseline_cluster_assessments: tuple[BaselineClusterAssessment, ...]
+    reference_baseline_clusters: tuple[BaselineCluster, ...]
+    baseline_reference_strategy: str
     engineered_matrix: np.ndarray
     engineered_columns: tuple[str, ...]
     full_hybrid_matrix: np.ndarray
     full_hybrid_columns: tuple[str, ...]
     baseline_reference_mode: tuple[str, ...]
+    training_eligible: tuple[bool, ...]
 
 
 def _parse_timestamp(raw: str, path: Path) -> tuple[datetime, str | None]:
@@ -292,6 +316,50 @@ def load_sense_dataset(config: dict[str, Any]) -> list[SenseSpectrumRecord]:
     ]
 
 
+def dataset_source_manifest(config: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Return a lightweight immutable snapshot of every source CSV.
+
+    Training scripts compare this manifest before and after loading so a file
+    that is still being written cannot silently enter a formal evaluation.
+    """
+
+    data_root = Path(config["data_root"]).expanduser().resolve()
+    if not data_root.is_dir():
+        raise FileNotFoundError(f"Sense data root does not exist: {data_root}")
+    rows = []
+    for path in sorted(data_root.rglob("*.csv"), key=lambda item: str(item).lower()):
+        stat = path.stat()
+        rows.append(
+            {
+                "file_id": path.relative_to(data_root).as_posix(),
+                "size_bytes": int(stat.st_size),
+                "modified_time_ns": int(stat.st_mtime_ns),
+            }
+        )
+    return tuple(rows)
+
+
+def assert_dataset_manifest_stable(
+    before: tuple[dict[str, Any], ...],
+    after: tuple[dict[str, Any], ...],
+) -> None:
+    if before == after:
+        return
+    before_by_id = {row["file_id"]: row for row in before}
+    after_by_id = {row["file_id"]: row for row in after}
+    added = sorted(set(after_by_id) - set(before_by_id))
+    removed = sorted(set(before_by_id) - set(after_by_id))
+    changed = sorted(
+        file_id
+        for file_id in set(before_by_id) & set(after_by_id)
+        if before_by_id[file_id] != after_by_id[file_id]
+    )
+    raise RuntimeError(
+        "source dataset changed while it was being loaded; retry after capture stops "
+        f"(added={added[:3]}, removed={removed[:3]}, changed={changed[:3]})"
+    )
+
+
 def build_common_wavelength_grid(
     records: Iterable[SenseSpectrumRecord],
     point_count: int,
@@ -346,9 +414,115 @@ def build_baseline_clusters(
     return tuple(clusters)
 
 
+def _gain_normalized_spectrum_comparison(
+    anchor: np.ndarray,
+    candidate: np.ndarray,
+) -> tuple[float, float, float, float]:
+    anchor = np.asarray(anchor, dtype=float)
+    candidate = np.asarray(candidate, dtype=float)
+    scale = max(float(np.mean(np.abs(anchor))), EPSILON)
+    valid = np.isfinite(anchor) & np.isfinite(candidate)
+    valid &= np.abs(anchor) >= scale * 0.05
+    if int(np.sum(valid)) < 16:
+        return 1.0, float("inf"), float("inf"), 0.0
+    gain = float(np.median(candidate[valid] / np.maximum(np.abs(anchor[valid]), EPSILON)))
+    if not np.isfinite(gain) or gain <= EPSILON:
+        return gain, float("inf"), float("inf"), 0.0
+    corrected = candidate / gain
+    residual = (corrected - anchor) / scale
+    rms = float(np.sqrt(np.mean(residual[valid] ** 2)))
+    peak = float(np.max(np.abs(residual[valid])))
+    correlation = (
+        float(np.corrcoef(anchor[valid], corrected[valid])[0, 1])
+        if float(np.std(anchor[valid])) > EPSILON
+        and float(np.std(corrected[valid])) > EPSILON
+        else 1.0 if rms <= EPSILON else 0.0
+    )
+    return gain, rms, peak, correlation
+
+
+def assess_baseline_clusters(
+    clusters: tuple[BaselineCluster, ...],
+    quality_config: dict[str, Any] | None = None,
+) -> tuple[BaselineClusterAssessment, ...]:
+    """Separate session drift from stable post-release residual deformation."""
+
+    quality_config = quality_config or {}
+    session_gap_sec = float(quality_config.get("session_gap_minutes", 240.0)) * 60.0
+    noise_fail = float(quality_config.get("within_cluster_noise_fail_ratio", 0.04))
+    drift_fail = float(quality_config.get("within_cluster_drift_fail_ratio", 0.06))
+    rms_fail = float(quality_config.get("normalized_shape_rms_fail", 0.03))
+    peak_fail = float(quality_config.get("normalized_shape_peak_fail", 0.18))
+    corr_fail = float(quality_config.get("shape_correlation_fail", 0.995))
+
+    assessments: list[BaselineClusterAssessment] = []
+    session_index = 0
+    previous_epoch: float | None = None
+    anchor: BaselineCluster | None = None
+    for cluster in sorted(clusters, key=lambda item: item.center_epoch):
+        if previous_epoch is None or cluster.center_epoch - previous_epoch > session_gap_sec:
+            session_index += 1
+            anchor = None
+        previous_epoch = cluster.center_epoch
+        session_id = f"baseline_session_{session_index:02d}"
+        median = cluster.median_spectrum.astype(float)
+        scale = max(float(np.mean(np.abs(median))), EPSILON)
+        frame_rms = np.sqrt(np.mean((cluster.spectra - median) ** 2, axis=1)) / scale
+        noise_median = float(np.median(frame_rms))
+        noise_max = float(np.max(frame_rms))
+        drift = float(
+            np.sqrt(np.mean((cluster.spectra[-1] - cluster.spectra[0]) ** 2))
+            / scale
+        )
+
+        gain: float | None = None
+        rms: float | None = None
+        peak: float | None = None
+        correlation: float | None = None
+        if noise_median >= noise_fail or drift >= drift_fail:
+            status = "unstable_no_contact_cluster"
+            trusted = False
+        elif anchor is None:
+            status = "trusted_session_anchor"
+            trusted = True
+            anchor = cluster
+        else:
+            gain, rms, peak, correlation = _gain_normalized_spectrum_comparison(
+                anchor.median_spectrum,
+                median,
+            )
+            if rms >= rms_fail or peak >= peak_fail or correlation <= corr_fail:
+                status = "stable_recovery_residual_biased"
+                trusted = False
+            else:
+                status = "trusted_session_consistent"
+                trusted = True
+
+        assessments.append(
+            BaselineClusterAssessment(
+                cluster_id=cluster.cluster_id,
+                session_id=session_id,
+                status=status,
+                trusted_for_reference=trusted,
+                eligible_for_no_contact_training=trusted,
+                anchor_cluster_id=anchor.cluster_id if anchor is not None else None,
+                sample_count=int(cluster.spectra.shape[0]),
+                within_cluster_noise_ratio_median=noise_median,
+                within_cluster_noise_ratio_max=noise_max,
+                within_cluster_drift_ratio=drift,
+                common_gain_ratio_to_anchor=gain,
+                normalized_shape_rms_to_anchor=rms,
+                normalized_shape_peak_to_anchor=peak,
+                shape_correlation_to_anchor=correlation,
+            )
+        )
+    return tuple(assessments)
+
+
 def baseline_for_record(
     record: SenseSpectrumRecord,
     clusters: tuple[BaselineCluster, ...],
+    strategy: str = "linear_interpolation",
 ) -> tuple[np.ndarray, str]:
     """Return a time-local baseline; no-contact files use leave-one-out medians."""
 
@@ -366,6 +540,9 @@ def baseline_for_record(
             return cluster.median_spectrum, f"{cluster.cluster_id}_single_reference"
 
     epoch = record.timestamp.timestamp()
+    if strategy == "nearest_trusted_session_anchor":
+        nearest = min(clusters, key=lambda cluster: abs(cluster.center_epoch - epoch))
+        return nearest.median_spectrum, f"{nearest.cluster_id}_nearest_trusted"
     if len(clusters) == 1 or epoch <= clusters[0].center_epoch:
         return clusters[0].median_spectrum, f"{clusters[0].cluster_id}_nearest"
     if epoch >= clusters[-1].center_epoch:
@@ -439,14 +616,34 @@ def build_static_feature_dataset(
         grid,
         float(training_config.get("baseline_cluster_gap_minutes", 15.0)),
     )
+    quality_config = dict(training_config.get("baseline_quality") or {})
+    assessments = assess_baseline_clusters(clusters, quality_config)
+    assessment_by_id = {item.cluster_id: item for item in assessments}
+    trusted_ids = {
+        item.cluster_id for item in assessments if item.trusted_for_reference
+    }
+    reference_clusters = tuple(
+        cluster for cluster in clusters if cluster.cluster_id in trusted_ids
+    )
+    if not reference_clusters:
+        reference_clusters = clusters
+    reference_strategy = str(
+        quality_config.get("reference_strategy")
+        or "nearest_trusted_session_anchor"
+    )
     peak_windows: list[PeakWindow] = load_peak_windows(channel_config_path)
     bin_count = int(training_config.get("full_spectrum_bins", 64))
     engineered_rows: list[dict[str, float]] = []
     hybrid_rows: list[dict[str, float]] = []
     reference_modes: list[str] = []
+    training_eligible: list[bool] = []
     for record in records:
         current = resample_spectrum(record, grid)
-        baseline, reference_mode = baseline_for_record(record, clusters)
+        baseline, reference_mode = baseline_for_record(
+            record,
+            reference_clusters,
+            strategy=reference_strategy,
+        )
         feature_row, extended = extract_snapshot_feature_vectors(
             grid,
             current,
@@ -457,6 +654,20 @@ def build_static_feature_dataset(
         engineered_rows.append(feature_row)
         hybrid_rows.append(extended)
         reference_modes.append(reference_mode)
+        eligible = True
+        if record.sample_kind == "no_contact":
+            source_cluster = next(
+                (
+                    cluster
+                    for cluster in clusters
+                    if record.file_id in cluster.record_ids
+                ),
+                None,
+            )
+            if source_cluster is not None:
+                assessment = assessment_by_id[source_cluster.cluster_id]
+                eligible = assessment.eligible_for_no_contact_training
+        training_eligible.append(eligible)
 
     engineered_columns = tuple(sorted(engineered_rows[0]))
     hybrid_columns = tuple(sorted(hybrid_rows[0]))
@@ -472,11 +683,15 @@ def build_static_feature_dataset(
         records=records,
         common_wavelength_nm=grid,
         baseline_clusters=clusters,
+        baseline_cluster_assessments=assessments,
+        reference_baseline_clusters=reference_clusters,
+        baseline_reference_strategy=reference_strategy,
         engineered_matrix=engineered_matrix,
         engineered_columns=engineered_columns,
         full_hybrid_matrix=hybrid_matrix,
         full_hybrid_columns=hybrid_columns,
         baseline_reference_mode=tuple(reference_modes),
+        training_eligible=tuple(training_eligible),
     )
 
 

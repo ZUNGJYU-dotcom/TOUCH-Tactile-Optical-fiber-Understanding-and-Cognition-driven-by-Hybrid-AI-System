@@ -1,0 +1,23 @@
+{
+  "schema_version": "static_spectral_candidate_manifest_v1",
+  "candidate_id": "v7_fused_common_mode_corrected_shift",
+  "model_file": "static_spectral_recognition_bundle_v7_fused_shift.joblib",
+  "sha256": "FFCED46FEC5F38344730889307C1BDF1B56EE938DF3086C397F3402F7E5A61B1",
+  "runtime_role": "shadow_only_not_driving_digital_twin",
+  "position_model": "agreement_vote_logreg_lda_linear_svm_fused_shift_v7",
+  "position_feature_contract": "nine signed per-frame normalized fused common-mode-corrected FBG shifts",
+  "force_model": "random_forest_incremental_global_leaf2_v7",
+  "position_conditioned_force_enabled": false,
+  "formal_position_cross_batch_macro_f1": 0.9080964979971284,
+  "reverse_position_cross_batch_macro_f1": 0.9019225506294473,
+  "formal_position_unanimous_fraction": 0.8111111111111111,
+  "formal_position_unanimous_accuracy": 0.954337899543379,
+  "formal_force_cross_batch_macro_f1": 0.7921507357989874,
+  "formal_hard_recall": 1.0,
+  "position_same_prediction_across_trusted_baselines": 0.9111111111111111,
+  "force_same_prediction_across_trusted_baselines": 0.31851851851851853,
+  "baseline_contract": "stable_current_session_post_release_recovery_full_spectrum",
+  "deployment_ready": false,
+  "failed_gate": "force_session_scale_and_labeled_live_validation_unresolved",
+  "next_gate": "controlled_labeled_live_shadow_validation"
+}

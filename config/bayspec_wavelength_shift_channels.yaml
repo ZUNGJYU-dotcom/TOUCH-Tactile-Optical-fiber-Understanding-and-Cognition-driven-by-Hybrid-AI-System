@@ -267,6 +267,15 @@ baseline:
   full_spectrum_noise_fail_ratio: 0.04
   full_spectrum_drift_warning_ratio: 0.015
   full_spectrum_drift_fail_ratio: 0.06
+  trusted_session_anchor:
+    enabled: true
+    normalized_shape_rms_warning: 0.015
+    normalized_shape_rms_fail: 0.03
+    normalized_shape_peak_warning: 0.08
+    normalized_shape_peak_fail: 0.18
+    shape_correlation_warning: 0.999
+    shape_correlation_fail: 0.995
+    note: first accepted no-contact baseline in each acquisition session is the trusted anchor
   noise_warning_ratio: 0.04
   noise_fail_ratio: 0.12
 

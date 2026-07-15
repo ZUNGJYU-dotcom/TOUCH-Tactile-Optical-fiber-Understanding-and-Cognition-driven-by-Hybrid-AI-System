@@ -37,6 +37,15 @@ feature_extraction:
   baseline_strategy: time_local_cluster_median_with_linear_interpolation
   no_contact_strategy: leave_one_out_within_baseline_cluster
   runtime_baseline_strategy: stable_multiframe_post_release_recovery_median
+  baseline_quality:
+    session_gap_minutes: 240
+    reference_strategy: nearest_trusted_session_anchor
+    within_cluster_noise_fail_ratio: 0.04
+    within_cluster_drift_fail_ratio: 0.06
+    normalized_shape_rms_fail: 0.03
+    normalized_shape_peak_fail: 0.18
+    shape_correlation_fail: 0.995
+    exclude_residual_biased_no_contact_from_training: true
 
 evaluation:
   split_strategy: leave_one_repeat_index_out

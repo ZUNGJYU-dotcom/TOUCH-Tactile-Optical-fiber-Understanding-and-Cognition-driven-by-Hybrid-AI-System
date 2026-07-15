@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>TOUCH System - Trained Static Spectrum Twin</title>
+    <title>TOUCH System - Temporal Spectral Validation</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/static/styles.css?v=fbg-wavelength-shift-pass1" />
     <script type="importmap">
@@ -23,12 +23,12 @@
             <span class="touch-brand-main">TOUCH</span>
             <span class="touch-brand-tag">System</span>
           </h1>
-          <div class="subline touch-brand-subtitle">BaySpec trained full-spectrum position and response-level edition</div>
+          <div class="subline touch-brand-subtitle">BaySpec temporal spectrum position and response-level validation</div>
         </div>
 
         <div class="status-strip" aria-label="Current system mode">
           <span><small>Data source</small><strong id="sourceChip">SDK idle</strong></span>
-          <span><small>Mode</small><strong id="surfaceModeChip">Trained 9-position spectrum</strong></span>
+          <span><small>Mode</small><strong id="surfaceModeChip">Temporal validation</strong></span>
           <span><small>QA status</small><strong id="topQaStatus">waiting</strong></span>
           <span class="diagnostics-only"><small>Peak map</small><strong id="peakMapChip">manual provisional</strong></span>
           <span class="diagnostics-only"><small>Spectral windows</small><strong id="wavelengthPlanChip">model windows loading</strong></span>
@@ -69,7 +69,7 @@
             <button id="exportWatchButton" type="button" aria-pressed="false" title="Watch the Sense export folder for new spectra">Watch</button>
             <button id="baselineButton" type="button" title="Release contact, wait for stable spectra, then set the recovery-state baseline">Set baseline</button>
             <button id="pauseButton" type="button" aria-pressed="false" title="Hold the current display without stopping acquisition">Hold</button>
-            <button id="demoMenuButton" class="operator-only" type="button" aria-expanded="false" aria-pressed="false" aria-controls="demoModule" title="Open simulated single-finger response scenarios">Demo</button>
+            <button id="demoMenuButton" class="operator-only" type="button" aria-expanded="false" aria-pressed="false" aria-controls="demoModule" title="Open local response scenarios">Response</button>
             <button id="spectrumToggleButton" class="operator-only" type="button" aria-expanded="false" aria-controls="spectrumDrawer" title="Open spectrum evidence">Spectrum</button>
             <button id="operatorDiagnosticsButton" class="operator-only" type="button" title="Open the diagnostic workspace">Diagnostics</button>
           <button id="resetButton" class="diagnostics-only" type="button" title="Clear the current trace buffer">Reset</button>
@@ -95,7 +95,7 @@
         </div>
         <div class="spectrum-empty-state">
           <strong>No spectrum frame</strong>
-          <span>Start Live, Watch, ingest, or Demo to load optical evidence.</span>
+          <span>Start Live, Watch, ingest, or select a response scenario to load optical evidence.</span>
         </div>
         <div class="drawer-spectrum-grid">
           <div>
@@ -108,7 +108,7 @@
             <canvas id="spectrumCanvas" class="spectrum-canvas"></canvas>
             <div class="spectrum-legend" aria-label="Spectrum marker legend">
               <span><i class="target"></i>preliminary target</span>
-              <span><i class="detected"></i>detected / simulated peak</span>
+              <span><i class="detected"></i><span class="operator-only">detected peak</span><span class="diagnostics-only">detected / simulated peak</span></span>
               <span><i class="dominant"></i>dominant channel</span>
             </div>
           </div>
@@ -160,9 +160,17 @@
           <button id="settingsSpectrumButton" class="settings-wide-button" type="button">Open spectrum evidence</button>
         </section>
 
+        <section class="settings-section">
+          <div class="section-label">RECOGNITION</div>
+          <div class="settings-button-grid">
+            <button id="settingsTemporalValidationButton" type="button">Temporal validation</button>
+            <button id="settingsStaticFallbackButton" type="button">Static fallback</button>
+          </div>
+        </section>
+
         <div class="settings-footer-status" aria-label="Current display settings">
           <span>Lab light</span>
-          <span>Free rotate enabled</span>
+          <span id="recognitionModeStatus">Temporal validation</span>
         </div>
       </aside>
 
@@ -242,11 +250,6 @@
                 <span class="surface-orientation-title">ARRAY ORIENTATION</span>
                 <span><b>P11</b><i>&rarr;</i><b>P21</b><i>&rarr;</i><b>P31</b></span>
                 <span><b>P11</b><i>&darr;</i><b>P12</b><i>&darr;</i><b>P13</b></span>
-              </div>
-              <div id="operatorAlert" class="operator-alert operator-only" role="status" aria-live="assertive" aria-atomic="true" aria-hidden="true">
-                <span id="operatorAlertSeverity" class="operator-alert-severity">WARNING</span>
-                <span id="operatorAlertMessage" class="operator-alert-message">Review signal status.</span>
-                <button id="operatorAlertDiagnosticsButton" type="button">Diagnostics</button>
               </div>
               <div class="pressure-scale" aria-hidden="true">
                 <span>large global |Δλ|</span>
@@ -329,6 +332,7 @@
           <nav class="diagnostic-tabs diagnostics-only" aria-label="Diagnostic workspaces" role="tablist">
             <button class="active" data-diagnostic-tab="signal" type="button" role="tab" aria-selected="true">Signal</button>
             <button data-diagnostic-tab="surface" type="button" role="tab" aria-selected="false">Surface</button>
+            <button data-diagnostic-tab="demo" type="button" role="tab" aria-selected="false">Demo</button>
             <button data-diagnostic-tab="acquisition" type="button" role="tab" aria-selected="false">Acquisition</button>
             <button data-diagnostic-tab="geometry" type="button" role="tab" aria-selected="false">Geometry</button>
           </nav>
@@ -590,12 +594,18 @@
           </details>
           </div>
 
-          <details id="demoModule" class="demo-module prediction-card" data-diagnostic-group="surface">
+          <details id="demoModule" class="demo-module prediction-card" data-diagnostic-group="demo">
             <summary>
-              <strong>Demo</strong>
+              <strong class="operator-only">Response controls</strong>
+              <strong class="diagnostics-only">Demo</strong>
               <span id="demoStatusChip">ready</span>
             </summary>
             <div class="demo-buttons">
+              <div class="demo-speed-control diagnostics-only">
+                <label for="demoSpeedControl">Playback speed</label>
+                <input id="demoSpeedControl" type="range" min="0.1" max="2" step="0.1" value="1" aria-label="Playback speed" />
+                <output id="demoSpeedValue" for="demoSpeedControl">1.0x</output>
+              </div>
               <button class="demo-step" data-demo-level="no_contact" type="button">Legacy P22 fallback</button>
               <button class="array-demo-step" data-array-scenario="center_press" type="button">Center contact</button>
               <button class="array-demo-step" data-array-scenario="off_center_fingertip_contact" type="button">Off-center contact</button>
@@ -614,6 +624,6 @@
       </main>
 
     </div>
-    <script type="module" src="/static/app.js?v=response-consistency-bottom-logic-v4"></script>
+    <script type="module" src="/static/app.js?v=response-performance-v2"></script>
   </body>
 </html>

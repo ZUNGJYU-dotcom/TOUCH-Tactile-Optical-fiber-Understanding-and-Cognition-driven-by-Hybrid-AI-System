@@ -1,0 +1,6 @@
+# Optional offline model-comparison environment. The desktop runtime does not
+# require these packages unless a selected deep model is deployed later.
+torch==2.13.0
+aeon==1.5.0
+skada==0.6.0
+lightgbm==4.6.0

@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import ctypes
 import copy
+import hashlib
 import math
 import os
 from pathlib import Path
+import struct
 import sys
 import threading
 import time
+from typing import Any
 
+import numpy as np
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -26,7 +30,13 @@ from bridge import bridge
 from bridge import BAYSPEC_CHANNEL_CONFIG, CHANNEL_ORDER
 from sdk_live import BaySpecSdkLiveReader
 from src.array_surface.surface_mapper import SurfaceConfig, map_surface, matrices_from_channels
+from src.hybrid_spectrum.dynamic_shadow_adapter import DynamicTemporalShadowAdapter
 from src.hybrid_spectrum.static_model_adapter import StaticSpectralPredictor
+from src.hybrid_spectrum.session_level_calibration import (
+    POSITION_ORDER as CALIBRATION_POSITION_ORDER,
+    PerPositionOrdinalCalibrator,
+)
+from src.hybrid_spectrum.temporal_prediction import TemporalStaticPredictionStabilizer
 
 try:
     import yaml
@@ -42,15 +52,598 @@ SENSE_CMD_FAST_RECORDING = 32879
 PROJECT_ROOT = APP_ROOT if getattr(sys, "frozen", False) else APP_ROOT.parent
 THUMB_SCENE_CONFIG_PATH = PROJECT_ROOT / "config" / "thumb_holder_scene.yaml"
 STATIC_SPECTRAL_MODEL_PATH = PROJECT_ROOT / "models" / "static_spectral_recognition_bundle.joblib"
+STATIC_SPECTRAL_CANDIDATE_MODEL_PATH = (
+    PROJECT_ROOT
+    / "models"
+    / "candidates"
+    / "static_spectral_recognition_bundle_v7_fused_shift.joblib"
+)
+DYNAMIC_TEMPORAL_SHADOW_MODEL_PATH = (
+    PROJECT_ROOT
+    / "models"
+    / "candidates"
+    / "dynamic_temporal_shadow_candidate_v3_compact_runtime_pos240.joblib"
+)
+DYNAMIC_TEMPORAL_SHADOW_INFERENCE_STRIDE = 1
+DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH = (
+    PROJECT_ROOT / "config" / "hybrid_spectrum_channels.yaml"
+)
+RUNTIME_CONTACT_STATE_CONFIG_PATH = (
+    PROJECT_ROOT / "config" / "runtime_contact_state.yaml"
+)
 STATIC_SPECTRAL_MODEL_LOCK = threading.Lock()
 STATIC_SPECTRAL_MODEL_CACHE_KEY: tuple | None = None
 STATIC_SPECTRAL_MODEL_CACHE_VALUE: dict | None = None
+STATIC_SPECTRAL_SHADOW_STABILIZER = TemporalStaticPredictionStabilizer(
+    window_size=5,
+    minimum_contact_frames=3,
+    release_frames=2,
+    minimum_position_support=0.60,
+    minimum_level_support=0.60,
+)
+STATIC_SPECTRAL_SESSION_CALIBRATION_LOCK = threading.Lock()
+STATIC_SPECTRAL_SESSION_CALIBRATOR: PerPositionOrdinalCalibrator | None = None
+STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE: dict[str, Any] = {}
+DYNAMIC_TEMPORAL_SHADOW_LOCK = threading.Lock()
+DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN: str | None = None
+DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY: tuple[Any, ...] | None = None
+DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT = 0
+DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD: dict[str, Any] | None = None
+DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC: float | None = None
+DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM: np.ndarray | None = None
+DYNAMIC_TEMPORAL_SHADOW_MAX_RESAMPLE_STEPS = 12
+
+
+def _spectrum_fingerprint(
+    wavelength: list[float], intensity: list[float]
+) -> tuple[Any, ...]:
+    midpoint = len(intensity) // 2
+    return (
+        len(intensity),
+        round(float(wavelength[0]), 9),
+        round(float(wavelength[-1]), 9),
+        round(float(intensity[0]), 6),
+        round(float(intensity[midpoint]), 6),
+        round(float(intensity[-1]), 6),
+        round(float(sum(intensity)), 3),
+    )
+
+
+def _spectrum_token(wavelength: list[float], intensity: list[float]) -> str:
+    """Return an exact baseline identity used to invalidate live calibration."""
+
+    digest = hashlib.sha256()
+    digest.update(struct.pack("<Q", len(wavelength)))
+    digest.update(struct.pack(f"<{len(wavelength)}d", *map(float, wavelength)))
+    digest.update(struct.pack(f"<{len(intensity)}d", *map(float, intensity)))
+    return digest.hexdigest()
+
+
+def _clear_session_level_calibration(reason: str) -> dict[str, Any]:
+    global STATIC_SPECTRAL_SESSION_CALIBRATOR
+    global STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE
+
+    with STATIC_SPECTRAL_SESSION_CALIBRATION_LOCK:
+        was_loaded = STATIC_SPECTRAL_SESSION_CALIBRATOR is not None
+        STATIC_SPECTRAL_SESSION_CALIBRATOR = None
+        STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE = {
+            "cleared_reason": reason,
+            "cleared_at": time.time(),
+        }
+    return {
+        "ok": True,
+        "was_loaded": was_loaded,
+        "status": "session_level_calibration_cleared",
+        "reason": reason,
+        "runtime_role": "shadow_diagnostic_only",
+    }
+
+
+def _session_level_calibration_status() -> dict[str, Any]:
+    with STATIC_SPECTRAL_SESSION_CALIBRATION_LOCK:
+        calibrator = STATIC_SPECTRAL_SESSION_CALIBRATOR
+        source = copy.deepcopy(STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE)
+    return {
+        "loaded": calibrator is not None,
+        "schema_version": calibrator.schema_version if calibrator is not None else None,
+        "baseline_token": calibrator.baseline_token if calibrator is not None else None,
+        "calibrated_position_count": len(calibrator.anchors) if calibrator is not None else 0,
+        "runtime_role": "shadow_diagnostic_only",
+        "drives_operator_ui": False,
+        "drives_digital_twin": False,
+        "force_semantics": "approximate_manual_response_level_not_force_N",
+        "source": source,
+    }
+
+
+def _apply_session_level_calibration(
+    prediction: dict[str, Any],
+    temporal: dict[str, Any],
+    *,
+    baseline_token: str,
+) -> dict[str, Any]:
+    with STATIC_SPECTRAL_SESSION_CALIBRATION_LOCK:
+        calibrator = STATIC_SPECTRAL_SESSION_CALIBRATOR
+    base = {
+        "runtime_role": "shadow_diagnostic_only",
+        "drives_operator_ui": False,
+        "drives_digital_twin": False,
+        "force_semantics": "approximate_manual_response_level_not_force_N",
+    }
+    if calibrator is None:
+        return {**base, "ok": False, "status": "session_calibration_not_loaded"}
+    if temporal.get("contact_label") != "contact":
+        return {
+            **base,
+            "ok": True,
+            "status": "stable_no_contact",
+            "label": None,
+        }
+    position = temporal.get("position_label")
+    if not temporal.get("ready") or not position:
+        return {
+            **base,
+            "ok": False,
+            "status": "waiting_for_stable_temporal_position",
+            "label": None,
+        }
+    features = prediction.get("response_calibration_features")
+    if not isinstance(features, dict):
+        return {
+            **base,
+            "ok": False,
+            "status": "response_calibration_features_missing",
+            "label": None,
+        }
+    calibrated = calibrator.predict(
+        str(position),
+        features,
+        baseline_token=baseline_token,
+    )
+    calibrated.update(base)
+    return calibrated
+
+
+def _current_runtime_baseline_token() -> tuple[str | None, dict[str, Any]]:
+    pair = bridge.spectral_model_input(channel_id="P22")
+    if not pair.get("ok"):
+        return None, pair
+    baseline = pair["baseline"]
+    token = _spectrum_token(
+        baseline["wavelength_nm"],
+        baseline["intensity"],
+    )
+    return token, pair
+
+
+def _load_runtime_baseline_recovery_config() -> dict[str, Any]:
+    if yaml is None or not RUNTIME_CONTACT_STATE_CONFIG_PATH.exists():
+        return {}
+    payload = yaml.safe_load(
+        RUNTIME_CONTACT_STATE_CONFIG_PATH.read_text(encoding="utf-8")
+    ) or {}
+    section = payload.get("runtime_baseline_recovery", payload)
+    return dict(section) if isinstance(section, dict) else {}
+
+
 try:
     STATIC_SPECTRAL_PREDICTOR = StaticSpectralPredictor(STATIC_SPECTRAL_MODEL_PATH)
     STATIC_SPECTRAL_MODEL_ERROR = None
 except Exception as exc:  # pragma: no cover - exposed through diagnostics
     STATIC_SPECTRAL_PREDICTOR = None
     STATIC_SPECTRAL_MODEL_ERROR = f"{type(exc).__name__}: {exc}"
+try:
+    STATIC_SPECTRAL_CANDIDATE_PREDICTOR = StaticSpectralPredictor(
+        STATIC_SPECTRAL_CANDIDATE_MODEL_PATH
+    )
+    STATIC_SPECTRAL_CANDIDATE_ERROR = None
+except Exception as exc:  # pragma: no cover - exposed through diagnostics
+    STATIC_SPECTRAL_CANDIDATE_PREDICTOR = None
+    STATIC_SPECTRAL_CANDIDATE_ERROR = f"{type(exc).__name__}: {exc}"
+try:
+    DYNAMIC_TEMPORAL_SHADOW_ADAPTER = DynamicTemporalShadowAdapter.from_paths(
+        DYNAMIC_TEMPORAL_SHADOW_MODEL_PATH,
+        DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH,
+        runtime_recovery_config=_load_runtime_baseline_recovery_config(),
+    )
+    DYNAMIC_TEMPORAL_SHADOW_ERROR = None
+except Exception as exc:  # pragma: no cover - exposed through diagnostics
+    DYNAMIC_TEMPORAL_SHADOW_ADAPTER = None
+    DYNAMIC_TEMPORAL_SHADOW_ERROR = f"{type(exc).__name__}: {exc}"
+
+
+def _reset_dynamic_temporal_shadow(reason: str) -> dict[str, Any]:
+    global DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN
+    global DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY
+    global DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT
+    global DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD
+    global DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC
+    global DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM
+
+    with DYNAMIC_TEMPORAL_SHADOW_LOCK:
+        if DYNAMIC_TEMPORAL_SHADOW_ADAPTER is not None:
+            DYNAMIC_TEMPORAL_SHADOW_ADAPTER.clear()
+        DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN = None
+        DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY = None
+        DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT = 0
+        DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD = None
+        DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC = None
+        DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM = None
+    return {
+        "ok": True,
+        "status": "dynamic_temporal_shadow_reset",
+        "reason": reason,
+        "runtime_role": "shadow_only_not_driving_digital_twin",
+    }
+
+
+def _dynamic_temporal_shadow_status() -> dict[str, Any]:
+    adapter = DYNAMIC_TEMPORAL_SHADOW_ADAPTER
+    bundle = adapter.bundle if adapter is not None else {}
+    grouped = bundle.get("release_guard_grouped_cv", {})
+    return {
+        "loaded": adapter is not None,
+        "model_path": str(DYNAMIC_TEMPORAL_SHADOW_MODEL_PATH),
+        "model_error": DYNAMIC_TEMPORAL_SHADOW_ERROR,
+        "schema_version": bundle.get("schema_version"),
+        "status": bundle.get("status"),
+        "deployment_ready": False,
+        "runtime_role": "shadow_only_not_driving_digital_twin",
+        "drives_operator_ui": False,
+        "drives_digital_twin": False,
+        "inference_stride_unique_frames": DYNAMIC_TEMPORAL_SHADOW_INFERENCE_STRIDE,
+        "temporal_window_frames": bundle.get("time_steps"),
+        "model_frame_interval_sec": bundle.get("frame_interval_sec_estimated"),
+        "physical_frame_resampling_enabled": True,
+        "maximum_resample_steps_per_physical_frame": (
+            DYNAMIC_TEMPORAL_SHADOW_MAX_RESAMPLE_STEPS
+        ),
+        "runtime_contact_state_config_path": str(
+            RUNTIME_CONTACT_STATE_CONFIG_PATH
+        ),
+        "runtime_baseline_recovery": _load_runtime_baseline_recovery_config(),
+        "release_guard_grouped_detection_rate": grouped.get(
+            "release_sequence_detection_rate"
+        ),
+        "release_guard_unsafe_early_triggers": grouped.get(
+            "unsafe_early_trigger_sequence_count"
+        ),
+        "response_level_semantics": "approximate_manual_level_not_force_N",
+    }
+
+
+def _predict_dynamic_temporal_shadow() -> dict[str, Any]:
+    """Evaluate each unique spectrum on the model's trained temporal scale."""
+
+    global DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN
+    global DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY
+    global DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT
+    global DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD
+    global DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC
+    global DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM
+
+    adapter = DYNAMIC_TEMPORAL_SHADOW_ADAPTER
+    if adapter is None:
+        return {
+            "ok": False,
+            "status": "dynamic_shadow_unavailable",
+            "reason": DYNAMIC_TEMPORAL_SHADOW_ERROR,
+            "runtime_role": "shadow_only_not_driving_digital_twin",
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
+        }
+    pair = bridge.spectral_model_input(channel_id="P22")
+    if not pair.get("ok"):
+        return {
+            "ok": False,
+            "status": "baseline_required" if pair.get("current_ready") else "spectrum_required",
+            "reason": pair.get("reason"),
+            "runtime_role": "shadow_only_not_driving_digital_twin",
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
+        }
+    latest = pair["latest"]
+    baseline = pair["baseline"]
+    baseline_token = _spectrum_token(
+        baseline["wavelength_nm"],
+        baseline["intensity"],
+    )
+    frame_key = (
+        latest.get("frame_id"),
+        latest.get("timestamp"),
+        latest.get("source"),
+        _spectrum_fingerprint(latest["wavelength_nm"], latest["intensity"]),
+    )
+    started = time.perf_counter()
+    try:
+        with DYNAMIC_TEMPORAL_SHADOW_LOCK:
+            if baseline_token != DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN:
+                adapter.set_baseline(
+                    baseline["wavelength_nm"],
+                    baseline["intensity"],
+                )
+                DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN = baseline_token
+                DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY = None
+                DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT = 0
+                DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD = None
+                DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC = None
+                DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM = None
+            if (
+                frame_key == DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY
+                and DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD is not None
+            ):
+                cached = copy.deepcopy(DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD)
+                cached["duplicate_frame_ignored"] = True
+                cached["cache_lookup_latency_ms"] = (
+                    time.perf_counter() - started
+                ) * 1000.0
+                return cached
+
+            DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT += 1
+            run_inference = (
+                DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT
+                % DYNAMIC_TEMPORAL_SHADOW_INFERENCE_STRIDE
+                == 0
+            )
+            current_spectrum = np.asarray(latest["intensity"], dtype=float)
+            try:
+                current_timestamp_sec = float(latest.get("timestamp"))
+            except (TypeError, ValueError):
+                current_timestamp_sec = None
+            expected_interval_sec = max(
+                0.01,
+                float(adapter.bundle.get("frame_interval_sec_estimated") or 0.04),
+            )
+            source_interval_sec: float | None = None
+            if (
+                current_timestamp_sec is not None
+                and DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC is not None
+            ):
+                candidate_interval = (
+                    current_timestamp_sec
+                    - DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC
+                )
+                if 0.0 < candidate_interval <= 5.0:
+                    source_interval_sec = candidate_interval
+            resample_steps = 1
+            if (
+                source_interval_sec is not None
+                and DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM is not None
+                and DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM.shape
+                == current_spectrum.shape
+            ):
+                resample_steps = max(
+                    1,
+                    min(
+                        DYNAMIC_TEMPORAL_SHADOW_MAX_RESAMPLE_STEPS,
+                        int(round(source_interval_sec / expected_interval_sec)),
+                    ),
+                )
+
+            raw_response_level = str(latest.get("response_level") or "").lower()
+            raw_qa_status = str(latest.get("qa_status") or "").lower()
+            external_no_contact_hint = bool(
+                raw_response_level == "no_contact"
+                and raw_qa_status not in {"invalid", "error", "stale"}
+            )
+            previous_spectrum = DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM
+            prediction: dict[str, Any] | None = None
+            for step_index in range(1, resample_steps + 1):
+                is_physical_frame = step_index == resample_steps
+                if previous_spectrum is None or resample_steps == 1:
+                    model_spectrum = current_spectrum
+                else:
+                    fraction = step_index / resample_steps
+                    model_spectrum = previous_spectrum + fraction * (
+                        current_spectrum - previous_spectrum
+                    )
+                prediction = adapter.update(
+                    latest["wavelength_nm"],
+                    model_spectrum,
+                    run_inference=bool(run_inference and is_physical_frame),
+                    physical_frame=is_physical_frame,
+                    external_no_contact_hint=(
+                        external_no_contact_hint if is_physical_frame else None
+                    ),
+                    source_timestamp_sec=(
+                        current_timestamp_sec if is_physical_frame else None
+                    ),
+                )
+            if prediction is None:  # pragma: no cover - defensive contract guard
+                raise RuntimeError("temporal resampler produced no model frame")
+            runtime_baseline_update = None
+            pending_baseline = adapter.consume_pending_runtime_baseline_update()
+            if pending_baseline is not None:
+                runtime_baseline_update = (
+                    bridge.set_runtime_recovery_spectrum_baseline(
+                        "P22",
+                        pending_baseline["wavelength_nm"],
+                        pending_baseline["intensity"],
+                        sample_count=int(pending_baseline.get("sample_count") or 1),
+                        span_sec=float(pending_baseline.get("span_sec") or 0.0),
+                        shape_motion_rms=pending_baseline.get("shape_motion_rms"),
+                        common_gain_motion=pending_baseline.get(
+                            "common_gain_motion"
+                        ),
+                        policy=str(
+                            pending_baseline.get("policy")
+                            or "multi_evidence_release_then_spectral_stationarity"
+                        ),
+                    )
+                )
+                if runtime_baseline_update.get("ok"):
+                    baseline_token = _spectrum_token(
+                        pending_baseline["wavelength_nm"].tolist(),
+                        pending_baseline["intensity"].tolist(),
+                    )
+                    DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN = baseline_token
+            DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC = current_timestamp_sec
+            DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM = current_spectrum.copy()
+            payload = {
+                "ok": True,
+                "status": prediction.get("status"),
+                "prediction": prediction,
+                "inference_executed_this_frame": run_inference,
+                "unique_frame_count": DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT,
+                "inference_latency_ms": (time.perf_counter() - started) * 1000.0,
+                "duplicate_frame_ignored": False,
+                "cache_lookup_latency_ms": 0.0,
+                "physical_frame_resampling_enabled": True,
+                "temporal_resample_steps": resample_steps,
+                "model_frame_interval_ms": expected_interval_sec * 1000.0,
+                "source_frame_interval_ms": (
+                    source_interval_sec * 1000.0
+                    if source_interval_sec is not None
+                    else None
+                ),
+                "external_no_contact_hint": external_no_contact_hint,
+                "baseline_token": baseline_token,
+                "runtime_baseline_update": runtime_baseline_update,
+                "runtime_role": "shadow_only_not_driving_digital_twin",
+                "drives_operator_ui": False,
+                "drives_digital_twin": False,
+                "deployment_ready": False,
+                "response_level_semantics": "approximate_manual_level_not_force_N",
+            }
+            DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY = frame_key
+            DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD = copy.deepcopy(payload)
+            return payload
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "dynamic_shadow_inference_error",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "runtime_role": "shadow_only_not_driving_digital_twin",
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
+        }
+
+
+def _dynamic_temporal_display_prediction(
+    dynamic_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Adapt the validated temporal candidate to the existing twin contract.
+
+    The saved artifact keeps its shadow-only safety metadata.  This adapter is
+    only exposed when the caller explicitly requests temporal validation mode,
+    so the runtime can be tested without relabelling the candidate as a final
+    deployment or a calibrated-force model.
+    """
+
+    payload = dynamic_payload if isinstance(dynamic_payload, dict) else {}
+    prediction = payload.get("prediction")
+    if not payload.get("ok") or not isinstance(prediction, dict):
+        return {
+            "ok": False,
+            "status": str(payload.get("status") or "dynamic_temporal_unavailable"),
+            "reason": payload.get("reason"),
+            "prediction": None,
+            "runtime_role": "operator_validation_candidate",
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
+        }
+    if prediction.get("ready") is not True:
+        return {
+            "ok": False,
+            "status": str(prediction.get("status") or "window_warming_up"),
+            "reason": "temporal_window_not_ready",
+            "prediction": None,
+            "history_frames": prediction.get("history_frames"),
+            "required_frames": prediction.get("required_frames"),
+            "runtime_role": "operator_validation_candidate",
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
+        }
+
+    proxy = prediction.get("digital_twin_proxy")
+    if not isinstance(proxy, dict):
+        return {
+            "ok": False,
+            "status": "dynamic_temporal_proxy_missing",
+            "reason": "digital_twin_proxy_missing",
+            "prediction": None,
+            "runtime_role": "operator_validation_candidate",
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
+        }
+
+    contact = prediction.get("contact") or {
+        "label": "no_contact",
+        "confidence": None,
+        "probabilities": {},
+    }
+    position = prediction.get("position")
+    response_level = prediction.get("response_level")
+    position_confidence = (
+        float(position.get("confidence"))
+        if isinstance(position, dict) and position.get("confidence") is not None
+        else None
+    )
+    response_confidence = (
+        float(response_level.get("confidence"))
+        if isinstance(response_level, dict)
+        and response_level.get("confidence") is not None
+        else None
+    )
+    uncertainty_reasons: list[str] = []
+    if proxy.get("active") is True:
+        if position_confidence is not None and position_confidence < 0.55:
+            uncertainty_reasons.append("low_position_confidence")
+        if response_confidence is not None and response_confidence < 0.55:
+            uncertainty_reasons.append("low_response_level_confidence")
+
+    force_level = response_level or {
+        "label": "no_contact",
+        "confidence": contact.get("confidence"),
+        "probabilities": {},
+    }
+    display_prediction = {
+        "schema_version": "dynamic_temporal_validation_display_v1",
+        "recognition_source": "dynamic_temporal_v3_validation",
+        "contact": contact,
+        "position": position,
+        # Keep the legacy key for the existing frontend contract. Its semantics
+        # remain an approximate response level, never a calibrated force value.
+        "force_level": force_level,
+        "response_level": response_level,
+        "force_model_scope": "approximate_manual_response_level_not_force_N",
+        "response_level_semantics": "approximate_manual_level_not_force_N",
+        "operational_state": prediction.get("operational_state"),
+        "release_guard": prediction.get("release_guard"),
+        "runtime_baseline_recovery": prediction.get(
+            "runtime_baseline_recovery"
+        ),
+        "digital_twin": {
+            "active": bool(proxy.get("active")),
+            "position_id": proxy.get("position_id"),
+            "force_level": proxy.get("response_level"),
+            "response_level": proxy.get("response_level"),
+            "deformation_proxy": float(proxy.get("deformation_proxy") or 0.0),
+            "surface_grid": proxy.get("surface_grid"),
+            "surface_metrics": proxy.get("surface_metrics"),
+            "visualization_semantics": proxy.get("visualization_semantics"),
+            "physical_output_semantics": proxy.get("physical_output_semantics"),
+        },
+        "uncertainty": {
+            "review_needed": bool(uncertainty_reasons),
+            "reasons": uncertainty_reasons,
+        },
+        "temporal_window": {
+            "history_frames": prediction.get("history_frames"),
+            "required_frames": prediction.get("required_frames"),
+            "frame_counter": prediction.get("frame_counter"),
+        },
+    }
+    return {
+        "ok": True,
+        "status": "temporal_validation_ready",
+        "prediction": display_prediction,
+        "runtime_role": "operator_validation_candidate",
+        "drives_operator_ui": True,
+        "drives_digital_twin": True,
+        "deployment_ready": False,
+        "validation_only": True,
+    }
 
 
 def _static_spectral_model_status() -> dict:
@@ -90,10 +683,74 @@ def _static_spectral_model_status() -> dict:
         ),
         "observed_model_feature_window_status": "trained_current_ordinary_fbg_dataset",
         "future_3x3_target_plan_active": False,
+        "shadow_candidate": {
+            "loaded": STATIC_SPECTRAL_CANDIDATE_PREDICTOR is not None,
+            "model_path": str(STATIC_SPECTRAL_CANDIDATE_MODEL_PATH),
+            "model_error": STATIC_SPECTRAL_CANDIDATE_ERROR,
+            "model_bundle_sha256": (
+                STATIC_SPECTRAL_CANDIDATE_PREDICTOR.bundle_sha256
+                if STATIC_SPECTRAL_CANDIDATE_PREDICTOR is not None
+                else None
+            ),
+            "runtime_role": "shadow_only_not_driving_digital_twin",
+            "deployment_ready": False,
+            "baseline_contract": "same_current_session_baseline_as_primary_model",
+            "candidate_id": "v7_fused_common_mode_corrected_shift",
+            "confidence_source": "ensemble_vote_fraction_not_calibrated",
+            "promotion_gate": "labeled_live_position_and_level_validation_required",
+            "temporal_stabilization": {
+                "runtime_role": "shadow_diagnostic_only",
+                "window_unique_frames": 5,
+                "minimum_contact_frames": 3,
+                "release_frames": 2,
+            },
+            "session_level_calibration": _session_level_calibration_status(),
+        },
     }
 
 
-def _predict_static_spectral_frame() -> dict:
+def _predict_static_spectral_shadow(
+    latest_wavelength: list[float],
+    latest_intensity: list[float],
+    baseline_wavelength: list[float],
+    baseline_intensity: list[float],
+) -> dict:
+    """Run the candidate beside the deployed model without controlling the UI."""
+
+    if STATIC_SPECTRAL_CANDIDATE_PREDICTOR is None:
+        return {
+            "ok": False,
+            "status": "candidate_unavailable",
+            "reason": STATIC_SPECTRAL_CANDIDATE_ERROR,
+            "runtime_role": "shadow_only_not_driving_digital_twin",
+        }
+    started = time.perf_counter()
+    try:
+        prediction = STATIC_SPECTRAL_CANDIDATE_PREDICTOR.predict(
+            latest_wavelength,
+            latest_intensity,
+            baseline_wavelength_nm=baseline_wavelength,
+            baseline_intensity_counts=baseline_intensity,
+        )
+        return {
+            "ok": True,
+            "status": "shadow_ready",
+            "prediction": prediction,
+            "inference_latency_ms": (time.perf_counter() - started) * 1000.0,
+            "runtime_role": "shadow_only_not_driving_digital_twin",
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "shadow_inference_error",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "runtime_role": "shadow_only_not_driving_digital_twin",
+        }
+
+
+def _predict_static_spectral_frame(*, include_shadow: bool = False) -> dict:
     global STATIC_SPECTRAL_MODEL_CACHE_KEY, STATIC_SPECTRAL_MODEL_CACHE_VALUE
 
     pair = bridge.spectral_model_input(channel_id="P22")
@@ -136,26 +793,17 @@ def _predict_static_spectral_frame() -> dict:
     baseline_intensity = baseline["intensity"]
     baseline_wavelength = baseline["wavelength_nm"]
 
-    def spectrum_fingerprint(wavelength: list[float], intensity: list[float]) -> tuple:
-        midpoint = len(intensity) // 2
-        return (
-            len(intensity),
-            round(float(wavelength[0]), 9),
-            round(float(wavelength[-1]), 9),
-            round(float(intensity[0]), 6),
-            round(float(intensity[midpoint]), 6),
-            round(float(intensity[-1]), 6),
-            round(float(sum(intensity)), 3),
-        )
+    baseline_token = _spectrum_token(baseline_wavelength, baseline_intensity)
 
     cache_key = (
+        bool(include_shadow),
         latest.get("frame_id"),
         latest.get("timestamp"),
         latest.get("source"),
-        spectrum_fingerprint(latest_wavelength, latest_intensity),
+        _spectrum_fingerprint(latest_wavelength, latest_intensity),
         pair.get("baseline_spectrum_sample_count"),
         pair.get("baseline_spectrum_status"),
-        spectrum_fingerprint(baseline_wavelength, baseline_intensity),
+        baseline_token,
     )
     started = time.perf_counter()
     try:
@@ -174,10 +822,46 @@ def _predict_static_spectral_frame() -> dict:
                 baseline_wavelength_nm=baseline_wavelength,
                 baseline_intensity_counts=baseline_intensity,
             )
+            if include_shadow:
+                shadow_candidate = _predict_static_spectral_shadow(
+                    latest_wavelength,
+                    latest_intensity,
+                    baseline_wavelength,
+                    baseline_intensity,
+                )
+                if shadow_candidate.get("ok") and isinstance(
+                    shadow_candidate.get("prediction"), dict
+                ):
+                    shadow_candidate["temporal_stabilization"] = (
+                        STATIC_SPECTRAL_SHADOW_STABILIZER.update(
+                            frame_id=latest.get("frame_id")
+                            or latest.get("timestamp"),
+                            prediction=shadow_candidate["prediction"],
+                            baseline_token=baseline_token,
+                            timestamp=latest.get("timestamp"),
+                        )
+                    )
+                    shadow_candidate["session_calibrated_force"] = (
+                        _apply_session_level_calibration(
+                            shadow_candidate["prediction"],
+                            shadow_candidate["temporal_stabilization"],
+                            baseline_token=baseline_token,
+                        )
+                    )
+            else:
+                shadow_candidate = {
+                    "ok": False,
+                    "status": "shadow_not_requested",
+                    "runtime_role": "shadow_only_not_driving_digital_twin",
+                    "drives_operator_ui": False,
+                    "drives_digital_twin": False,
+                    "request_hint": "set include_shadow=true for validation",
+                }
             result = {
                 "ok": True,
                 "status": "ready",
                 "prediction": prediction,
+                "shadow_candidate": shadow_candidate,
                 "inference_latency_ms": (time.perf_counter() - started) * 1000.0,
                 "cache_hit": False,
                 "cache_lookup_latency_ms": 0.0,
@@ -192,6 +876,7 @@ def _predict_static_spectral_frame() -> dict:
                     "baseline_spectrum_semantic_role": pair.get(
                         "baseline_spectrum_semantic_role"
                     ),
+                    "baseline_spectrum_token": baseline_token,
                     "frame_id": latest.get("frame_id"),
                     "timestamp": latest.get("timestamp"),
                     "spectrum_points": len(latest["intensity"]),
@@ -1652,11 +2337,15 @@ def health() -> dict:
         "physical_channel_mapping_final": False,
         "real_3x3_enabled": False,
         "trained_static_model_primary": True,
+        "default_operator_recognition": "dynamic_temporal_v3_validation",
+        "dynamic_temporal_validation_primary": True,
+        "static_spectral_fallback_available": STATIC_SPECTRAL_PREDICTOR is not None,
         "position_output_semantics": "approximate_manual_fingertip_contact_region",
         "response_level_semantics": "approximate_manual_light_normal_hard_not_force_N",
         "not_pd_voltage": True,
         "calibrated_physical_output": False,
         "trained_static_spectral_model": _static_spectral_model_status(),
+        "dynamic_temporal_shadow": _dynamic_temporal_shadow_status(),
         "array_wavelength_plan": _array_wavelength_plan_payload(),
         "ui_style": "lab_light_digital_twin_like_previous_app",
         "status": bridge.status(),
@@ -1671,9 +2360,95 @@ def status() -> dict:
     return bridge.status()
 
 
+@app.get("/api/shadow/session_level_calibration")
+def shadow_session_level_calibration_status() -> dict:
+    current_token, pair = _current_runtime_baseline_token()
+    status_payload = _session_level_calibration_status()
+    status_payload.update(
+        {
+            "ok": True,
+            "current_baseline_ready": current_token is not None,
+            "current_baseline_token": current_token,
+            "baseline_matches": bool(
+                current_token is not None
+                and status_payload.get("baseline_token") == current_token
+            ),
+            "baseline_status": pair.get("baseline_spectrum_status"),
+        }
+    )
+    return status_payload
+
+
+@app.post("/api/shadow/session_level_calibration")
+async def load_shadow_session_level_calibration(request: Request) -> dict:
+    global STATIC_SPECTRAL_SESSION_CALIBRATOR
+    global STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE
+
+    try:
+        request_payload = await request.json()
+    except Exception:
+        return {"ok": False, "status": "request_body_must_be_json"}
+    payload = request_payload.get("calibration", request_payload)
+    try:
+        calibrator = PerPositionOrdinalCalibrator.from_dict(payload)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "invalid_session_calibration_payload",
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
+    missing_positions = sorted(
+        set(CALIBRATION_POSITION_ORDER) - set(calibrator.anchors)
+    )
+    if missing_positions:
+        return {
+            "ok": False,
+            "status": "incomplete_position_calibration",
+            "missing_positions": missing_positions,
+        }
+    current_token, pair = _current_runtime_baseline_token()
+    if current_token is None:
+        return {
+            "ok": False,
+            "status": "current_runtime_baseline_required",
+            "baseline_status": pair.get("baseline_spectrum_status"),
+        }
+    if calibrator.baseline_token != current_token:
+        return {
+            "ok": False,
+            "status": "calibration_baseline_token_mismatch",
+            "calibration_baseline_token": calibrator.baseline_token,
+            "current_baseline_token": current_token,
+        }
+    with STATIC_SPECTRAL_SESSION_CALIBRATION_LOCK:
+        STATIC_SPECTRAL_SESSION_CALIBRATOR = calibrator
+        STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE = {
+            "loaded_at": time.time(),
+            "source": request_payload.get("source") or "local_api",
+            "trial_count": request_payload.get("trial_count"),
+        }
+    return {
+        "ok": True,
+        "status": "session_level_calibration_loaded_shadow_only",
+        **_session_level_calibration_status(),
+    }
+
+
+@app.delete("/api/shadow/session_level_calibration")
+def delete_shadow_session_level_calibration() -> dict:
+    return _clear_session_level_calibration("manual_api_clear")
+
+
 @app.post("/api/reset")
 def reset(keep_baseline: bool = Query(default=True)) -> dict:
     result = bridge.reset(keep_baseline=keep_baseline)
+    result["dynamic_temporal_shadow_reset"] = _reset_dynamic_temporal_shadow(
+        "api_reset"
+    )
+    if not keep_baseline:
+        result["session_level_calibration_reset"] = (
+            _clear_session_level_calibration("baseline_reset")
+        )
     result.update({"mode": "bayspec_wavelength_shift_reset"})
     return result
 
@@ -1721,11 +2496,19 @@ def _begin_acquisition_session() -> dict:
     output scientifically ambiguous.
     """
 
+    calibration_reset = _clear_session_level_calibration(
+        "new_acquisition_session"
+    )
+    dynamic_shadow_reset = _reset_dynamic_temporal_shadow(
+        "new_acquisition_session"
+    )
     result = bridge.reset(keep_baseline=False)
     return {
         **result,
         "baseline_invalidated": True,
         "baseline_requirement": "stable_current_session_post_release_recovery",
+        "session_level_calibration_reset": calibration_reset,
+        "dynamic_temporal_shadow_reset": dynamic_shadow_reset,
     }
 
 
@@ -1876,6 +2659,10 @@ async def set_baseline(request: Request) -> dict:
     except Exception:
         payload = {}
     result = bridge.set_baseline(payload)
+    if result.get("baseline_set") or result.get("static_model_spectrum_baseline_ready"):
+        result["dynamic_temporal_shadow_reset"] = _reset_dynamic_temporal_shadow(
+            "runtime_baseline_replaced"
+        )
     result.update({"mode": "bayspec_wavelength_baseline_set"})
     return result
 
@@ -1884,17 +2671,46 @@ async def set_baseline(request: Request) -> dict:
 def set_global_candidate_baseline(
     minimum_frames: int = Query(default=30, ge=3, le=500),
 ) -> dict:
-    result = bridge.set_global_candidate_baseline(minimum_frames=minimum_frames)
-    candidate_baseline_ok = bool(result.get("ok"))
     model_baseline = bridge.set_baseline(
-        {"channel_id": "P22", "baseline_method": "frozen_baseline"}
+        {
+            "channel_id": "P22",
+            "baseline_method": "frozen_baseline",
+            "minimum_recent_samples": minimum_frames,
+        }
     )
     model_baseline_ready = bool(
         model_baseline.get("static_model_spectrum_baseline_ready")
     )
+    result = (
+        bridge.set_global_candidate_baseline(minimum_frames=minimum_frames)
+        if model_baseline_ready
+        else {
+            "ok": False,
+            "reason": model_baseline.get("static_model_spectrum_baseline_status")
+            or model_baseline.get("reason")
+            or "static_model_spectrum_baseline_not_ready",
+            "candidate_baseline_skipped": True,
+        }
+    )
+    candidate_baseline_ok = bool(result.get("ok"))
+    baseline_ready = candidate_baseline_ok and model_baseline_ready
+    failure_reason = None
+    if not candidate_baseline_ok:
+        failure_reason = str(result.get("reason") or "global_candidate_baseline_not_ready")
+    elif not model_baseline_ready:
+        failure_reason = str(
+            model_baseline.get("static_model_spectrum_baseline_status")
+            or model_baseline.get("reason")
+            or "static_model_spectrum_baseline_not_ready"
+        )
     result.update(
         {
-            "ok": candidate_baseline_ok or model_baseline_ready,
+            "ok": baseline_ready,
+            "message": (
+                None
+                if baseline_ready
+                else f"Baseline not ready: {failure_reason}. Keep the sensor released and try again."
+            ),
             "mode": "global_9fbg_candidate_display_baseline",
             "recognition_scope": "global_3x3_hybrid_spectral_fingerprint",
             "physical_channel_mapping_final": False,
@@ -1930,6 +2746,13 @@ def set_global_candidate_baseline(
             },
         }
     )
+    if baseline_ready:
+        result["session_level_calibration_reset"] = (
+            _clear_session_level_calibration("runtime_baseline_replaced")
+        )
+        result["dynamic_temporal_shadow_reset"] = (
+            _reset_dynamic_temporal_shadow("runtime_baseline_replaced")
+        )
     return result
 
 
@@ -1974,6 +2797,9 @@ def frame(
 def global_spectrum_frame(
     trace_limit: int = Query(default=8, ge=1, le=20000),
     include_spectrum: bool = Query(default=True),
+    include_shadow: bool = Query(default=False),
+    include_dynamic_shadow: bool = Query(default=False),
+    temporal_validation_mode: bool = Query(default=False),
 ) -> dict:
     """Expose one full-spectrum carrier frame for joint nine-FBG processing.
 
@@ -1982,6 +2808,7 @@ def global_spectrum_frame(
     prevents global recognition clients from treating P22 as their input scope.
     """
 
+    temporal_validation_enabled = temporal_validation_mode is True
     watcher_status = export_watcher.status()
     sdk_status = sdk_live_reader.status()
     result = bridge.frame(
@@ -2131,13 +2958,96 @@ def global_spectrum_frame(
             }
         )
         result["latest"] = latest
-    static_model_frame = _predict_static_spectral_frame()
+    # The temporal validation model is the active recognizer in this mode.
+    # Running the legacy static ensemble as well adds close to a second of
+    # avoidable CPU work per live frame. Keep it available only when explicitly
+    # requested for diagnostics or when static fallback is the selected mode.
+    static_inference_requested = bool(not temporal_validation_enabled or include_shadow)
+    if static_inference_requested:
+        static_model_frame = _predict_static_spectral_frame(
+            include_shadow=bool(include_shadow)
+        )
+    else:
+        static_model_frame = {
+            "ok": False,
+            "status": "skipped_temporal_validation_mode",
+            "reason": "dynamic_temporal_model_is_active",
+            "inference_skipped": True,
+        }
     static_prediction = static_model_frame.get("prediction") if static_model_frame.get("ok") else None
-    model_assisted_display_allowed = bool(
+    static_shadow = (
+        static_model_frame.get("shadow_candidate")
+        if isinstance(static_model_frame.get("shadow_candidate"), dict)
+        else None
+    )
+    static_shadow_prediction = (
+        static_shadow.get("prediction")
+        if static_shadow is not None and static_shadow.get("ok")
+        else None
+    )
+    dynamic_requested = bool(include_dynamic_shadow is True or temporal_validation_enabled)
+    if not dynamic_requested:
+        dynamic_temporal_shadow = {
+            "ok": False,
+            "status": "dynamic_shadow_not_requested",
+            "request_hint": "set include_dynamic_shadow=true for diagnostic validation",
+            "runtime_role": "shadow_only_not_driving_digital_twin",
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
+        }
+    elif not source_gate["model_input_source_allowed"]:
+        dynamic_temporal_shadow = {
+            "ok": False,
+            "status": "dynamic_shadow_source_blocked",
+            "reason": "stale_or_mismatched_live_source",
+            "runtime_role": "shadow_only_not_driving_digital_twin",
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
+        }
+    else:
+        dynamic_temporal_shadow = _predict_dynamic_temporal_shadow()
+    dynamic_temporal_display = _dynamic_temporal_display_prediction(
+        dynamic_temporal_shadow
+    )
+    static_model_assisted_display_allowed = bool(
         static_model_frame.get("ok") and source_gate["model_input_source_allowed"]
     )
+    temporal_model_assisted_display_allowed = bool(
+        temporal_validation_enabled
+        and source_gate["model_input_source_allowed"]
+        and dynamic_temporal_display.get("ok")
+    )
+    if temporal_validation_enabled:
+        model_assisted_display_allowed = temporal_model_assisted_display_allowed
+        active_spectral_prediction = dynamic_temporal_display.get("prediction")
+        active_spectral_model_source = "dynamic_temporal_v3_validation"
+        active_spectral_model_status = dynamic_temporal_display.get("status")
+        active_spectral_model_expected = True
+        active_spectral_model_loaded = DYNAMIC_TEMPORAL_SHADOW_ADAPTER is not None
+        active_spectral_model_progress = {
+            "history_frames": dynamic_temporal_display.get("history_frames"),
+            "required_frames": dynamic_temporal_display.get("required_frames"),
+        }
+    else:
+        model_assisted_display_allowed = static_model_assisted_display_allowed
+        active_spectral_prediction = static_prediction
+        active_spectral_model_source = "static_spectral_model"
+        active_spectral_model_status = static_model_frame.get("status")
+        active_spectral_model_expected = bool(
+            _static_spectral_model_status().get("loaded")
+        )
+        active_spectral_model_loaded = active_spectral_model_expected
+        active_spectral_model_progress = None
     if model_assisted_display_allowed:
         model_assisted_display_block_reason = None
+    elif not source_gate["model_input_source_allowed"]:
+        model_assisted_display_block_reason = "stale_or_mismatched_live_source"
+    elif temporal_validation_enabled:
+        model_assisted_display_block_reason = str(
+            dynamic_temporal_display.get("reason")
+            or dynamic_temporal_display.get("status")
+            or "dynamic_temporal_model_not_ready"
+        )
     elif static_model_frame.get("ok"):
         model_assisted_display_block_reason = "stale_or_mismatched_live_source"
     else:
@@ -2147,6 +3057,11 @@ def global_spectrum_frame(
     if isinstance(latest, dict):
         latest["trained_static_spectral_prediction"] = static_prediction
         latest["trained_static_spectral_model_status"] = static_model_frame.get("status")
+        latest["active_spectral_prediction"] = active_spectral_prediction
+        latest["active_spectral_model_source"] = active_spectral_model_source
+        latest["active_spectral_model_status"] = active_spectral_model_status
+        latest["active_spectral_model_loaded"] = active_spectral_model_loaded
+        latest["active_spectral_model_progress"] = active_spectral_model_progress
         result["latest"] = latest
     result.update(
         {
@@ -2172,9 +3087,26 @@ def global_spectrum_frame(
             ),
             "model_assisted_display_allowed": model_assisted_display_allowed,
             "model_assisted_display_block_reason": model_assisted_display_block_reason,
+            "temporal_validation_mode": temporal_validation_enabled,
+            "temporal_model_assisted_display_allowed": (
+                temporal_model_assisted_display_allowed
+            ),
+            "static_model_assisted_display_allowed": (
+                static_model_assisted_display_allowed
+            ),
+            "active_spectral_model_expected": active_spectral_model_expected,
+            "active_spectral_model_loaded": active_spectral_model_loaded,
+            "active_spectral_model_source": active_spectral_model_source,
+            "active_spectral_model_status": active_spectral_model_status,
+            "active_spectral_model_progress": active_spectral_model_progress,
+            "active_spectral_prediction": active_spectral_prediction,
             "trained_static_spectral_model": _static_spectral_model_status(),
             "trained_static_spectral_frame": static_model_frame,
             "trained_static_spectral_prediction": static_prediction,
+            "trained_static_spectral_shadow": static_shadow,
+            "trained_static_spectral_shadow_prediction": static_shadow_prediction,
+            "dynamic_temporal_shadow": dynamic_temporal_shadow,
+            "dynamic_temporal_display": dynamic_temporal_display,
             "blockers": global_frame_qa.get("blockers", []),
             "export_watcher": watcher_status,
             "sdk_live": sdk_status,

@@ -1,0 +1,44 @@
+schema_version: touch_runtime_contact_state_v1
+
+runtime_baseline_recovery:
+  enabled: true
+
+  # Real direct-SDK no-contact observations on 2026-07-15 were roughly
+  # 0.0013-0.0018 shape RMS per physical frame. These limits leave margin
+  # without treating normal no-contact jitter as contact activity.
+  max_shape_motion_rms: 0.0035
+  max_common_gain_motion: 0.0030
+  activity_shape_motion_rms: 0.0060
+  activity_common_gain_motion: 0.0060
+
+  # Quietness is supporting evidence, never the only release decision.
+  quiet_hold_sec: 5.0
+  minimum_quiet_physical_frames: 8
+  release_candidate_timeout_sec: 12.0
+
+  # A release candidate is armed only after credible contact and a subsequent
+  # release transition supported by model, raw demodulation, or recovery trend.
+  contact_probability_arm: 0.65
+  contact_arm_physical_frames: 2
+  minimum_contact_baseline_distance: 0.0060
+  release_probability_threshold: 0.40
+  no_contact_probability_support: 0.55
+  minimum_recovery_fraction: 0.20
+  minimum_contact_probability_drop: 0.15
+  release_activity_memory_sec: 2.0
+
+  # Recovery fallback for an already released sensor when the release edge was
+  # missed (for example after app restart). It still requires raw no-contact,
+  # low spatial confidence, and full-spectrum stationarity together.
+  stationary_rest_fallback_enabled: true
+  stationary_rest_candidate_delay_sec: 1.0
+  fallback_requires_new_contact_after_reanchor: true
+
+  # Cancel a pending release if a new active change moves away from the quiet
+  # recovery cluster. This prevents automatic baseline capture during re-press.
+  recontact_probability_threshold: 0.75
+  recontact_distance_growth_fraction: 0.15
+  recontact_distance_growth_absolute: 0.0040
+
+  auto_update_runtime_baseline: true
+  policy: multi_evidence_release_then_five_second_spectral_stationarity
