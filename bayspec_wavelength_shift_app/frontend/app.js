@@ -97,12 +97,14 @@ const DEMO_FRAME_SCHEDULER_INTERVAL_MS = 25;
 const DEMO_PLAYBACK_RATE_STORAGE_KEY = "touch-response-playback-rate";
 const DEMO_PLAYBACK_RATE_MIN = 0.1;
 const DEMO_PLAYBACK_RATE_MAX = 2.0;
-const THREE_ATTENUATION_EASING = 8.0;
-const THREE_DEFORMATION_EASING = 7.0;
+// Reach a new physical-frame target in about 0.2 s while retaining continuous
+// requestAnimationFrame interpolation between the slower BaySpec SDK frames.
+const THREE_ATTENUATION_EASING = 14.0;
+const THREE_DEFORMATION_EASING = 16.0;
 const THREE_ATTENUATION_RELEASE_EASING = 16.0;
 const THREE_DEFORMATION_RELEASE_EASING = 14.0;
 const THREE_SURFACE_RELEASE_EASING = 18.0;
-const THREE_SPATIAL_EASING = 10.0;
+const THREE_SPATIAL_EASING = 14.0;
 const THREE_SETTLE_EPSILON = 0.00035;
 const THREE_MAX_DEVICE_PIXEL_RATIO = 1.25;
 const THREE_GEOMETRY_UPDATE_INTERVAL_MS = 33;
@@ -121,7 +123,7 @@ const DEMO_SURFACE_VISUAL_PEAK_FLOORS = {
   tap: 0.58,
   release: 0.34,
 };
-const CHART_EASING = 4.8;
+const CHART_EASING = 8.5;
 const CHART_SETTLE_COUNTS = 0.55;
 const TRACE_WINDOW_POINTS = 120;
 const DEMO_TRACE_WINDOW_POINTS = 80;

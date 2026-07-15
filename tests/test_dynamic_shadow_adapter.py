@@ -415,6 +415,26 @@ class DynamicTemporalShadowAdapterSmokeTests(unittest.TestCase):
         self.assertTrue(held["held_from_previous_unique_frame"])
         self.assertEqual(held["history_frames"], adapter.time_steps)
 
+    def test_baseline_preroll_makes_first_new_frame_inferable(self) -> None:
+        adapter = DynamicTemporalShadowAdapter.from_paths(
+            V1_MODEL,
+            PEAK_CONFIG,
+            runtime_recovery_config={
+                "prime_temporal_history_with_baseline": True,
+                "baseline_preroll_frames": 20,
+            },
+        )
+        wavelength, baseline = self._synthetic_spectrum()
+        adapter.set_baseline(wavelength, baseline)
+
+        result = adapter.update(wavelength, baseline)
+
+        self.assertEqual(result["status"], "shadow_ready")
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["history_frames"], adapter.time_steps)
+        self.assertTrue(result["baseline_preroll_enabled"])
+        self.assertEqual(result["baseline_preroll_frames"], adapter.time_steps)
+
 
 @unittest.skipUnless(V2_MODEL.exists(), "dynamic v2 candidate artifact is unavailable")
 class DynamicTemporalShadowV2SafetyTests(unittest.TestCase):

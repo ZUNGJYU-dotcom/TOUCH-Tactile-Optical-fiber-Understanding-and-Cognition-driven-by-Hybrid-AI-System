@@ -3,6 +3,13 @@ schema_version: touch_runtime_contact_state_v1
 runtime_baseline_recovery:
   enabled: true
 
+  # The temporal model expects 20 samples at 40 ms intervals, while the stable
+  # direct-SDK path typically yields one physical spectrum about every 0.4 s.
+  # Seed the history with the confirmed no-contact baseline so the first new
+  # physical frame can be classified instead of waiting through warm-up.
+  prime_temporal_history_with_baseline: true
+  baseline_preroll_frames: 20
+
   # Real direct-SDK no-contact observations on 2026-07-15 were roughly
   # 0.0013-0.0018 shape RMS per physical frame. These limits leave margin
   # without treating normal no-contact jitter as contact activity.

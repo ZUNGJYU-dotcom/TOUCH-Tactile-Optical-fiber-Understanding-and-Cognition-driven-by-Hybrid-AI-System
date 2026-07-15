@@ -21,6 +21,14 @@ class _AliveThread:
         return True
 
 
+class RuntimeResponsivenessConfigTests(unittest.TestCase):
+    def test_temporal_history_preroll_is_enabled_for_live_runtime(self) -> None:
+        config = backend_main._load_runtime_baseline_recovery_config()
+
+        self.assertTrue(config["prime_temporal_history_with_baseline"])
+        self.assertEqual(config["baseline_preroll_frames"], 20)
+
+
 class ModelDisplaySourceGateTests(unittest.TestCase):
     def test_replay_is_allowed_when_live_sources_are_stopped(self) -> None:
         gate = _model_display_source_gate(

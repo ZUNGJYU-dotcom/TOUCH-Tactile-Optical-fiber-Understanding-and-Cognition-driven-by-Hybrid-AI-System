@@ -885,6 +885,19 @@ class DynamicTemporalShadowAdapter:
         self._release_guard = ReleaseResidualGuard(bundle.get("release_guard"))
         recovery_config = dict(bundle.get("runtime_baseline_recovery") or {})
         recovery_config.update(dict(runtime_recovery_config or {}))
+        self._prime_temporal_history_with_baseline = bool(
+            recovery_config.get("prime_temporal_history_with_baseline", False)
+        )
+        try:
+            configured_preroll_frames = int(
+                recovery_config.get("baseline_preroll_frames", self.time_steps)
+            )
+        except (TypeError, ValueError):
+            configured_preroll_frames = self.time_steps
+        self._baseline_preroll_frames = max(
+            0,
+            min(self.time_steps, configured_preroll_frames),
+        )
         self._runtime_baseline_recovery = RuntimeBaselineRecoveryGuard(
             recovery_config
         )
@@ -916,6 +929,32 @@ class DynamicTemporalShadowAdapter:
     def baseline_ready(self) -> bool:
         return self._baseline_spectrum is not None
 
+    def _prime_feature_history_from_baseline(self) -> int:
+        """Seed a no-contact pre-roll so the next physical frame is inferable."""
+        self._feature_history.clear()
+        if (
+            not self._prime_temporal_history_with_baseline
+            or self._baseline_preroll_frames <= 0
+            or self._wavelength_nm is None
+            or self._baseline_spectrum is None
+        ):
+            return 0
+        features, names, _, _ = extract_baseline_relative_frame_features(
+            self._wavelength_nm,
+            self._baseline_spectrum,
+            self._baseline_spectrum,
+            self.peak_windows,
+        )
+        expected_names = tuple(self.bundle["frame_feature_names"])
+        if names != expected_names:
+            raise ValueError(
+                "baseline pre-roll feature order differs from the trained artifact"
+            )
+        baseline_features = np.asarray(features[0], dtype=np.float32)
+        for _ in range(self._baseline_preroll_frames):
+            self._feature_history.append(baseline_features.copy())
+        return len(self._feature_history)
+
     def consume_pending_runtime_baseline_update(self) -> dict[str, Any] | None:
         pending = self._pending_runtime_baseline_update
         self._pending_runtime_baseline_update = None
@@ -943,7 +982,7 @@ class DynamicTemporalShadowAdapter:
             raise ValueError("wavelength grid must be strictly increasing")
         self._wavelength_nm = wavelength.copy()
         self._baseline_spectrum = baseline.copy()
-        self._feature_history.clear()
+        self._prime_feature_history_from_baseline()
         self._frame_counter = 0
         self._release_guard.reset()
         self._runtime_baseline_recovery.reset()
@@ -978,6 +1017,11 @@ class DynamicTemporalShadowAdapter:
             "runtime_baseline_recovery": self._runtime_baseline_recovery.snapshot(),
             "runtime_baseline_revision": self._runtime_baseline_revision,
             "runtime_inference_policy": "single_sample_tree_inference_n_jobs_1",
+            "baseline_preroll_enabled": self._prime_temporal_history_with_baseline,
+            "baseline_preroll_frames": min(
+                len(self._feature_history),
+                self._baseline_preroll_frames,
+            ),
         }
         output["digital_twin_proxy"] = dynamic_prediction_to_twin_proxy(output)
         return output
@@ -1070,6 +1114,11 @@ class DynamicTemporalShadowAdapter:
             ),
             "runtime_inference_policy": "single_sample_tree_inference_n_jobs_1",
             "runtime_baseline_revision": self._runtime_baseline_revision,
+            "baseline_preroll_enabled": self._prime_temporal_history_with_baseline,
+            "baseline_preroll_frames": min(
+                len(self._feature_history),
+                self._baseline_preroll_frames,
+            ),
         }
         if contact_label == "no_contact":
             output["release_guard"] = self._release_guard.update(
@@ -1188,7 +1237,7 @@ class DynamicTemporalShadowAdapter:
                 "common_gain_motion": recovery.get("common_gain_motion"),
                 "policy": recovery.get("policy"),
             }
-            self._feature_history.clear()
+            self._prime_feature_history_from_baseline()
             self._frame_counter = 0
             self._release_guard.reset()
             self._last_ready_output = None
