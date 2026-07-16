@@ -310,6 +310,26 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
         self.assertIn("surfaceHasActiveResponse", app_js)
         self.assertIn('ARRAY_ONE_SHOT_SCENARIOS = new Set(["tap", "release"])', app_js)
 
+    def test_operator_spectrum_entry_preserves_its_full_label(self) -> None:
+        index_html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        styles_css = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('class="chip spectrum-open-chip">Spectrum</span>', index_html)
+        self.assertIn(".operator-mode .summary-hud .spectrum-open-chip", styles_css)
+        self.assertIn("grid-template-columns: minmax(0, 1fr) auto !important;", styles_css)
+        self.assertIn("min-width: 76px;", styles_css)
+
+    def test_operator_qa_status_has_the_widest_status_column(self) -> None:
+        index_html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        styles_css = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('class="qa-status-item"><small>QA status</small>', index_html)
+        self.assertIn(
+            "grid-template-columns: minmax(105px, 0.9fr) minmax(115px, 1fr) minmax(158px, 1.35fr) !important;",
+            styles_css,
+        )
+        self.assertIn(".operator-mode #topQaStatus", styles_css)
+
     def test_global_candidate_baseline_uses_complete_recent_nine_peak_frames(self) -> None:
         bridge = BaySpecWavelengthShiftBridge()
         wavelengths = [

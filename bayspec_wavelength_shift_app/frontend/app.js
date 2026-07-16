@@ -18,6 +18,7 @@ const heatmapCanvas = document.getElementById("heatmapCanvas");
 const threeMount = document.getElementById("threeMount");
 const channelGrid = document.getElementById("channelGrid");
 const demoStatusChip = document.getElementById("demoStatusChip");
+const demoSingleButton = document.getElementById("demoSingleButton");
 const demoAutoButton = document.getElementById("demoAutoButton");
 const demoResetButton = document.getElementById("demoResetButton");
 const demoSpeedControl = document.getElementById("demoSpeedControl");
@@ -31,6 +32,7 @@ const physicalProxyModeButton = document.getElementById("physicalProxyModeButton
 const responseTerrainModeButton = document.getElementById("responseTerrainModeButton");
 const thumbHolderModeButton = document.getElementById("thumbHolderModeButton");
 const surfaceOnlyModeButton = document.getElementById("surfaceOnlyModeButton");
+const surfaceFullscreenButton = document.getElementById("surfaceFullscreenButton");
 const thumbAlignmentSaveButton = document.getElementById("thumbAlignmentSaveButton");
 const thumbAlignmentResetButton = document.getElementById("thumbAlignmentResetButton");
 const thumbShowSlotButton = document.getElementById("thumbShowSlotButton");
@@ -90,9 +92,8 @@ const DEMO_PRESETS = {
   normal_press: { label: "moderate_shift", intensity: 40000, shiftPm: 190, description: "moderate Bragg wavelength shift" },
   hard_press: { label: "large_shift", intensity: 40000, shiftPm: 420, description: "large Bragg wavelength shift" },
 };
-const DEMO_AUTOPLAY_SEQUENCE = ["no_contact", "light_press", "normal_press", "hard_press", "normal_press", "light_press", "no_contact"];
-const DEMO_AUTOPLAY_INTERVAL_MS = 1700;
 const DEMO_ARRAY_STEP_INTERVAL_MS = 100;
+const DEMO_ARRAY_LOOP_INTERVAL_MS = 5000;
 const DEMO_FRAME_SCHEDULER_INTERVAL_MS = 25;
 const DEMO_PLAYBACK_RATE_STORAGE_KEY = "touch-response-playback-rate";
 const DEMO_PLAYBACK_RATE_MIN = 0.1;
@@ -114,7 +115,6 @@ const THREE_SLOT_MAX_LOCAL_DEPRESSION = 0.64;
 const THREE_SLOT_MAX_LOCAL_BODY_Y = 0.86;
 const SURFACE_GRID_VISUAL_GAMMA = 0.68;
 const DEMO_SURFACE_VISUAL_PEAK_FLOORS = {
-  center_press: 0.50,
   off_center_fingertip_contact: 0.52,
   vertical_slide_p11_p12_p13: 0.56,
   horizontal_slide_p11_p21_p31: 0.56,
@@ -164,7 +164,12 @@ const GLOBAL_EVENT_SINGLE_PEAK_TRIGGER_PM = 18;
 const GLOBAL_EVENT_PRIMARY_TRIGGER_PM = 8;
 const GLOBAL_EVENT_SECONDARY_TRIGGER_PM = 3;
 const ARRAY_SLIDE_STEPS = {
-  center_press: 14,
+  // 5.0 s at 1.0x: light 0.5 s, release 2.0 s, hard 2.0 s,
+  // then a 0.5 s smooth release so loop boundaries remain physical.
+  center_press: 50,
+  p21_contact: 50,
+  p12_contact: 50,
+  p32_contact: 50,
   off_center_fingertip_contact: 14,
   vertical_slide_p11_p12_p13: 12,
   horizontal_slide_p11_p21_p31: 12,
@@ -173,9 +178,11 @@ const ARRAY_SLIDE_STEPS = {
   tap: 10,
   release: 12,
 };
-const ARRAY_ONE_SHOT_SCENARIOS = new Set(["tap", "release"]);
 const SCENARIO_LABELS = {
   center_press: "center fingertip contact",
+  p21_contact: "P21 fingertip contact",
+  p12_contact: "P12 fingertip contact",
+  p32_contact: "P32 fingertip contact",
   off_center_fingertip_contact: "off-center fingertip contact",
   vertical_slide_p11_p12_p13: "vertical fingertip slide",
   horizontal_slide_p11_p21_p31: "horizontal fingertip slide",
@@ -624,25 +631,18 @@ function activeModelDisplayName(record = null, arrayFrame = null) {
 }
 
 function simulatedScenarioStateLabel(arrayFrame = {}, surfaceMetrics = {}) {
-  const scenario = String(arrayFrame?.scenario || "");
   const interpretation = String(surfaceMetrics?.event_interpretation || "").toLowerCase();
   const peak = Number(surfaceMetrics?.surface_peak);
   const responding = Number(
     surfaceMetrics?.responding_channel_count ?? surfaceMetrics?.active_channel_count ?? 0
   );
 
-  if (scenario === "tap") {
-    if (interpretation === "tap_decay") return "fingertip tap · decay";
-    if (interpretation === "no_contact_after_tap") return "no contact after tap";
-    return "fingertip tap";
-  }
-
   const noActiveContact =
     interpretation.startsWith("no_contact") ||
     interpretation.includes("no active contact") ||
     (Number.isFinite(peak) && peak < 0.05 && responding === 0);
-  if (noActiveContact) return scenario === "release" ? "release · no contact" : "no contact · release";
-  return scenarioLabel(scenario);
+  if (noActiveContact) return "no_contact";
+  return levelLabel(responseLevelFromSurfaceValue(peak));
 }
 
 function surfaceContactPresentation({
@@ -654,28 +654,24 @@ function surfaceContactPresentation({
   heldMeasurement = false,
 } = {}) {
   if (!measurementAvailable) {
-    return { active: false, primary: "No active contact", secondary: "Waiting for wavelength frame" };
+    return { active: false, primary: "no_contact", secondary: "Optical response level" };
   }
 
   if (isModelPositionLevelMode(arrayMode)) {
     const prediction = activeModelPrediction(record, arrayFrame);
-    const modelName = activeModelDisplayName(record, arrayFrame);
     const active = prediction?.contact?.label === "contact" && prediction?.digital_twin?.active === true;
     if (!active) {
       return {
         active: false,
-        primary: "No active contact",
-        secondary: heldMeasurement ? `${modelName} · held` : modelName,
+        primary: "no_contact",
+        secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
       };
     }
-    const position = prediction?.position?.label || "--";
     const level = prediction?.force_level?.label || "uncertain";
     return {
       active: true,
-      primary: `${position} · ${level} response`,
-      secondary: heldMeasurement
-        ? "Approximate broad-fingertip contact · held"
-        : "Approximate broad-fingertip contact",
+      primary: levelLabel(level),
+      secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
     };
   }
 
@@ -686,14 +682,8 @@ function surfaceContactPresentation({
     const active = complete && Number.isFinite(peak) && peak >= 0.02 && responding > 0;
     return {
       active,
-      primary: !complete
-        ? "Incomplete global FBG spectrum"
-        : active
-          ? "Provisional spectral response patch"
-          : "No active contact",
-      secondary: active
-        ? "Location uses the provisional wavelength-order map; labelled point-press calibration is pending"
-        : "Global 9-FBG event response is at baseline",
+      primary: !complete ? "uncertain" : active ? levelLabel(responseLevelFromSurfaceValue(peak)) : "no_contact",
+      secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
     };
   }
 
@@ -702,44 +692,25 @@ function surfaceContactPresentation({
   const responding = Number(respondingRaw);
   const hasRespondingCount = Number.isFinite(responding);
   const active = Number.isFinite(peak) && peak >= 0.02 && (!hasRespondingCount || responding > 0);
-  const scenario = String(arrayFrame?.scenario || "");
   const scenarioState = simulatedScenarioStateLabel(arrayFrame, surfaceMetrics);
 
   if (!active) {
-    const secondary = scenario === "tap"
-      ? "Tap complete / baseline"
-      : scenario === "release"
-        ? "Release complete"
-        : "Baseline / idle";
-    return { active: false, primary: "No active contact", secondary };
-  }
-
-  if (scenario === "tap") {
-    const decaying = scenarioState.includes("decay");
-    return {
-      active: true,
-      primary: decaying ? "Fingertip tap recovery" : "Fingertip tap",
-      secondary: decaying ? "Tap decay" : "Transient contact",
-    };
-  }
-
-  if (scenario === "release") {
-    return { active: true, primary: "Contact releasing", secondary: "Release / recovery" };
+    return { active: false, primary: "no_contact", secondary: "Optical response level" };
   }
 
   const fallbackLike = ["p22_fallback", "single_point_p22", "no_valid_channel", ""].includes(String(arrayMode || ""));
   if (fallbackLike) {
     return {
       active: true,
-      primary: "P22 wavelength response",
-      secondary: heldMeasurement ? "Single-point fallback · held" : "Single-point fallback",
+      primary: levelLabel(responseLevelFromSurfaceValue(peak)),
+      secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
     };
   }
 
   return {
     active: true,
-    primary: "Single-finger contact patch",
-    secondary: heldMeasurement ? `${scenarioLabel(scenario)} · held` : scenarioLabel(scenario),
+    primary: scenarioState,
+    secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
   };
 }
 
@@ -895,10 +866,16 @@ const state = {
   demoCurrentLevel: null,
   demoPlaybackRate: storedDemoPlaybackRate(),
   arrayDemoNextStepAt: 0,
+  arrayDemoCycleStartedAt: 0,
+  arrayDemoActionCompletedAt: 0,
+  arrayDemoPlaybackMode: null,
+  arrayDemoActionComplete: false,
   nextLiveModelPollAt: 0,
   displayMode: "operator",
   surfaceRenderMode: "physical_proxy",
   geometryDisplayMode: "thumb_holder",
+  surfaceFullscreenActive: false,
+  surfaceNativeFullscreenEntered: false,
   thumbSceneConfig: null,
   thumbModelStatus: "not_loaded",
   thumbModelMessage: "--",
@@ -1006,9 +983,9 @@ function levelLabel(level) {
   const clean = String(level || "waiting");
   const labels = {
     no_contact: "no_contact",
-    small_shift: "small shift",
-    moderate_shift: "moderate shift",
-    large_shift: "large shift",
+    small_shift: "light",
+    moderate_shift: "normal",
+    large_shift: "hard",
     light_press: "light",
     normal_press: "normal",
     hard_press: "hard",
@@ -3501,6 +3478,64 @@ function updateGeometryDisplayMode(mode) {
   });
 }
 
+function refreshFullscreenSurfaceLayout() {
+  requestAnimationFrame(() => {
+    resizeThree();
+    state.threeNeedsRefresh = true;
+    requestAnimationFrame(() => {
+      resizeThree();
+      state.threeNeedsRefresh = true;
+    });
+  });
+}
+
+function applySurfaceFullscreenState(active) {
+  state.surfaceFullscreenActive = Boolean(active);
+  appShell?.classList.toggle("surface-fullscreen-active", state.surfaceFullscreenActive);
+  document.documentElement.classList.toggle("surface-fullscreen-document", state.surfaceFullscreenActive);
+  document.body.classList.toggle("surface-fullscreen-document", state.surfaceFullscreenActive);
+  surfaceFullscreenButton?.classList.toggle("active", state.surfaceFullscreenActive);
+  surfaceFullscreenButton?.setAttribute("aria-pressed", String(state.surfaceFullscreenActive));
+  surfaceFullscreenButton?.setAttribute(
+    "title",
+    state.surfaceFullscreenActive
+      ? "Press Esc to exit full-screen tactile surface"
+      : "Show only the interactive thumb tactile surface; press Esc to exit"
+  );
+  refreshFullscreenSurfaceLayout();
+}
+
+async function setSurfaceFullscreen(active) {
+  const nextActive = Boolean(active);
+  if (nextActive === state.surfaceFullscreenActive) return;
+  if (nextActive) {
+    updateDisplayMode("operator");
+    setSettingsPanelOpen(false);
+    setDemoMenuOpen(false);
+    setSpectrumDrawerOpen(false);
+    applySurfaceFullscreenState(true);
+    if (document.documentElement.requestFullscreen && !document.fullscreenElement) {
+      try {
+        await document.documentElement.requestFullscreen();
+        state.surfaceNativeFullscreenEntered = true;
+      } catch {
+        state.surfaceNativeFullscreenEntered = false;
+      }
+    }
+    return;
+  }
+
+  applySurfaceFullscreenState(false);
+  if (document.fullscreenElement && document.exitFullscreen) {
+    try {
+      await document.exitFullscreen();
+    } catch {
+      // CSS viewport mode has already been closed; native exit is best effort.
+    }
+  }
+  state.surfaceNativeFullscreenEntered = false;
+}
+
 function updateRecognitionValidationMode(useTemporal, { announce = true } = {}) {
   state.temporalValidationMode = Boolean(useTemporal);
   settingsTemporalValidationButton?.classList.toggle("active", state.temporalValidationMode);
@@ -3557,10 +3592,10 @@ function initThree() {
   scene.add(sceneKeyLight);
   applySceneLighting(state.geometryDisplayMode === "thumb_holder");
 
-  sceneGrid = new THREE.GridHelper(11.5, 36, "#a9cfe4", "#d6e8f2");
+  sceneGrid = new THREE.GridHelper(11.5, 36, "#73a9c5", "#bdd6e4");
   sceneGrid.position.y = -1.04;
   sceneGrid.material.transparent = true;
-  sceneGrid.material.opacity = 0.24;
+  sceneGrid.material.opacity = 0.48;
   scene.add(sceneGrid);
 
   thumbModelRoot = new THREE.Group();
@@ -4112,7 +4147,7 @@ function updateDisplayMode(mode) {
   }
   if (sceneGrid) {
     sceneGrid.visible = true;
-    sceneGrid.material.opacity = state.displayMode === "operator" ? 0.24 : 0.16;
+    sceneGrid.material.opacity = state.displayMode === "operator" ? 0.48 : 0.30;
   }
   if (state.displayMode === "diagnostics") {
     spectrumDrawer?.classList.remove("open");
@@ -4529,8 +4564,14 @@ function updateDemoControls() {
     nodeDebugButton.classList.toggle("demo-active", state.nodeDebugExpanded);
   }
   if (demoAutoButton) {
-    demoAutoButton.textContent = state.demoAutoplay ? "Stop auto demo" : "Start auto demo";
+    demoAutoButton.textContent = state.demoAutoplay ? "Stop 5 s loop" : "Start 5 s loop";
     demoAutoButton.classList.toggle("demo-active", state.demoAutoplay);
+  }
+  if (demoSingleButton) {
+    demoSingleButton.classList.toggle(
+      "demo-active",
+      state.arrayDemoPlaybackMode === "single" && state.arrayDemoActive && !state.arrayDemoActionComplete
+    );
   }
   if (demoSpeedControl) demoSpeedControl.value = String(state.demoPlaybackRate);
   if (demoSpeedValue) demoSpeedValue.value = `${state.demoPlaybackRate.toFixed(1)}x`;
@@ -4540,6 +4581,8 @@ function updateDemoControls() {
 
 function setDemoPlaybackRate(value, { persist = true } = {}) {
   state.demoPlaybackRate = normalizedDemoPlaybackRate(value);
+  // Playback speed also controls the cadence of released baseline frames so
+  // the trace and spectrum keep advancing during the idle part of a loop.
   state.arrayDemoNextStepAt = performance.now() + demoArrayStepIntervalMs();
   if (persist) {
     try {
@@ -4549,7 +4592,6 @@ function setDemoPlaybackRate(value, { persist = true } = {}) {
   if (state.demoTimer) {
     clearTimeout(state.demoTimer);
     state.demoTimer = null;
-    if (state.demoAutoplay) scheduleDemoAutoplay();
   }
   updateDemoControls();
 }
@@ -4560,6 +4602,10 @@ function stopDemoAutoplay() {
     state.demoTimer = null;
   }
   state.demoAutoplay = false;
+  if (state.arrayDemoPlaybackMode === "loop") {
+    // Stop means finish the current physical action, release, then remain idle.
+    state.arrayDemoPlaybackMode = "single";
+  }
   updateDemoControls();
   if (state.demoModeActive) {
     setDemoStatus("demo", "running");
@@ -4775,7 +4821,10 @@ function frameFromArrayDemo(arrayFrame) {
   };
 }
 
-async function injectArrayDemoFrame(scenario, { resetTrajectory = true } = {}) {
+async function injectArrayDemoFrame(
+  scenario,
+  { resetTrajectory = true, playbackMode = "loop" } = {}
+) {
   invalidateFrameRequestContext();
   const demoEpoch = state.frameModeEpoch;
   stopDemoAutoplay();
@@ -4785,18 +4834,18 @@ async function injectArrayDemoFrame(scenario, { resetTrajectory = true } = {}) {
   state.demoModeActive = true;
   state.arrayDemoActive = true;
   state.arrayDemoScenario = scenario;
+  state.arrayDemoPlaybackMode = playbackMode === "single" ? "single" : "loop";
+  state.demoAutoplay = state.arrayDemoPlaybackMode === "loop";
+  state.arrayDemoActionComplete = false;
+  state.arrayDemoCycleStartedAt = performance.now();
+  state.arrayDemoActionCompletedAt = 0;
   if (resetTrajectory) {
-    state.arrayDemoStep = scenario === "tap" ? 2 : 0;
+    state.arrayDemoStep = 0;
     state.trajectoryHistory = [];
     resetArrayDemoTraceHistory();
   }
   const stepCount = ARRAY_SLIDE_STEPS[scenario] || 1;
-  const oneShot = ARRAY_ONE_SHOT_SCENARIOS.has(scenario);
-  const step = stepCount > 1
-    ? oneShot
-      ? Math.min(state.arrayDemoStep, stepCount - 1)
-      : state.arrayDemoStep % stepCount
-    : 0;
+  const step = Math.min(state.arrayDemoStep, Math.max(0, stepCount - 1));
   const response = await fetch(
     `/api/array_demo/frame?scenario=${encodeURIComponent(scenario)}&step=${step}&coupling_view=${encodeURIComponent(state.couplingView)}`,
     { cache: "no-store" }
@@ -4805,15 +4854,16 @@ async function injectArrayDemoFrame(scenario, { resetTrajectory = true } = {}) {
   if (demoEpoch !== state.frameModeEpoch) return;
   const arrayFrame = data.array_frame;
   arrayFrame.scenario = scenario;
-  setDemoStatus(SCENARIO_LABELS[scenario] || "array demo", "running");
+  setDemoStatus(
+    state.arrayDemoPlaybackMode === "loop" ? "5 s loop" : "playing once",
+    state.arrayDemoPlaybackMode === "loop" ? "auto" : "running"
+  );
   updateDemoControls();
   const frame = frameFromArrayDemo(arrayFrame);
   state.frame = frame;
   updateUI(frame);
   state.arrayDemoNextStepAt = performance.now() + demoArrayStepIntervalMs();
-  if (stepCount > 1 && (!oneShot || state.arrayDemoStep < stepCount - 1)) {
-    state.arrayDemoStep += 1;
-  }
+  state.arrayDemoStep = Math.min(stepCount, state.arrayDemoStep + 1);
 }
 
 async function injectArrayDemoFrameAtStep(scenario, step = 0) {
@@ -4826,6 +4876,10 @@ async function injectArrayDemoFrameAtStep(scenario, step = 0) {
   state.demoModeActive = true;
   state.arrayDemoActive = true;
   state.arrayDemoScenario = scenario;
+  state.arrayDemoPlaybackMode = "single";
+  state.arrayDemoActionComplete = true;
+  state.arrayDemoActionCompletedAt = performance.now();
+  state.demoAutoplay = false;
   state.arrayDemoStep = Math.max(0, Number(step) || 0);
   state.trajectoryHistory = [];
   resetArrayDemoTraceHistory();
@@ -4837,26 +4891,13 @@ async function injectArrayDemoFrameAtStep(scenario, step = 0) {
   if (demoEpoch !== state.frameModeEpoch) return;
   const arrayFrame = data.array_frame;
   arrayFrame.scenario = scenario;
-  setDemoStatus(SCENARIO_LABELS[scenario] || "array demo", "running");
+  setDemoStatus(simulatedScenarioStateLabel(arrayFrame, arrayFrame?.surface_metrics || {}), "running");
   updateDemoControls();
   const frame = frameFromArrayDemo(arrayFrame);
   state.frame = frame;
   updateUI(frame);
   state.arrayDemoNextStepAt = performance.now() + demoArrayStepIntervalMs();
   state.arrayDemoStep += 1;
-}
-
-function scheduleDemoAutoplay() {
-  if (!state.demoAutoplay) return;
-  state.demoTimer = setTimeout(async () => {
-    const level = DEMO_AUTOPLAY_SEQUENCE[state.demoStepIndex % DEMO_AUTOPLAY_SEQUENCE.length];
-    state.demoStepIndex += 1;
-    try {
-      await injectDemoFrame(level, { reset: false });
-    } finally {
-      scheduleDemoAutoplay();
-    }
-  }, DEMO_AUTOPLAY_INTERVAL_MS / normalizedDemoPlaybackRate(state.demoPlaybackRate));
 }
 
 function updateDemoReadout(record) {
@@ -4870,7 +4911,10 @@ function updateDemoReadout(record) {
     return;
   }
   if (state.arrayDemoActive) {
-    setText("demoCurrentLevel", state.arrayDemoScenario || "array surface");
+    setText(
+      "demoCurrentLevel",
+      simulatedScenarioStateLabel(state.currentArrayFrame || {}, state.currentArrayFrame?.surface_metrics || {})
+    );
     setText("demoBaseline", formatWavelength(record?.baseline_wavelength_nm, 5));
     setText("demoCurrentIntensity", formatWavelength(record?.tracked_wavelength_nm ?? record?.peak_wavelength_nm, 5));
     setText("demoCurrentAttenuation", formatPm(record?.delta_wavelength_pm, 1, true));
@@ -6013,6 +6057,18 @@ async function fetchFrame({ force = false } = {}) {
   ) {
     return;
   }
+  if (!force && state.arrayDemoActive && state.arrayDemoActionComplete) {
+    if (state.arrayDemoPlaybackMode !== "loop") return;
+    const nextCycleAt = state.arrayDemoActionCompletedAt + DEMO_ARRAY_LOOP_INTERVAL_MS;
+    if (now >= nextCycleAt) {
+      state.arrayDemoStep = 0;
+      state.arrayDemoActionComplete = false;
+      state.arrayDemoCycleStartedAt = now;
+      state.arrayDemoActionCompletedAt = 0;
+      state.trajectoryHistory = [];
+      setDemoStatus("5 s loop", "auto");
+    }
+  }
   if (state.frameRequestInFlight) {
     // Keep at most one expensive spectrum/model request in flight. Commands may
     // queue one forced refresh, while routine polling simply skips this tick.
@@ -6037,24 +6093,36 @@ async function fetchFrame({ force = false } = {}) {
   try {
     if (state.arrayDemoActive && state.arrayDemoScenario) {
       const stepCount = ARRAY_SLIDE_STEPS[state.arrayDemoScenario] || 1;
-      const oneShot = ARRAY_ONE_SHOT_SCENARIOS.has(state.arrayDemoScenario);
-      const step = stepCount > 1
-        ? oneShot
-          ? Math.min(state.arrayDemoStep, stepCount - 1)
-          : state.arrayDemoStep % stepCount
-        : 0;
+      const actionFinished = state.arrayDemoStep >= stepCount;
+      const frameScenario = actionFinished ? "no_contact" : state.arrayDemoScenario;
+      const step = actionFinished ? 0 : state.arrayDemoStep;
       const data = await requestJSON(
-        `/api/array_demo/frame?scenario=${encodeURIComponent(state.arrayDemoScenario)}&step=${step}&coupling_view=${encodeURIComponent(state.couplingView)}`,
+        `/api/array_demo/frame?scenario=${encodeURIComponent(frameScenario)}&step=${step}&coupling_view=${encodeURIComponent(state.couplingView)}`,
         { cache: "no-store" },
         { timeoutMs: 7000 }
       );
       if (requestEpoch !== state.frameModeEpoch) return;
-      if (stepCount > 1 && (!oneShot || state.arrayDemoStep < stepCount - 1)) {
+      if (!actionFinished) {
         state.arrayDemoStep += 1;
       }
       const frame = frameFromArrayDemo(data.array_frame);
       commitFrame(frame);
-      state.arrayDemoNextStepAt = performance.now() + demoArrayStepIntervalMs();
+      if (actionFinished) {
+        if (!state.arrayDemoActionComplete) {
+          state.arrayDemoActionCompletedAt = performance.now();
+        }
+        state.arrayDemoActionComplete = true;
+        state.arrayDemoNextStepAt = state.arrayDemoPlaybackMode === "loop"
+          ? performance.now() + demoArrayStepIntervalMs()
+          : Number.POSITIVE_INFINITY;
+        setDemoStatus(
+          state.arrayDemoPlaybackMode === "loop" ? "released · baseline running" : "complete · released",
+          "ready"
+        );
+        updateDemoControls();
+      } else {
+        state.arrayDemoNextStepAt = performance.now() + demoArrayStepIntervalMs();
+      }
       return;
     }
     if (!state.dataStreamActive && !state.demoModeActive && !state.exportWatchActive && !state.sdkLiveActive && !state.liveRequested) {
@@ -6206,6 +6274,10 @@ function leaveDemoMode() {
   state.arrayDemoTraceRecords = [];
   state.demoCurrentLevel = null;
   state.arrayDemoNextStepAt = 0;
+  state.arrayDemoCycleStartedAt = 0;
+  state.arrayDemoActionCompletedAt = 0;
+  state.arrayDemoPlaybackMode = null;
+  state.arrayDemoActionComplete = false;
   state.trajectoryHistory = [];
   setDemoStatus("ready", "ready");
   updateDemoControls();
@@ -6406,7 +6478,10 @@ demoStepButtons.forEach((button) => {
 arrayDemoStepButtons.forEach((button) => {
   button.addEventListener("click", async () => {
     setDemoMenuOpen(false);
-    await injectArrayDemoFrame(button.dataset.arrayScenario || "center_press", { resetTrajectory: true });
+    await injectArrayDemoFrame(button.dataset.arrayScenario || "center_press", {
+      resetTrajectory: true,
+      playbackMode: "loop",
+    });
   });
 });
 
@@ -6416,6 +6491,13 @@ window.__baySpecDemoHooks = {
   setPlaybackRate: (value) => setDemoPlaybackRate(value),
   getPlaybackRate: () => state.demoPlaybackRate,
   getStepIntervalMs: () => demoArrayStepIntervalMs(),
+  getLoopIntervalMs: () => DEMO_ARRAY_LOOP_INTERVAL_MS,
+  getPlaybackState: () => ({
+    mode: state.arrayDemoPlaybackMode,
+    actionComplete: state.arrayDemoActionComplete,
+    scenario: state.arrayDemoScenario,
+    step: state.arrayDemoStep,
+  }),
   getSchedulerIntervalMs: () => DEMO_FRAME_SCHEDULER_INTERVAL_MS,
 };
 
@@ -6634,6 +6716,11 @@ document.addEventListener("pointerdown", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
+  if (state.surfaceFullscreenActive) {
+    event.preventDefault();
+    void setSurfaceFullscreen(false);
+    return;
+  }
   setSettingsPanelOpen(false);
   setDemoMenuOpen(false);
   setSpectrumDrawerOpen(false);
@@ -6653,6 +6740,19 @@ thumbHolderModeButton?.addEventListener("click", () => {
 
 surfaceOnlyModeButton?.addEventListener("click", () => {
   updateGeometryDisplayMode("surface_only");
+});
+
+surfaceFullscreenButton?.addEventListener("click", () => {
+  void setSurfaceFullscreen(!state.surfaceFullscreenActive);
+});
+
+document.addEventListener("fullscreenchange", () => {
+  if (!document.fullscreenElement && state.surfaceNativeFullscreenEntered) {
+    state.surfaceNativeFullscreenEntered = false;
+    applySurfaceFullscreenState(false);
+  } else {
+    refreshFullscreenSurfaceLayout();
+  }
 });
 
 thumbAlignmentSaveButton?.addEventListener("click", async () => {
@@ -6761,14 +6861,17 @@ demoAutoButton?.addEventListener("click", async () => {
     stopDemoAutoplay();
     return;
   }
-  state.demoAutoplay = true;
-  state.demoStepIndex = 0;
-  setDemoStatus("auto", "auto");
-  updateDemoControls();
-  await prepareDemoMode({ reset: true });
-  await injectDemoFrame(DEMO_AUTOPLAY_SEQUENCE[state.demoStepIndex], { reset: false });
-  state.demoStepIndex += 1;
-  scheduleDemoAutoplay();
+  await injectArrayDemoFrame(state.arrayDemoScenario || "center_press", {
+    resetTrajectory: true,
+    playbackMode: "loop",
+  });
+});
+
+demoSingleButton?.addEventListener("click", async () => {
+  await injectArrayDemoFrame(state.arrayDemoScenario || "center_press", {
+    resetTrajectory: true,
+    playbackMode: "single",
+  });
 });
 
 demoResetButton?.addEventListener("click", async () => {

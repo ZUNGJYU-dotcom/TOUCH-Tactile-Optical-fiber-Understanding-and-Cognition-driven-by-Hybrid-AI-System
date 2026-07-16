@@ -1473,6 +1473,35 @@ def _array_wavelength_plan_payload() -> dict:
     }
 
 
+_CENTER_CONTACT_ENVELOPE = (
+    # 0.0-0.5 s: light fingertip contact.
+    0.12,
+    0.20,
+    0.26,
+    0.28,
+    0.28,
+    # 0.5-2.5 s: fully released while the spectrum keeps advancing.
+    *((0.0,) * 20),
+    # 2.5-4.5 s: hard contact, including a short in-band onset.
+    0.76,
+    0.86,
+    *((0.92,) * 18),
+    # 4.5-5.0 s: smooth final release before the next loop.
+    0.68,
+    0.42,
+    0.20,
+    0.06,
+    0.0,
+)
+
+_STAGED_POINT_CONTACT_CENTERS = {
+    "center_press": (0.0, 0.0),
+    "p21_contact": (0.0, 1.0),
+    "p12_contact": (-1.0, 0.0),
+    "p32_contact": (1.0, 0.0),
+}
+
+
 def _demo_envelope(scenario: str, step: int) -> float:
     step = max(0, int(step))
     if scenario == "no_contact":
@@ -1483,19 +1512,21 @@ def _demo_envelope(scenario: str, step: int) -> float:
     if scenario == "release":
         cycle = min(step, 11)
         return max(0.0, 0.84 * (1.0 - min(cycle, 8) / 8.0))
-    if scenario in {"center_press", "off_center_fingertip_contact", "broad_fingertip_contact"}:
+    if scenario in _STAGED_POINT_CONTACT_CENTERS:
+        return _CENTER_CONTACT_ENVELOPE[min(step, len(_CENTER_CONTACT_ENVELOPE) - 1)]
+    if scenario in {"off_center_fingertip_contact", "broad_fingertip_contact"}:
         cycle = step % 14
         if cycle < 5:
             return 0.10 + 0.76 * (cycle / 4.0)
         if cycle < 10:
             return 0.86
-        return max(0.04, 0.86 * (1.0 - (cycle - 9) / 4.0))
+        return max(0.0, 0.86 * (1.0 - (cycle - 9) / 4.0))
     cycle = step % 12
     if cycle < 3:
         return 0.38 + 0.16 * cycle
     if cycle < 9:
         return 0.78
-    return max(0.18, 0.78 * (1.0 - (cycle - 8) / 3.0))
+    return max(0.0, 0.78 * (1.0 - (cycle - 8) / 3.0))
 
 
 def _path_point(points: list[tuple[float, float]], step: int, cycle_length: int = 12) -> tuple[float, float]:
@@ -1822,6 +1853,9 @@ def _simulated_array_channels(scenario: str, step: int = 0, coupling_view: str =
     envelope = _demo_envelope(scenario, step)
     if scenario == "no_contact":
         centers = [(0.0, 0.0, 0.0, 0.52)]
+    elif scenario in _STAGED_POINT_CONTACT_CENTERS:
+        cx, cy = _STAGED_POINT_CONTACT_CENTERS[scenario]
+        centers = [(cx, cy, envelope, 0.52)]
     elif scenario == "off_center_fingertip_contact":
         centers = [(0.52, 0.28, 0.84 * envelope, 0.58)]
     elif scenario == "vertical_slide_p11_p12_p13":
@@ -2114,6 +2148,9 @@ def simulated_array_frame(scenario: str, step: int = 0, coupling_view: str = "ra
     scenario = scenario_aliases.get(scenario, scenario)
     scenario_labels = {
         "center_press": "Center fingertip contact",
+        "p21_contact": "P21 fingertip contact",
+        "p12_contact": "P12 fingertip contact",
+        "p32_contact": "P32 fingertip contact",
         "off_center_fingertip_contact": "Off-center fingertip contact",
         "vertical_slide_p11_p12_p13": "Vertical fingertip slide",
         "horizontal_slide_p11_p21_p31": "Horizontal fingertip slide",
@@ -2169,7 +2206,7 @@ def simulated_array_frame(scenario: str, step: int = 0, coupling_view: str = "ra
         contact_patch_semantics = "moving single-fingertip contact patch"
     elif scenario == "broad_fingertip_contact":
         contact_patch_semantics = "broad single-fingertip contact patch"
-    elif scenario in {"center_press", "off_center_fingertip_contact"}:
+    elif scenario in {*_STAGED_POINT_CONTACT_CENTERS, "off_center_fingertip_contact"}:
         contact_patch_semantics = "single-fingertip contact patch"
     else:
         contact_patch_semantics = "no contact or release state"
@@ -2196,7 +2233,7 @@ def simulated_array_frame(scenario: str, step: int = 0, coupling_view: str = "ra
         event_interpretation = "single-finger contact patch sliding across coupled array"
     elif scenario == "broad_fingertip_contact":
         event_interpretation = "broad single-finger contact patch covering multiple pixels"
-    elif scenario in {"center_press", "off_center_fingertip_contact"}:
+    elif scenario in {*_STAGED_POINT_CONTACT_CENTERS, "off_center_fingertip_contact"}:
         event_interpretation = "single-finger contact patch with coupled neighboring pixels"
     else:
         event_interpretation = (

@@ -261,8 +261,8 @@ class RuntimeBaselineRecoveryGuardTests(unittest.TestCase):
     def _production_guard() -> RuntimeBaselineRecoveryGuard:
         return RuntimeBaselineRecoveryGuard(
             {
-                "quiet_hold_sec": 5.0,
-                "minimum_quiet_physical_frames": 8,
+                "quiet_hold_sec": 0.5,
+                "minimum_quiet_physical_frames": 2,
                 "max_shape_motion_rms": 0.0035,
                 "max_common_gain_motion": 0.0030,
                 "activity_shape_motion_rms": 0.0060,
@@ -323,7 +323,7 @@ class RuntimeBaselineRecoveryGuardTests(unittest.TestCase):
             "stationary_rest_recovery",
         )
         self.assertFalse(state["release_transition_detected"])
-        self.assertGreaterEqual(state["quiet_elapsed_sec"], 5.0)
+        self.assertGreaterEqual(state["quiet_elapsed_sec"], 0.5)
         self.assertIsNotNone(recovered)
 
         state, second = guard.observe(

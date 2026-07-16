@@ -19,8 +19,8 @@ runtime_baseline_recovery:
   activity_common_gain_motion: 0.0060
 
   # Quietness is supporting evidence, never the only release decision.
-  quiet_hold_sec: 5.0
-  minimum_quiet_physical_frames: 8
+  quiet_hold_sec: 0.5
+  minimum_quiet_physical_frames: 2
   release_candidate_timeout_sec: 12.0
 
   # A release candidate is armed only after credible contact and a subsequent
@@ -48,4 +48,4 @@ runtime_baseline_recovery:
   recontact_distance_growth_absolute: 0.0040
 
   auto_update_runtime_baseline: true
-  policy: multi_evidence_release_then_five_second_spectral_stationarity
+  policy: multi_evidence_release_then_half_second_spectral_stationarity
