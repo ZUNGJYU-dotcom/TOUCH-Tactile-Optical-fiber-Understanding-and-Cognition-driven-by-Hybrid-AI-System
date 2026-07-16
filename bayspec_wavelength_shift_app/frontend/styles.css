@@ -16,6 +16,121 @@
   --shadow: 0 14px 36px rgba(57, 94, 122, 0.14);
 }
 
+/* Immersive thumb tactile surface: model canvas only, with Esc as the exit. */
+html.surface-fullscreen-document,
+body.surface-fullscreen-document {
+  width: 100%;
+  height: 100%;
+  margin: 0 !important;
+  overflow: hidden !important;
+  background: #fafdff;
+}
+
+.app-shell.surface-fullscreen-active {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 10000 !important;
+  display: block !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  background: #fafdff !important;
+}
+
+.app-shell.surface-fullscreen-active > :not(.dashboard),
+.app-shell.surface-fullscreen-active .dashboard > :not(.twin-stage):not(.right-panel),
+.app-shell.surface-fullscreen-active .twin-stage > :not(.surface-cockpit-grid),
+.app-shell.surface-fullscreen-active .surface-cockpit-grid > :not(.three-mount) {
+  display: none !important;
+}
+
+.app-shell.surface-fullscreen-active .dashboard,
+.app-shell.surface-fullscreen-active .twin-stage,
+.app-shell.surface-fullscreen-active .surface-cockpit-grid,
+.app-shell.surface-fullscreen-active .three-mount {
+  position: fixed !important;
+  inset: 0 !important;
+  display: block !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  overflow: hidden !important;
+  box-shadow: none !important;
+  background: #fafdff !important;
+}
+
+.app-shell.surface-fullscreen-active .three-mount .scene-caption,
+.app-shell.surface-fullscreen-active .three-mount .surface-orientation-cue,
+.app-shell.surface-fullscreen-active .three-mount .pressure-scale,
+.app-shell.surface-fullscreen-active .three-mount .layout-check-overlay {
+  display: none !important;
+}
+
+.app-shell.surface-fullscreen-active .three-mount canvas {
+  display: block !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.app-shell.surface-fullscreen-active .right-panel {
+  position: fixed !important;
+  inset: 22px 22px auto auto !important;
+  z-index: 10003 !important;
+  display: block !important;
+  width: clamp(278px, 23vw, 344px) !important;
+  height: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-height: calc(100vh - 44px) !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: visible !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.app-shell.surface-fullscreen-active .right-panel > :not(.operator-summary-card) {
+  display: none !important;
+}
+
+.app-shell.surface-fullscreen-active .operator-summary-card {
+  display: grid !important;
+  width: 100% !important;
+  min-height: 0 !important;
+  max-height: calc(100vh - 44px) !important;
+  padding: 16px !important;
+  gap: 10px !important;
+  overflow: hidden !important;
+  border: 1px solid rgba(147, 190, 219, 0.86) !important;
+  border-radius: 8px !important;
+  background: rgba(255, 255, 255, 0.93) !important;
+  box-shadow: 0 12px 30px rgba(57, 94, 122, 0.18) !important;
+  backdrop-filter: blur(8px);
+}
+
+.app-shell.surface-fullscreen-active .operator-summary-card .status-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 8px 12px !important;
+  overflow: visible !important;
+}
+
+.app-shell.surface-fullscreen-active .fullscreen-hidden-summary-field {
+  display: none !important;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -342,7 +457,8 @@ button.active-watch,
   text-align: right;
 }
 
-#demoAutoButton {
+#demoAutoButton,
+#demoSingleButton {
   border-color: var(--blue);
   color: var(--blue);
   font-weight: 800;
@@ -2328,7 +2444,7 @@ button.active-watch,
 
 .operator-mode .status-strip {
   display: grid !important;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  grid-template-columns: minmax(105px, 0.9fr) minmax(115px, 1fr) minmax(158px, 1.35fr) !important;
   gap: 6px !important;
 }
 
@@ -2345,6 +2461,15 @@ button.active-watch,
   overflow: hidden !important;
   text-overflow: ellipsis !important;
   white-space: nowrap !important;
+}
+
+.operator-mode .status-strip .qa-status-item {
+  min-width: 0;
+}
+
+.operator-mode #topQaStatus {
+  max-width: 100%;
+  text-overflow: clip !important;
 }
 
 .operator-mode .control-zone {
@@ -3539,6 +3664,35 @@ button.active-watch,
   background: #eff9fc !important;
   color: #0a759d !important;
   font-weight: 800 !important;
+}
+
+.operator-mode .summary-hud .hud-title-row {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  align-items: center !important;
+  gap: 8px !important;
+  min-width: 0;
+}
+
+.operator-mode .summary-hud .hud-title-row > div {
+  min-width: 0;
+}
+
+.operator-mode .summary-hud .hud-title-row h2 {
+  line-height: 1.15 !important;
+}
+
+.operator-mode .summary-hud .spectrum-open-chip {
+  display: inline-flex !important;
+  flex: 0 0 auto;
+  min-width: 76px;
+  max-width: none !important;
+  padding: 0 10px !important;
+  align-items: center;
+  justify-content: center;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  white-space: nowrap !important;
 }
 
 .spectrum-drawer {

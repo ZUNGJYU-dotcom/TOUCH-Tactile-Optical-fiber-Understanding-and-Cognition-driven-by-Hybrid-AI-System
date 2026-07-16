@@ -274,9 +274,9 @@ class RuntimeBaselineRecoveryGuard:
         self.activity_common_gain_motion = float(
             values.get("activity_common_gain_motion", 0.0060)
         )
-        self.quiet_hold_sec = float(values.get("quiet_hold_sec", 5.0))
+        self.quiet_hold_sec = float(values.get("quiet_hold_sec", 0.5))
         self.minimum_quiet_physical_frames = int(
-            values.get("minimum_quiet_physical_frames", 8)
+            values.get("minimum_quiet_physical_frames", 2)
         )
         self.release_candidate_timeout_sec = float(
             values.get("release_candidate_timeout_sec", 12.0)

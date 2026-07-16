@@ -29,7 +29,7 @@
         <div class="status-strip" aria-label="Current system mode">
           <span><small>Data source</small><strong id="sourceChip">SDK idle</strong></span>
           <span><small>Mode</small><strong id="surfaceModeChip">Temporal validation</strong></span>
-          <span><small>QA status</small><strong id="topQaStatus">waiting</strong></span>
+          <span class="qa-status-item"><small>QA status</small><strong id="topQaStatus">waiting</strong></span>
           <span class="diagnostics-only"><small>Peak map</small><strong id="peakMapChip">manual provisional</strong></span>
           <span class="diagnostics-only"><small>Spectral windows</small><strong id="wavelengthPlanChip">model windows loading</strong></span>
         </div>
@@ -206,7 +206,7 @@
                 <h2>Full Spectrum Summary</h2>
                 <p id="opticalSummaryState">No spectrum frame</p>
               </div>
-              <span class="chip">Spectrum</span>
+              <span class="chip spectrum-open-chip">Spectrum</span>
             </div>
             <div class="optical-preview-shell" aria-label="Current optical spectrum preview">
               <canvas id="opticalPreviewCanvas" class="optical-preview-canvas"></canvas>
@@ -229,6 +229,7 @@
             <div class="stage-actions">
               <button id="thumbHolderModeButton" class="active" type="button">Thumb holder mode</button>
               <button id="surfaceOnlyModeButton" type="button">Surface Only</button>
+              <button id="surfaceFullscreenButton" type="button" aria-pressed="false" title="Show only the interactive thumb tactile surface; press Esc to exit">Fullscreen</button>
               <button id="physicalProxyModeButton" class="diagnostics-only active" type="button">Physical proxy</button>
               <button id="responseTerrainModeButton" class="diagnostics-only" type="button">Response terrain</button>
               <div
@@ -243,8 +244,8 @@
           <div class="surface-cockpit-grid">
             <div id="threeMount" class="three-mount">
               <div class="scene-caption">
-                <strong id="scenePrimaryCaption">Single-finger contact patch</strong>
-                <span id="surfaceModeNote">Raw coupled Bragg wavelength-shift response</span>
+                <strong id="scenePrimaryCaption">no_contact</strong>
+                <span id="surfaceModeNote">Optical response level</span>
               </div>
               <div class="surface-orientation-cue" aria-label="Surface channel orientation">
                 <span class="surface-orientation-title">ARRAY ORIENTATION</span>
@@ -295,7 +296,7 @@
               <div><span>Center position</span><strong id="surfaceCenter">--</strong></div>
               <div><span>Dominant channel</span><strong id="surfaceDominantChannel">--</strong></div>
               <div><span>Coupling status</span><strong id="surfaceRuleSource">coupled response</strong></div>
-              <div><span>Frame state</span><strong id="surfaceFrameState">IDLE</strong></div>
+              <div class="fullscreen-hidden-summary-field"><span>Frame state</span><strong id="surfaceFrameState">IDLE</strong></div>
             </div>
           </div>
 
@@ -608,6 +609,9 @@
               </div>
               <button class="demo-step" data-demo-level="no_contact" type="button">Legacy P22 fallback</button>
               <button class="array-demo-step" data-array-scenario="center_press" type="button">Center contact</button>
+              <button class="array-demo-step" data-array-scenario="p21_contact" type="button">P21 contact</button>
+              <button class="array-demo-step" data-array-scenario="p12_contact" type="button">P12 contact</button>
+              <button class="array-demo-step" data-array-scenario="p32_contact" type="button">P32 contact</button>
               <button class="array-demo-step" data-array-scenario="off_center_fingertip_contact" type="button">Off-center contact</button>
               <button class="array-demo-step" data-array-scenario="broad_fingertip_contact" type="button">Broad contact</button>
               <button class="array-demo-step" data-array-scenario="vertical_slide_p11_p12_p13" type="button">Vertical slide</button>
@@ -615,7 +619,8 @@
               <button class="array-demo-step" data-array-scenario="diagonal_slide_p11_p22_p33" type="button">Diagonal slide</button>
               <button class="array-demo-step" data-array-scenario="tap" type="button">Fingertip tap</button>
               <button class="array-demo-step" data-array-scenario="release" type="button">Release</button>
-              <button id="demoAutoButton" class="diagnostics-only" type="button">Start auto demo</button>
+              <button id="demoSingleButton" class="diagnostics-only" type="button" title="Play the selected contact action once, then release">Play once</button>
+              <button id="demoAutoButton" class="diagnostics-only" type="button" title="Wait five seconds after release before repeating the selected action">Start 5 s loop</button>
               <button id="demoResetButton" class="diagnostics-only" type="button">Reset demo</button>
               <button id="nodeDebugButton" class="diagnostics-only" type="button">Node overlay</button>
             </div>
@@ -624,6 +629,6 @@
       </main>
 
     </div>
-    <script type="module" src="/static/app.js?v=response-performance-v2"></script>
+    <script type="module" src="/static/app.js?v=thumb-surface-fullscreen-summary-v8"></script>
   </body>
 </html>
