@@ -7097,6 +7097,54 @@ body {
   opacity: 0.48;
 }
 
+/* The mechanical-reference row was added after the compact 206 px summary
+   card was designed. Give the six optical metrics their real two-line height
+   so labels and values never occupy the next grid row. */
+.operator-mode .right-panel {
+  grid-template-rows: 240px minmax(0, 1fr) 103px !important;
+}
+
+.operator-mode .operator-summary-card {
+  height: 240px !important;
+  min-height: 240px !important;
+  max-height: 240px !important;
+  grid-template-rows: 15px 34px minmax(104px, 1fr) auto !important;
+}
+
+.operator-mode .operator-summary-grid {
+  grid-template-rows: repeat(3, minmax(32px, 1fr)) !important;
+  row-gap: 4px !important;
+}
+
+.operator-mode .operator-summary-card .operator-summary-grid > div {
+  min-height: 32px;
+  padding-top: 3px !important;
+}
+
+.operator-mode .operator-summary-card .operator-summary-grid span {
+  margin-bottom: 0;
+  font-size: 10px !important;
+  line-height: 11px !important;
+}
+
+.operator-mode .operator-summary-card .operator-summary-grid strong {
+  font-size: 13px !important;
+  line-height: 15px !important;
+}
+
+.operator-mode .operator-summary-grid #surfaceFrameState {
+  display: flex !important;
+  align-self: start;
+  min-height: 15px;
+  height: 15px;
+  margin-top: 0;
+}
+
+.operator-mode .px6d-reference-row {
+  margin-top: 0;
+  padding-top: 7px;
+}
+
 @media (max-width: 1180px) {
   .px6d-reference-row {
     grid-template-columns: minmax(0, 1fr) auto;

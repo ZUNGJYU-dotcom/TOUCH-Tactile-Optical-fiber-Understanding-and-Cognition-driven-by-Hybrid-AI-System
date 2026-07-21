@@ -20,6 +20,7 @@ APP_TITLE = "TOUCH System - Temporal Spectral Validation"
 DEFAULT_PORT = 8640
 EXPECTED_BACKEND_APP = "TOUCH System Trained Static Spectrum Twin"
 EXPECTED_BACKEND_MODE = "standalone_bayspec_trained_static_spectrum_twin"
+EXPECTED_BACKEND_CONTRACT_VERSION = "trained_static_spectrum_api_v2"
 
 
 def is_frozen() -> bool:
@@ -103,8 +104,40 @@ def health_payload_is_expected(payload: object) -> bool:
         and payload.get("ok") is True
         and payload.get("app") == EXPECTED_BACKEND_APP
         and payload.get("mode") == EXPECTED_BACKEND_MODE
+        and payload.get("backend_contract_version")
+        == EXPECTED_BACKEND_CONTRACT_VERSION
         and payload.get("trained_static_model_primary") is True
     )
+
+
+def run_self_test() -> int:
+    """Validate frozen resources without opening hardware, a port, or a window."""
+
+    os.environ["TOUCH_PX6D_AUTO_START"] = "false"
+    app_root = configure_runtime_paths()
+    checks: dict[str, object] = {
+        "app_root": str(app_root),
+        "frozen": is_frozen(),
+        "frontend_index": (app_root / "frontend" / "index.html").is_file(),
+        "frontend_javascript": (app_root / "frontend" / "app.js").is_file(),
+        "sdk_helper": (app_root / "sdk_probe" / "BaySpecSdkStream.exe").is_file(),
+    }
+    try:
+        from backend.main import health
+
+        payload = health()
+        checks["backend_contract"] = health_payload_is_expected(payload)
+        checks["static_model_loaded"] = bool(
+            payload.get("trained_static_spectral_model", {}).get("loaded")
+        )
+        checks["dynamic_model_loaded"] = bool(
+            payload.get("dynamic_temporal_shadow", {}).get("loaded")
+        )
+    except Exception as exc:
+        checks["backend_import_error"] = f"{type(exc).__name__}: {exc}"
+    ok = all(value is True for key, value in checks.items() if key not in {"app_root", "frozen"})
+    write_log("SELF_TEST " + json.dumps({"ok": ok, "checks": checks}, ensure_ascii=False))
+    return 0 if ok else 1
 
 
 def _read_expected_health(url: str, timeout_s: float) -> bool:
@@ -223,6 +256,8 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
+        if "--self-test" in sys.argv:
+            raise SystemExit(run_self_test())
         raise SystemExit(main())
     except Exception:
         write_log(traceback.format_exc())

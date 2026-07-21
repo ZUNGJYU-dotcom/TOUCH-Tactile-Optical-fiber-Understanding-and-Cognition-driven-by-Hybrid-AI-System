@@ -97,6 +97,31 @@ DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM: np.ndarray | None = None
 DYNAMIC_TEMPORAL_SHADOW_MAX_RESAMPLE_STEPS = 12
 
 
+def _optional_environment_bool(name: str) -> bool | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _apply_px6d_environment_overrides(config: dict[str, Any]) -> dict[str, Any]:
+    enabled = _optional_environment_bool("TOUCH_PX6D_ENABLED")
+    auto_start = _optional_environment_bool("TOUCH_PX6D_AUTO_START")
+    port = os.environ.get("TOUCH_PX6D_PORT")
+    if enabled is not None:
+        config["enabled"] = enabled
+    if auto_start is not None:
+        config["auto_start"] = auto_start
+    if port and port.strip():
+        config["port"] = port.strip()
+    return config
+
+
 def _load_px6d_reference_config() -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "enabled": True,
@@ -137,13 +162,13 @@ def _load_px6d_reference_config() -> dict[str, Any]:
         "capture_require_software_tare": True,
     }
     if yaml is None or not PX6D_REFERENCE_CONFIG_PATH.exists():
-        return defaults
+        return _apply_px6d_environment_overrides(defaults)
     try:
         payload = yaml.safe_load(
             PX6D_REFERENCE_CONFIG_PATH.read_text(encoding="utf-8")
         ) or {}
     except Exception:
-        return defaults
+        return _apply_px6d_environment_overrides(defaults)
     serial_config = payload.get("serial") or {}
     signal_config = payload.get("signal") or {}
     tare_config = payload.get("software_tare") or {}
@@ -258,7 +283,7 @@ def _load_px6d_reference_config() -> dict[str, Any]:
             ),
         }
     )
-    return defaults
+    return _apply_px6d_environment_overrides(defaults)
 
 
 def _spectrum_fingerprint(
@@ -668,6 +693,23 @@ def _predict_dynamic_temporal_shadow(
                         pending_baseline["intensity"].tolist(),
                     )
                     DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN = baseline_token
+                else:
+                    # The adapter applies its recovered baseline before asking the
+                    # bridge to commit it. Keep both layers transactional: if the
+                    # bridge rejects the candidate, restore the previously active
+                    # spectrum instead of letting model and bridge references drift.
+                    adapter.set_baseline(
+                        baseline["wavelength_nm"],
+                        baseline["intensity"],
+                    )
+                    DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN = baseline_token
+                    DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC = None
+                    DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM = None
+                    runtime_baseline_update = {
+                        **runtime_baseline_update,
+                        "adapter_baseline_rollback_applied": True,
+                        "rollback_baseline_token": baseline_token,
+                    }
             DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC = current_timestamp_sec
             DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM = current_spectrum.copy()
             payload = {
@@ -2650,6 +2692,7 @@ def health() -> dict:
         "ok": True,
         "app": "TOUCH System Trained Static Spectrum Twin",
         "mode": "standalone_bayspec_trained_static_spectrum_twin",
+        "backend_contract_version": "trained_static_spectrum_api_v2",
         "previous_p22_pd_voltage_app": "kept_separate",
         "optical_intensity_edition": "kept_separate",
         "demodulation_mode": "trained_static_full_spectrum_classifier",
@@ -2917,6 +2960,32 @@ def _begin_acquisition_session() -> dict:
     }
 
 
+def _sdk_session_matches(
+    status: dict[str, Any],
+    *,
+    channel_id: str,
+    interval_ms: int,
+    integration: int,
+) -> bool:
+    """Return true when a start request already describes the live session."""
+
+    return bool(
+        status.get("active")
+        and str(status.get("channel_id") or "") == str(channel_id)
+        and int(status.get("interval_ms") or 0) == int(interval_ms)
+        and int(status.get("integration") or 0) == int(integration)
+    )
+
+
+def _unchanged_acquisition_session() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "baseline_invalidated": False,
+        "status": "already_running_same_session",
+        "reason": "idempotent_start_request",
+    }
+
+
 @app.post("/api/export_watch/start")
 def export_watch_start(
     channel_id: str = Query(default="P22"),
@@ -2952,9 +3021,30 @@ def sdk_start(
     interval_ms: int = Query(default=100, ge=20, le=2000),
     integration: int = Query(default=40000, ge=1, le=10000000),
 ) -> dict:
+    existing_status = sdk_live_reader.status()
+    requested_interval_ms = max(20, min(int(interval_ms), 2000))
+    requested_integration = max(1, int(integration))
+    if _sdk_session_matches(
+        existing_status,
+        channel_id=channel_id,
+        interval_ms=requested_interval_ms,
+        integration=requested_integration,
+    ):
+        return {
+            "ok": True,
+            "mode": "bayspec_direct_sdk_already_running",
+            "sdk_live": existing_status,
+            "acquisition_session_reset": _unchanged_acquisition_session(),
+        }
+    if existing_status.get("active"):
+        sdk_live_reader.stop()
     export_watcher.stop()
     session_reset = _begin_acquisition_session()
-    status = sdk_live_reader.start(channel_id=channel_id, interval_ms=interval_ms, integration=integration)
+    status = sdk_live_reader.start(
+        channel_id=channel_id,
+        interval_ms=requested_interval_ms,
+        integration=requested_integration,
+    )
     return {
         "ok": bool(status.get("active")),
         "mode": "bayspec_direct_sdk_started",
@@ -3003,11 +3093,31 @@ def live_start(
     source: str = Query(default="direct_sdk"),
 ) -> dict:
     if source == "direct_sdk":
+        requested_interval_ms = max(20, min(int(interval_sec * 1000), 2000))
+        existing_status = sdk_live_reader.status()
+        if _sdk_session_matches(
+            existing_status,
+            channel_id=channel_id,
+            interval_ms=requested_interval_ms,
+            integration=40000,
+        ):
+            return {
+                "ok": True,
+                "mode": "bayspec_live_twin_already_running",
+                "sdk_live": existing_status,
+                "acquisition_session_reset": _unchanged_acquisition_session(),
+                "sense_control": {
+                    "ok": True,
+                    "mode": "sense_control_not_required_for_direct_sdk",
+                },
+            }
+        if existing_status.get("active"):
+            sdk_live_reader.stop()
         export_watcher.stop()
         session_reset = _begin_acquisition_session()
         sdk_status = sdk_live_reader.start(
             channel_id=channel_id,
-            interval_ms=max(20, int(interval_sec * 1000)),
+            interval_ms=requested_interval_ms,
             integration=40000,
         )
         return {

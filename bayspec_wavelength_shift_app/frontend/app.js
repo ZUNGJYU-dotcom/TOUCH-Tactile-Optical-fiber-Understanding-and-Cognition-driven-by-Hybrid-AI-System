@@ -996,6 +996,14 @@ function setText(id, value) {
   }
 }
 
+function finiteNumberOrNull(value) {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 function updatePx6dPanel(payload = {}) {
   if (Object.prototype.hasOwnProperty.call(payload, "px6d_reference")) {
     state.px6dAligned = payload?.px6d_reference || null;
@@ -1015,16 +1023,16 @@ function updatePx6dPanel(payload = {}) {
   const mechanicalSource = aligned || sample || {};
   const zeroed = mechanicalSource?.zeroed || {};
   const mechanical = mechanicalSource?.mechanical || {};
-  const referenceValue = Number(
+  const referenceValue = finiteNumberOrNull(
     aligned?.reference_fz_display_n ??
     sample?.reference_fz_display_n ??
     sample?.conditioned_reference_fz_n ??
     sample?.filtered_reference_fz_n
   );
-  const rawFz = Number(aligned?.raw?.fz_n ?? sample?.raw?.fz_n);
+  const rawFz = finiteNumberOrNull(aligned?.raw?.fz_n ?? sample?.raw?.fz_n);
   const connected = status?.connected === true;
   const tareReady = Boolean(aligned?.tare_ready ?? sample?.tare_ready ?? status?.tare_ready);
-  const sampleAge = Number(status?.last_sample_age_sec);
+  const sampleAge = finiteNumberOrNull(status?.last_sample_age_sec);
   const fresh = connected && Number.isFinite(sampleAge) && sampleAge < 0.5;
   const stateLabel = !connected
     ? "offline"
@@ -1056,7 +1064,7 @@ function updatePx6dPanel(payload = {}) {
     ["diagnosticPx6dMz", zeroed?.mz_nm, 4],
   ];
   axisSpecs.forEach(([id, value, digits]) => {
-    const numeric = Number(value);
+    const numeric = finiteNumberOrNull(value);
     setText(id, Number.isFinite(numeric) ? numeric.toFixed(digits) : "--");
   });
   const derivedSpecs = [
@@ -1066,32 +1074,40 @@ function updatePx6dPanel(payload = {}) {
     ["diagnosticPx6dUtilization", mechanical?.peak_utilization_percent, "%", 1],
   ];
   derivedSpecs.forEach(([id, value, unit, digits]) => {
-    const numeric = Number(value);
+    const numeric = finiteNumberOrNull(value);
     setText(id, Number.isFinite(numeric) ? `${numeric.toFixed(digits)} ${unit}` : `-- ${unit}`);
   });
   const utilizationElement = document.getElementById("diagnosticPx6dUtilization");
   if (utilizationElement) utilizationElement.dataset.healthTone = mechanical?.utilization_status === "warning" ? "warning" : "ok";
   setText("diagnosticPx6dTareStatus", tareReady ? "ready" : status?.tare_status || sample?.tare_status || "required");
-  const tareNoise = Number(aligned?.tare_fz_std_n ?? sample?.tare_fz_std_n ?? status?.tare_fz_std_n);
+  const tareNoise = finiteNumberOrNull(aligned?.tare_fz_std_n ?? sample?.tare_fz_std_n ?? status?.tare_fz_std_n);
   setText("diagnosticPx6dTareNoise", Number.isFinite(tareNoise) ? `${tareNoise.toFixed(4)} N` : "--");
-  const filteredFz = Number(aligned?.filtered_reference_fz_n ?? sample?.filtered_reference_fz_n);
-  const driftOffset = Number(aligned?.drift_offset_n ?? sample?.drift_offset_n ?? status?.force_conditioning?.current_drift_offset_n);
+  const filteredFz = finiteNumberOrNull(aligned?.filtered_reference_fz_n ?? sample?.filtered_reference_fz_n);
+  const driftOffset = finiteNumberOrNull(aligned?.drift_offset_n ?? sample?.drift_offset_n ?? status?.force_conditioning?.current_drift_offset_n);
   setText("diagnosticPx6dFilteredFz", Number.isFinite(filteredFz) ? `${filteredFz.toFixed(4)} N` : "--");
-  setText("diagnosticPx6dDriftOffset", Number.isFinite(driftOffset) ? `${driftOffset.toFixed(4)} N` : "--");
+  setText("diagnosticPx6dDriftOffset", tareReady && Number.isFinite(driftOffset) ? `${driftOffset.toFixed(4)} N` : "--");
   setText(
     "diagnosticPx6dFilterStatus",
     aligned?.force_filter_status || sample?.force_filter_status || status?.force_conditioning?.filter_status || "--"
   );
-  const observedRate = Number(status?.observed_sample_hz);
+  const observedRate = finiteNumberOrNull(status?.observed_sample_hz);
   setText("diagnosticPx6dSampleRate", Number.isFinite(observedRate) ? `${observedRate.toFixed(1)} Hz` : "--");
   setText("diagnosticPx6dSampleAge", Number.isFinite(sampleAge) ? `${(sampleAge * 1000).toFixed(0)} ms` : "--");
-  setText("diagnosticPx6dCompressionSign", Number(status?.compression_sign) < 0 ? "raw −Fz = compression" : "raw +Fz = compression");
-  const forceRange = Number(status?.force_full_scale_per_axis_n);
-  const momentRange = Number(status?.moment_full_scale_per_axis_nm);
+  const compressionSign = finiteNumberOrNull(status?.compression_sign);
+  setText(
+    "diagnosticPx6dCompressionSign",
+    Number.isFinite(compressionSign)
+      ? compressionSign < 0
+        ? "raw −Fz = compression"
+        : "raw +Fz = compression"
+      : "--"
+  );
+  const forceRange = finiteNumberOrNull(status?.force_full_scale_per_axis_n);
+  const momentRange = finiteNumberOrNull(status?.moment_full_scale_per_axis_nm);
   setText("diagnosticPx6dForceRange", Number.isFinite(forceRange) ? `±${forceRange.toFixed(0)} N / axis` : "--");
   setText("diagnosticPx6dMomentRange", Number.isFinite(momentRange) ? `±${momentRange.toFixed(1)} N·m / axis` : "--");
 
-  const syncOffset = Number(pair?.sync_offset_ms);
+  const syncOffset = finiteNumberOrNull(pair?.sync_offset_ms);
   const syncQuality = aligned?.sync_quality || (state.px6dOpticalFrame ? "not paired" : "waiting");
   const syncQualityElement = document.getElementById("diagnosticPx6dSyncQuality");
   if (syncQualityElement) {
@@ -1100,8 +1116,8 @@ function updatePx6dPanel(payload = {}) {
   }
   setText("diagnosticPx6dSyncOffset", Number.isFinite(syncOffset) ? `${syncOffset.toFixed(1)} ms` : "-- ms");
   setText("diagnosticOpticalFrameId", state.px6dOpticalFrame ? String(state.px6dOpticalFrame.frameId ?? "--") : "NO FRAME");
-  const sequenceStart = Number(aligned?.force_sequence_start);
-  const sequenceEnd = Number(aligned?.force_sequence_end);
+  const sequenceStart = finiteNumberOrNull(aligned?.force_sequence_start);
+  const sequenceEnd = finiteNumberOrNull(aligned?.force_sequence_end);
   setText(
     "diagnosticForceFrameId",
     Number.isFinite(sequenceStart)
@@ -1113,9 +1129,10 @@ function updatePx6dPanel(payload = {}) {
         : "--"
   );
   setText("diagnosticPx6dSyncMethod", aligned?.sync_method || "--");
-  setText("diagnosticPx6dSyncSamples", Number.isFinite(Number(aligned?.sample_count)) ? String(aligned.sample_count) : "--");
+  const syncSampleCount = finiteNumberOrNull(aligned?.sample_count);
+  setText("diagnosticPx6dSyncSamples", Number.isFinite(syncSampleCount) ? String(syncSampleCount) : "--");
   const syncNote = aligned
-    ? `Paired by host timestamp. ${syncQuality} alignment at ${Math.abs(syncOffset).toFixed(1)} ms; PX6D remains an external reference.`
+    ? `Paired by host timestamp. ${syncQuality} alignment at ${Number.isFinite(syncOffset) ? Math.abs(syncOffset).toFixed(1) : "--"} ms; PX6D remains an external reference.`
     : state.px6dOpticalFrame
       ? `Optical frame present, but force pairing is unavailable: ${pair?.status || "force frame missing"}.`
       : "Waiting for an optical spectrum frame. PX6D can continue independently.";

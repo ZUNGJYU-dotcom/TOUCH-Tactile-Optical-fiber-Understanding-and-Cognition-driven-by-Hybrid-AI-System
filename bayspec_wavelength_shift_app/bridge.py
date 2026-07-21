@@ -3050,7 +3050,10 @@ class BaySpecWavelengthShiftBridge:
         sorted_values = sorted(intensity, reverse=True)
         top_count = min(5, len(sorted_values))
         peak_intensity = sum(sorted_values[:top_count]) / top_count
-        wavelength_grid = self._latest_wavelength_grid(dat_path.parent, expected_points=frame_points)
+        wavelength_grid = self._latest_wavelength_grid(
+            dat_path.parent,
+            expected_points=len(intensity),
+        )
         channel_payload: dict[str, Any] = {
             "channel_id": channel_id,
             "intensity_counts": peak_intensity,
