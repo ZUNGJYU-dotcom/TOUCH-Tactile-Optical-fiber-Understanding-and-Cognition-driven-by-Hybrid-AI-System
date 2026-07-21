@@ -112,6 +112,89 @@ class Px6dReferenceForceTests(unittest.TestCase):
         self.assertEqual(
             aligned["semantics"], "PX6D_reference_Fz_not_optical_force_prediction"
         )
+        self.assertIn("filtered_reference_fz_n", aligned)
+        self.assertIn("drift_corrected_reference_fz_n", aligned)
+        self.assertIn("conditioned_reference_fz_n", aligned)
+        self.assertIn("force_filter_status", aligned)
+
+    def test_stationary_near_zero_drift_is_corrected_but_contact_is_preserved(self) -> None:
+        reader = Px6dReader(
+            {
+                "poll_hz": 20.0,
+                "compression_sign": -1,
+                "median_window_samples": 5,
+                "filter_alpha": 0.35,
+                "force_deadband_n": 0.010,
+                "stationary_window_sec": 0.50,
+                "stationary_std_max_n": 0.020,
+                "stationary_range_max_n": 0.060,
+                "stationary_slope_max_n_per_sec": 0.20,
+                "auto_zero_hold_sec": 0.40,
+                "auto_zero_capture_limit_n": 0.080,
+                "auto_zero_alpha": 0.15,
+            }
+        )
+        reader._tare_values = (0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+        reader._tare_status = "ready"
+        started = time.time()
+        noise = (0.0, 0.001, -0.001, 0.0005, -0.0005)
+        for index in range(80):
+            drift_n = 0.040 * index / 79.0
+            reader._append_sample(
+                make_sample(
+                    index + 1,
+                    started + index * 0.05,
+                    fz_n=1.0 - drift_n + noise[index % len(noise)],
+                )
+            )
+
+        rest = reader.latest()["sample"]
+        self.assertGreater(rest["reference_fz_n"], 0.035)
+        self.assertGreater(rest["drift_offset_n"], 0.020)
+        self.assertLess(abs(rest["conditioned_reference_fz_n"]), 0.020)
+        self.assertTrue(rest["stationary_detected"])
+        offset_before_contact = rest["drift_offset_n"]
+
+        for index in range(20):
+            reader._append_sample(
+                make_sample(
+                    81 + index,
+                    started + (80 + index) * 0.05,
+                    fz_n=0.50,
+                )
+            )
+        contact = reader.latest()["sample"]
+        self.assertGreater(contact["conditioned_reference_fz_n"], 0.40)
+        self.assertLess(
+            abs(contact["drift_offset_n"] - offset_before_contact),
+            0.006,
+        )
+        self.assertEqual(
+            contact["force_filter_status"], "contact_or_motion_filter_frozen"
+        )
+
+    def test_median_stage_rejects_isolated_force_spike(self) -> None:
+        reader = Px6dReader(
+            {
+                "compression_sign": -1,
+                "median_window_samples": 5,
+                "filter_alpha": 1.0,
+                "auto_zero_drift_enabled": False,
+            }
+        )
+        reader._tare_values = (0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+        reader._tare_status = "ready"
+        started = time.time()
+        for index in range(8):
+            reader._append_sample(
+                make_sample(index + 1, started + index * 0.02, fz_n=1.0)
+            )
+        reader._append_sample(make_sample(9, started + 0.18, fz_n=0.0))
+        reader._append_sample(make_sample(10, started + 0.20, fz_n=1.0))
+        latest = reader.latest()["sample"]
+        self.assertAlmostEqual(latest["reference_fz_n"], 0.0, places=6)
+        self.assertAlmostEqual(latest["filtered_reference_fz_n"], 0.0, places=6)
+        self.assertAlmostEqual(latest["conditioned_reference_fz_n"], 0.0, places=6)
 
     def test_stale_force_is_not_attached_to_spectrum(self) -> None:
         reader = Px6dReader({"sync_window_sec": 0.01, "sync_max_age_sec": 0.10})
@@ -145,12 +228,14 @@ class Px6dIntegrationContractTests(unittest.TestCase):
         self.assertIn("px6dCaptureForce", html)
         self.assertIn("px6dCaptureOutputRoot", html)
         self.assertIn("px6dCaptureBrowseButton", html)
+        self.assertIn("diagnosticPx6dFilterStatus", html)
         self.assertIn("/api/px6d/tare", javascript)
         self.assertIn("/api/px6d/latest", javascript)
         self.assertIn("/api/px6d_capture/start", javascript)
         self.assertIn("selected_outputs: selectedOutputs", javascript)
         self.assertIn("output_root: px6dCaptureOutputRoot", javascript)
         self.assertIn("choose_output_directory", javascript)
+        self.assertIn("drift_offset_n", javascript)
         self.assertIn('"px6d_reference": _px6d_reference_for_record', backend)
         self.assertIn("OpticalForceCaptureManager", backend)
 

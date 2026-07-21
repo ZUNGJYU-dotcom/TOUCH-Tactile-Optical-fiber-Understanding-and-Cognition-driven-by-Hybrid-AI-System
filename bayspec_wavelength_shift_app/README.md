@@ -87,6 +87,13 @@ sample count, and an `excellent/good/acceptable/poor` alignment grade. A missing
 optical frame is shown as `NO FRAME`; it does not make the independently running
 PX6D invalid.
 
+For the Operator display, Fz conditioning uses a five-sample median filter,
+low-pass smoothing, a near-zero deadband, and stationary-gated slow zero-drift
+tracking. Drift tracking is limited to a configurable near-zero range and is
+frozen as soon as contact or motion is detected. Diagnostics shows the
+low-pass value, estimated drift offset, and current filter state. All settings
+live in `config/px6d_reference.yaml`; the raw six-axis stream is never replaced.
+
 The same workspace provides selectable synchronized recording. Choose a
 position, action, trial ID, save folder, and any one, two, or all three data
 streams. **Stop & save** finalizes the selected primary files:
@@ -95,6 +102,12 @@ streams. **Stop & save** finalizes the selected primary files:
 - `tactile_response_timeseries.csv`: contact, position, and light/normal/hard
   temporal-model outputs and probabilities;
 - `force_timeseries.csv`: raw and software-zeroed six-axis PX6D reference data.
+
+The force CSV additionally contains `median_reference_fz_n`,
+`filtered_reference_fz_n`, `drift_offset_n`,
+`drift_corrected_reference_fz_n`, `conditioned_reference_fz_n`, and filter
+state fields. Use the raw/zeroed columns for traceable calibration work and the
+conditioned column for low-jitter visualization or operator feedback.
 
 All selected files share the exact `capture_index`,
 `timeline_timestamp_epoch_sec`, and `elapsed_time_sec`. Unselected primary CSVs

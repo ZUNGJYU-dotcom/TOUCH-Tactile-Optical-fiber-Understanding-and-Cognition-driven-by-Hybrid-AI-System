@@ -110,6 +110,17 @@ def _load_px6d_reference_config() -> dict[str, Any]:
         "history_seconds": 300.0,
         "compression_sign": -1,
         "filter_alpha": 0.25,
+        "median_window_samples": 5,
+        "force_deadband_n": 0.015,
+        "stationary_window_sec": 1.0,
+        "stationary_std_max_n": 0.008,
+        "stationary_range_max_n": 0.030,
+        "stationary_slope_max_n_per_sec": 0.025,
+        "auto_zero_drift_enabled": True,
+        "auto_zero_hold_sec": 1.5,
+        "auto_zero_capture_limit_n": 0.060,
+        "auto_zero_alpha": 0.015,
+        "maximum_drift_offset_n": 0.50,
         "auto_tare_on_start": True,
         "auto_tare_duration_sec": 1.0,
         "auto_tare_max_std_n": 0.12,
@@ -161,6 +172,41 @@ def _load_px6d_reference_config() -> dict[str, Any]:
             ),
             "filter_alpha": signal_config.get(
                 "filter_alpha", defaults["filter_alpha"]
+            ),
+            "median_window_samples": signal_config.get(
+                "median_window_samples", defaults["median_window_samples"]
+            ),
+            "force_deadband_n": signal_config.get(
+                "deadband_n", defaults["force_deadband_n"]
+            ),
+            "stationary_window_sec": signal_config.get(
+                "stationary_window_sec", defaults["stationary_window_sec"]
+            ),
+            "stationary_std_max_n": signal_config.get(
+                "stationary_std_max_n", defaults["stationary_std_max_n"]
+            ),
+            "stationary_range_max_n": signal_config.get(
+                "stationary_range_max_n", defaults["stationary_range_max_n"]
+            ),
+            "stationary_slope_max_n_per_sec": signal_config.get(
+                "stationary_slope_max_n_per_sec",
+                defaults["stationary_slope_max_n_per_sec"],
+            ),
+            "auto_zero_drift_enabled": signal_config.get(
+                "auto_zero_drift_enabled", defaults["auto_zero_drift_enabled"]
+            ),
+            "auto_zero_hold_sec": signal_config.get(
+                "auto_zero_hold_sec", defaults["auto_zero_hold_sec"]
+            ),
+            "auto_zero_capture_limit_n": signal_config.get(
+                "auto_zero_capture_limit_n",
+                defaults["auto_zero_capture_limit_n"],
+            ),
+            "auto_zero_alpha": signal_config.get(
+                "auto_zero_alpha", defaults["auto_zero_alpha"]
+            ),
+            "maximum_drift_offset_n": signal_config.get(
+                "maximum_drift_offset_n", defaults["maximum_drift_offset_n"]
             ),
             "auto_tare_on_start": tare_config.get(
                 "auto_tare_on_start", defaults["auto_tare_on_start"]

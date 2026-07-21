@@ -58,6 +58,14 @@ SUMMARY_FIELDS = [
     "mz_zeroed_nm",
     "reference_fz_n",
     "reference_fz_display_n",
+    "median_reference_fz_n",
+    "filtered_reference_fz_n",
+    "drift_offset_n",
+    "drift_corrected_reference_fz_n",
+    "conditioned_reference_fz_n",
+    "stationary_detected",
+    "auto_zero_drift_active",
+    "force_filter_status",
     "force_resultant_n",
     "shear_resultant_n",
     "moment_resultant_nm",
@@ -141,6 +149,14 @@ FORCE_FIELDS = [
     "mz_zeroed_nm",
     "reference_fz_n",
     "reference_fz_display_n",
+    "median_reference_fz_n",
+    "filtered_reference_fz_n",
+    "drift_offset_n",
+    "drift_corrected_reference_fz_n",
+    "conditioned_reference_fz_n",
+    "stationary_detected",
+    "auto_zero_drift_active",
+    "force_filter_status",
     "force_resultant_n",
     "shear_resultant_n",
     "moment_resultant_nm",
@@ -750,6 +766,18 @@ class OpticalForceCaptureManager:
             "mz_zeroed_nm": zeroed.get("mz_nm"),
             "reference_fz_n": force.get("reference_fz_n"),
             "reference_fz_display_n": force.get("reference_fz_display_n"),
+            "median_reference_fz_n": force.get("median_reference_fz_n"),
+            "filtered_reference_fz_n": force.get("filtered_reference_fz_n"),
+            "drift_offset_n": force.get("drift_offset_n"),
+            "drift_corrected_reference_fz_n": force.get(
+                "drift_corrected_reference_fz_n"
+            ),
+            "conditioned_reference_fz_n": force.get(
+                "conditioned_reference_fz_n"
+            ),
+            "stationary_detected": force.get("stationary_detected"),
+            "auto_zero_drift_active": force.get("auto_zero_drift_active"),
+            "force_filter_status": force.get("force_filter_status"),
             "force_resultant_n": mechanical.get("force_resultant_n"),
             "shear_resultant_n": mechanical.get("shear_resultant_n"),
             "moment_resultant_nm": mechanical.get("moment_resultant_nm"),
@@ -806,6 +834,18 @@ class OpticalForceCaptureManager:
             "mz_zeroed_nm": zeroed.get("mz_nm"),
             "reference_fz_n": force.get("reference_fz_n"),
             "reference_fz_display_n": force.get("reference_fz_display_n"),
+            "median_reference_fz_n": force.get("median_reference_fz_n"),
+            "filtered_reference_fz_n": force.get("filtered_reference_fz_n"),
+            "drift_offset_n": force.get("drift_offset_n"),
+            "drift_corrected_reference_fz_n": force.get(
+                "drift_corrected_reference_fz_n"
+            ),
+            "conditioned_reference_fz_n": force.get(
+                "conditioned_reference_fz_n"
+            ),
+            "stationary_detected": force.get("stationary_detected"),
+            "auto_zero_drift_active": force.get("auto_zero_drift_active"),
+            "force_filter_status": force.get("force_filter_status"),
             "force_resultant_n": mechanical.get("force_resultant_n"),
             "shear_resultant_n": mechanical.get("shear_resultant_n"),
             "moment_resultant_nm": mechanical.get("moment_resultant_nm"),
@@ -917,6 +957,9 @@ class OpticalForceCaptureManager:
         payload = self.status()
         alignment_audit = self._alignment_audit_locked(output_dir)
         selected = set(self._state.get("selected_outputs") or [])
+        force_status = (
+            dict(self.force_status_provider() or {}) if "force" in selected else {}
+        )
         payload.update(
             {
                 "schema_version": "touch_synchronized_capture_v2",
@@ -950,10 +993,11 @@ class OpticalForceCaptureManager:
                     else "not_selected"
                 ),
                 "mechanical_payload": (
-                    "raw and software-zeroed Fx/Fy/Fz/Mx/My/Mz plus derived resultants"
+                    "raw and software-zeroed six-axis values, conditioned Fz stages, and derived resultants"
                     if "force" in selected
                     else "not_selected"
                 ),
+                "force_conditioning": force_status.get("force_conditioning"),
                 "files": {
                     "spectrum_timeseries_csv": (
                         "spectrum_timeseries.csv" if "spectrum" in selected else None

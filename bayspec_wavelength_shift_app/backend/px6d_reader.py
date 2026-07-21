@@ -83,6 +83,21 @@ class Px6dSample:
         return tuple(float(getattr(self, name)) for name in AXIS_NAMES)
 
 
+@dataclass(frozen=True)
+class ConditionedFzSample:
+    """Per-sample Fz conditioning result retained for timestamp alignment."""
+
+    sequence_id: int
+    median_reference_fz_n: float
+    low_pass_reference_fz_n: float
+    drift_offset_n: float
+    drift_corrected_reference_fz_n: float
+    conditioned_reference_fz_n: float
+    stationary_detected: bool
+    auto_zero_drift_active: bool
+    filter_status: str
+
+
 class Px6dReader:
     """Background polling reader with software tare and timestamp alignment."""
 
@@ -99,6 +114,40 @@ class Px6dReader:
         self.history_seconds = max(10.0, float(payload.get("history_seconds") or 300.0))
         self.compression_sign = -1.0 if float(payload.get("compression_sign") or -1.0) < 0 else 1.0
         self.filter_alpha = min(1.0, max(0.01, float(payload.get("filter_alpha") or 0.25)))
+        median_window = max(1, int(payload.get("median_window_samples") or 5))
+        self.median_window_samples = median_window if median_window % 2 else median_window + 1
+        self.force_deadband_n = max(0.0, float(payload.get("force_deadband_n") or 0.015))
+        self.stationary_window_sec = max(
+            0.25, float(payload.get("stationary_window_sec") or 1.0)
+        )
+        self.stationary_std_max_n = max(
+            0.0001, float(payload.get("stationary_std_max_n") or 0.008)
+        )
+        self.stationary_range_max_n = max(
+            self.stationary_std_max_n,
+            float(payload.get("stationary_range_max_n") or 0.030),
+        )
+        self.stationary_slope_max_n_per_sec = max(
+            0.0001,
+            float(payload.get("stationary_slope_max_n_per_sec") or 0.025),
+        )
+        self.auto_zero_drift_enabled = bool(
+            payload.get("auto_zero_drift_enabled", True)
+        )
+        self.auto_zero_hold_sec = max(
+            0.25, float(payload.get("auto_zero_hold_sec") or 1.5)
+        )
+        self.auto_zero_capture_limit_n = max(
+            self.force_deadband_n,
+            float(payload.get("auto_zero_capture_limit_n") or 0.060),
+        )
+        self.auto_zero_alpha = min(
+            0.25, max(0.0001, float(payload.get("auto_zero_alpha") or 0.015))
+        )
+        self.maximum_drift_offset_n = max(
+            self.auto_zero_capture_limit_n,
+            float(payload.get("maximum_drift_offset_n") or 0.50),
+        )
         self.auto_tare_on_start = bool(payload.get("auto_tare_on_start", True))
         self.auto_tare_duration_sec = max(
             0.25, float(payload.get("auto_tare_duration_sec") or 1.0)
@@ -131,6 +180,11 @@ class Px6dReader:
 
         history_limit = max(500, int(self.poll_hz * self.history_seconds))
         self._samples: deque[Px6dSample] = deque(maxlen=history_limit)
+        self._conditioned_samples: dict[int, ConditionedFzSample] = {}
+        self._median_reference_window: deque[float] = deque(
+            maxlen=self.median_window_samples
+        )
+        self._stationary_window: deque[tuple[float, float]] = deque()
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -150,6 +204,11 @@ class Px6dReader:
         self._tare_fz_std_n: float | None = None
         self._tare_sample_count = 0
         self._filtered_reference_fz_n: float | None = None
+        self._drift_offset_n = 0.0
+        self._stationary_since_epoch_sec: float | None = None
+        self._stationary_detected = False
+        self._auto_zero_drift_active = False
+        self._filter_status = "tare_required"
 
     def start(self) -> dict[str, Any]:
         with self._lock:
@@ -306,15 +365,116 @@ class Px6dReader:
 
     def _append_sample(self, sample: Px6dSample) -> None:
         with self._lock:
+            evicted_sequence = (
+                self._samples[0].sequence_id
+                if len(self._samples) == self._samples.maxlen
+                else None
+            )
             self._samples.append(sample)
+            if evicted_sequence is not None:
+                self._conditioned_samples.pop(evicted_sequence, None)
             self._valid_frames += 1
             reference = self._reference_fz_from_sample_locked(sample)
-            if self._filtered_reference_fz_n is None:
-                self._filtered_reference_fz_n = reference
-            else:
-                self._filtered_reference_fz_n += self.filter_alpha * (
-                    reference - self._filtered_reference_fz_n
+            conditioned = self._condition_reference_fz_locked(sample, reference)
+            self._conditioned_samples[sample.sequence_id] = conditioned
+
+    def _condition_reference_fz_locked(
+        self,
+        sample: Px6dSample,
+        reference_fz_n: float,
+    ) -> ConditionedFzSample:
+        self._median_reference_window.append(float(reference_fz_n))
+        median_reference = statistics.median(self._median_reference_window)
+        if self._filtered_reference_fz_n is None:
+            self._filtered_reference_fz_n = median_reference
+        else:
+            self._filtered_reference_fz_n += self.filter_alpha * (
+                median_reference - self._filtered_reference_fz_n
+            )
+        low_pass_reference = float(self._filtered_reference_fz_n)
+
+        timestamp = float(sample.timestamp_epoch_sec)
+        self._stationary_window.append((timestamp, low_pass_reference))
+        cutoff = timestamp - self.stationary_window_sec
+        while self._stationary_window and self._stationary_window[0][0] < cutoff:
+            self._stationary_window.popleft()
+
+        stationary = False
+        if len(self._stationary_window) >= 3:
+            span = self._stationary_window[-1][0] - self._stationary_window[0][0]
+            values = [value for _, value in self._stationary_window]
+            value_std = statistics.pstdev(values) if len(values) > 1 else 0.0
+            value_range = max(values) - min(values)
+            slope = (
+                abs(values[-1] - values[0]) / span
+                if span > 1e-9
+                else math.inf
+            )
+            stationary = (
+                span >= self.stationary_window_sec * 0.80
+                and value_std <= self.stationary_std_max_n
+                and value_range <= self.stationary_range_max_n
+                and slope <= self.stationary_slope_max_n_per_sec
+            )
+
+        before_drift_correction = low_pass_reference - self._drift_offset_n
+        near_zero = abs(before_drift_correction) <= self.auto_zero_capture_limit_n
+        auto_zero_active = False
+        if self._tare_values is None:
+            self._stationary_since_epoch_sec = None
+            filter_status = "tare_required"
+        elif not self.auto_zero_drift_enabled:
+            self._stationary_since_epoch_sec = None
+            filter_status = "filtered"
+        elif stationary and near_zero:
+            if self._stationary_since_epoch_sec is None:
+                self._stationary_since_epoch_sec = timestamp
+            held_for = max(0.0, timestamp - self._stationary_since_epoch_sec)
+            if held_for >= self.auto_zero_hold_sec:
+                proposed_offset = self._drift_offset_n + self.auto_zero_alpha * (
+                    low_pass_reference - self._drift_offset_n
                 )
+                self._drift_offset_n = max(
+                    -self.maximum_drift_offset_n,
+                    min(self.maximum_drift_offset_n, proposed_offset),
+                )
+                auto_zero_active = True
+                filter_status = "stationary_drift_tracking"
+            else:
+                filter_status = "stationary_hold"
+        else:
+            self._stationary_since_epoch_sec = None
+            filter_status = "contact_or_motion_filter_frozen"
+
+        drift_corrected = low_pass_reference - self._drift_offset_n
+        conditioned_reference = (
+            0.0 if abs(drift_corrected) <= self.force_deadband_n else drift_corrected
+        )
+        self._stationary_detected = stationary
+        self._auto_zero_drift_active = auto_zero_active
+        self._filter_status = filter_status
+        return ConditionedFzSample(
+            sequence_id=sample.sequence_id,
+            median_reference_fz_n=float(median_reference),
+            low_pass_reference_fz_n=low_pass_reference,
+            drift_offset_n=float(self._drift_offset_n),
+            drift_corrected_reference_fz_n=float(drift_corrected),
+            conditioned_reference_fz_n=float(conditioned_reference),
+            stationary_detected=stationary,
+            auto_zero_drift_active=auto_zero_active,
+            filter_status=filter_status,
+        )
+
+    def _reset_conditioner_locked(self) -> None:
+        self._conditioned_samples.clear()
+        self._median_reference_window.clear()
+        self._stationary_window.clear()
+        self._filtered_reference_fz_n = None
+        self._drift_offset_n = 0.0
+        self._stationary_since_epoch_sec = None
+        self._stationary_detected = False
+        self._auto_zero_drift_active = False
+        self._filter_status = "warming_up"
 
     def _close_serial_locked(self) -> None:
         port, self._serial = self._serial, None
@@ -378,7 +538,7 @@ class Px6dReader:
             self._tare_status = "ready"
             self._tare_fz_std_n = fz_std
             self._tare_sample_count = len(candidates)
-            self._filtered_reference_fz_n = 0.0
+            self._reset_conditioner_locked()
         return {
             "ok": True,
             "status": "ready",
@@ -444,6 +604,23 @@ class Px6dReader:
         tare = self._tare_values or (0.0,) * 6
         zeroed = tuple(value - offset for value, offset in zip(raw, tare))
         reference_fz = self.compression_sign * zeroed[2]
+        conditioned = self._conditioned_samples.get(sample.sequence_id)
+        if conditioned is None:
+            conditioned = ConditionedFzSample(
+                sequence_id=sample.sequence_id,
+                median_reference_fz_n=reference_fz,
+                low_pass_reference_fz_n=reference_fz,
+                drift_offset_n=self._drift_offset_n,
+                drift_corrected_reference_fz_n=reference_fz - self._drift_offset_n,
+                conditioned_reference_fz_n=(
+                    0.0
+                    if abs(reference_fz - self._drift_offset_n) <= self.force_deadband_n
+                    else reference_fz - self._drift_offset_n
+                ),
+                stationary_detected=False,
+                auto_zero_drift_active=False,
+                filter_status="filter_history_unavailable",
+            )
         mechanical = self._mechanical_metrics(zeroed)
         return {
             "sequence_id": sample.sequence_id,
@@ -452,8 +629,19 @@ class Px6dReader:
             "raw": dict(zip(AXIS_NAMES, raw)),
             "zeroed": dict(zip(AXIS_NAMES, zeroed)),
             "reference_fz_n": reference_fz,
-            "reference_fz_display_n": max(0.0, reference_fz),
-            "filtered_reference_fz_n": self._filtered_reference_fz_n,
+            "reference_fz_display_n": max(
+                0.0, conditioned.conditioned_reference_fz_n
+            ),
+            "median_reference_fz_n": conditioned.median_reference_fz_n,
+            "filtered_reference_fz_n": conditioned.low_pass_reference_fz_n,
+            "drift_offset_n": conditioned.drift_offset_n,
+            "drift_corrected_reference_fz_n": (
+                conditioned.drift_corrected_reference_fz_n
+            ),
+            "conditioned_reference_fz_n": conditioned.conditioned_reference_fz_n,
+            "stationary_detected": conditioned.stationary_detected,
+            "auto_zero_drift_active": conditioned.auto_zero_drift_active,
+            "force_filter_status": conditioned.filter_status,
             "compression_sign": self.compression_sign,
             "roundtrip_ms": sample.roundtrip_ms,
             "tare_ready": self._tare_values is not None,
@@ -489,6 +677,7 @@ class Px6dReader:
         with self._lock:
             samples = list(self._samples)
             tare = self._tare_values or (0.0,) * 6
+            conditioned_by_sequence = dict(self._conditioned_samples)
         if not samples:
             return {"ok": False, "status": "px6d_sample_missing"}
         selected = [
@@ -512,6 +701,39 @@ class Px6dReader:
         )
         zeroed = tuple(value - offset for value, offset in zip(raw_medians, tare))
         reference_fz = self.compression_sign * zeroed[2]
+        selected_conditioned = [
+            conditioned_by_sequence[sample.sequence_id]
+            for sample in selected
+            if sample.sequence_id in conditioned_by_sequence
+        ]
+        if selected_conditioned:
+            median_reference_fz = statistics.median(
+                item.median_reference_fz_n for item in selected_conditioned
+            )
+            filtered_reference_fz = statistics.median(
+                item.low_pass_reference_fz_n for item in selected_conditioned
+            )
+            drift_offset = statistics.median(
+                item.drift_offset_n for item in selected_conditioned
+            )
+            drift_corrected_reference_fz = statistics.median(
+                item.drift_corrected_reference_fz_n for item in selected_conditioned
+            )
+            conditioned_reference_fz = statistics.median(
+                item.conditioned_reference_fz_n for item in selected_conditioned
+            )
+            latest_conditioned = max(
+                selected_conditioned, key=lambda item: item.sequence_id
+            )
+        else:
+            median_reference_fz = reference_fz
+            filtered_reference_fz = reference_fz
+            drift_offset = 0.0
+            drift_corrected_reference_fz = reference_fz
+            conditioned_reference_fz = (
+                0.0 if abs(reference_fz) <= self.force_deadband_n else reference_fz
+            )
+            latest_conditioned = None
         center_timestamp = statistics.median(sample.timestamp_epoch_sec for sample in selected)
         sync_offset_ms = (center_timestamp - target) * 1000.0
         sequence_ids = [sample.sequence_id for sample in selected]
@@ -531,7 +753,23 @@ class Px6dReader:
             "raw": dict(zip(AXIS_NAMES, raw_medians)),
             "zeroed": dict(zip(AXIS_NAMES, zeroed)),
             "reference_fz_n": reference_fz,
-            "reference_fz_display_n": max(0.0, reference_fz),
+            "reference_fz_display_n": max(0.0, conditioned_reference_fz),
+            "median_reference_fz_n": median_reference_fz,
+            "filtered_reference_fz_n": filtered_reference_fz,
+            "drift_offset_n": drift_offset,
+            "drift_corrected_reference_fz_n": drift_corrected_reference_fz,
+            "conditioned_reference_fz_n": conditioned_reference_fz,
+            "stationary_detected": bool(
+                latest_conditioned and latest_conditioned.stationary_detected
+            ),
+            "auto_zero_drift_active": bool(
+                latest_conditioned and latest_conditioned.auto_zero_drift_active
+            ),
+            "force_filter_status": (
+                latest_conditioned.filter_status
+                if latest_conditioned is not None
+                else "filter_history_unavailable"
+            ),
             "compression_sign": self.compression_sign,
             "tare_ready": self._tare_values is not None,
             "tare_status": self._tare_status,
@@ -579,6 +817,27 @@ class Px6dReader:
                 "force_full_scale_per_axis_n": self.force_full_scale_per_axis_n,
                 "moment_full_scale_per_axis_nm": self.moment_full_scale_per_axis_nm,
                 "warning_utilization_percent": self.warning_utilization_percent,
+                "force_conditioning": {
+                    "median_window_samples": self.median_window_samples,
+                    "low_pass_alpha": self.filter_alpha,
+                    "deadband_n": self.force_deadband_n,
+                    "stationary_window_sec": self.stationary_window_sec,
+                    "stationary_std_max_n": self.stationary_std_max_n,
+                    "stationary_range_max_n": self.stationary_range_max_n,
+                    "stationary_slope_max_n_per_sec": (
+                        self.stationary_slope_max_n_per_sec
+                    ),
+                    "auto_zero_drift_enabled": self.auto_zero_drift_enabled,
+                    "auto_zero_hold_sec": self.auto_zero_hold_sec,
+                    "auto_zero_capture_limit_n": self.auto_zero_capture_limit_n,
+                    "auto_zero_alpha": self.auto_zero_alpha,
+                    "maximum_drift_offset_n": self.maximum_drift_offset_n,
+                    "current_drift_offset_n": self._drift_offset_n,
+                    "stationary_detected": self._stationary_detected,
+                    "auto_zero_drift_active": self._auto_zero_drift_active,
+                    "filter_status": self._filter_status,
+                    "raw_values_retained": True,
+                },
                 "sync_quality_thresholds_ms": {
                     "excellent": self.sync_excellent_max_offset_ms,
                     "good": self.sync_good_max_offset_ms,

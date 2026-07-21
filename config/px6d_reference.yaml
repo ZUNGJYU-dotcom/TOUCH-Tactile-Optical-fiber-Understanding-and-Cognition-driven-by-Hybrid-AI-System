@@ -13,6 +13,18 @@ signal:
   history_seconds: 300.0
   compression_sign: -1
   filter_alpha: 0.25
+  median_window_samples: 5
+  deadband_n: 0.015
+  stationary_window_sec: 1.0
+  stationary_std_max_n: 0.008
+  stationary_range_max_n: 0.030
+  stationary_slope_max_n_per_sec: 0.025
+  auto_zero_drift_enabled: true
+  auto_zero_hold_sec: 1.5
+  auto_zero_capture_limit_n: 0.060
+  auto_zero_alpha: 0.015
+  maximum_drift_offset_n: 0.50
+  note: "Median despiking and low-pass filtering are always applied. Slow zero tracking is allowed only after a stable near-zero hold; raw and software-zeroed values remain unchanged in exports."
 
 mechanical:
   primary_axis: Fz

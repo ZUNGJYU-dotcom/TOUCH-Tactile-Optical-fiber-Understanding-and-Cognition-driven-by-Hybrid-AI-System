@@ -64,6 +64,14 @@ def aligned_force(record: dict | None) -> dict:
         },
         "reference_fz_n": 0.80,
         "reference_fz_display_n": 0.80,
+        "median_reference_fz_n": 0.82,
+        "filtered_reference_fz_n": 0.81,
+        "drift_offset_n": 0.01,
+        "drift_corrected_reference_fz_n": 0.80,
+        "conditioned_reference_fz_n": 0.80,
+        "stationary_detected": False,
+        "auto_zero_drift_active": False,
+        "force_filter_status": "contact_or_motion_filter_frozen",
         "mechanical": {
             "force_resultant_n": 0.808,
             "shear_resultant_n": 0.112,
@@ -158,6 +166,10 @@ class OpticalForceCaptureTests(unittest.TestCase):
             self.assertEqual(row["position_label"], "P22")
             self.assertEqual(row["sync_quality"], "excellent")
             self.assertEqual(float(row["reference_fz_n"]), 0.80)
+            self.assertEqual(float(row["filtered_reference_fz_n"]), 0.81)
+            self.assertEqual(float(row["drift_offset_n"]), 0.01)
+            self.assertEqual(float(row["conditioned_reference_fz_n"]), 0.80)
+            self.assertEqual(row["force_filter_status"], "contact_or_motion_filter_frozen")
             self.assertEqual(float(row["fx_zeroed_n"]), 0.05)
             self.assertEqual(row["predicted_position_label"], "P22")
             self.assertEqual(row["predicted_response_level"], "normal")

@@ -1017,8 +1017,9 @@ function updatePx6dPanel(payload = {}) {
   const mechanical = mechanicalSource?.mechanical || {};
   const referenceValue = Number(
     aligned?.reference_fz_display_n ??
-    sample?.filtered_reference_fz_n ??
-    sample?.reference_fz_display_n
+    sample?.reference_fz_display_n ??
+    sample?.conditioned_reference_fz_n ??
+    sample?.filtered_reference_fz_n
   );
   const rawFz = Number(aligned?.raw?.fz_n ?? sample?.raw?.fz_n);
   const connected = status?.connected === true;
@@ -1073,6 +1074,14 @@ function updatePx6dPanel(payload = {}) {
   setText("diagnosticPx6dTareStatus", tareReady ? "ready" : status?.tare_status || sample?.tare_status || "required");
   const tareNoise = Number(aligned?.tare_fz_std_n ?? sample?.tare_fz_std_n ?? status?.tare_fz_std_n);
   setText("diagnosticPx6dTareNoise", Number.isFinite(tareNoise) ? `${tareNoise.toFixed(4)} N` : "--");
+  const filteredFz = Number(aligned?.filtered_reference_fz_n ?? sample?.filtered_reference_fz_n);
+  const driftOffset = Number(aligned?.drift_offset_n ?? sample?.drift_offset_n ?? status?.force_conditioning?.current_drift_offset_n);
+  setText("diagnosticPx6dFilteredFz", Number.isFinite(filteredFz) ? `${filteredFz.toFixed(4)} N` : "--");
+  setText("diagnosticPx6dDriftOffset", Number.isFinite(driftOffset) ? `${driftOffset.toFixed(4)} N` : "--");
+  setText(
+    "diagnosticPx6dFilterStatus",
+    aligned?.force_filter_status || sample?.force_filter_status || status?.force_conditioning?.filter_status || "--"
+  );
   const observedRate = Number(status?.observed_sample_hz);
   setText("diagnosticPx6dSampleRate", Number.isFinite(observedRate) ? `${observedRate.toFixed(1)} Hz` : "--");
   setText("diagnosticPx6dSampleAge", Number.isFinite(sampleAge) ? `${(sampleAge * 1000).toFixed(0)} ms` : "--");
@@ -1113,7 +1122,7 @@ function updatePx6dPanel(payload = {}) {
   setText("diagnosticPx6dSync", syncNote);
   setText(
     "diagnosticPx6dError",
-    status?.last_error || (tareReady ? "software zero ready; raw six-axis values retained" : "stable no-load zero pending")
+    status?.last_error || (tareReady ? "conditioned display active; raw six-axis values retained" : "stable no-load zero pending")
   );
 }
 

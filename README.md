@@ -147,6 +147,15 @@ configured range utilization, tare quality, sample freshness, and explicit
 optical-to-mechanical timestamp alignment quality. `Zero Fz` changes only the
 software offset and never sends a hardware calibration command.
 
+The displayed Fz passes through a short median despiker, an exponential
+low-pass stage, and a configurable deadband. A slow zero-drift tracker is
+allowed to move only after the signal has remained stable and close to zero;
+it freezes immediately during contact or motion. This conditioning is intended
+to suppress unloaded drift without absorbing an applied load. Raw,
+software-zeroed, filtered, drift-offset, and drift-corrected values are all
+retained in the force export for audit and later calibration. Thresholds are in
+`config/px6d_reference.yaml` under `signal`.
+
 To record full optical fingerprints with timestamp-aligned force labels:
 
 ```powershell
@@ -168,6 +177,8 @@ timestamp window. Every selected CSV shares `capture_index`,
 capture uses the PX6D host timestamp and does not wait for BaySpec. The three
 primary files are `spectrum_timeseries.csv`, `tactile_response_timeseries.csv`,
 and `force_timeseries.csv`; unselected files are not created.
+`force_timeseries.csv` preserves both the original PX6D measurements and the
+conditioned Fz stages, so filtering never destroys the calibration source data.
 
 The same workflow is available directly in Diagnostics: select **Force**, set
 the labels, tick the desired streams, and choose a save folder with **Browse**.
