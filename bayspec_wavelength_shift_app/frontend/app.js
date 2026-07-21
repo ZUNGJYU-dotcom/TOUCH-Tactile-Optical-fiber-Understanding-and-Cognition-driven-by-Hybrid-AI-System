@@ -73,6 +73,11 @@ const px6dCapturePosition = document.getElementById("px6dCapturePosition");
 const px6dCaptureAction = document.getElementById("px6dCaptureAction");
 const px6dCaptureTrial = document.getElementById("px6dCaptureTrial");
 const px6dCaptureNote = document.getElementById("px6dCaptureNote");
+const px6dCaptureSpectrum = document.getElementById("px6dCaptureSpectrum");
+const px6dCaptureResponse = document.getElementById("px6dCaptureResponse");
+const px6dCaptureForce = document.getElementById("px6dCaptureForce");
+const px6dCaptureOutputRoot = document.getElementById("px6dCaptureOutputRoot");
+const px6dCaptureBrowseButton = document.getElementById("px6dCaptureBrowseButton");
 const px6dCaptureStartButton = document.getElementById("px6dCaptureStartButton");
 const px6dCaptureStopButton = document.getElementById("px6dCaptureStopButton");
 const diagnosticAccordionCards = Array.from(
@@ -1135,7 +1140,7 @@ async function fetchPx6dReference() {
 function updatePx6dCapturePanel(payload = {}) {
   state.px6dCaptureStatus = payload;
   const running = payload?.running === true;
-  const captured = Number(payload?.captured_paired_frames || 0);
+  const captured = Number(payload?.captured_timeline_frames ?? payload?.captured_paired_frames ?? 0);
   const ratioValue = payload?.paired_frame_ratio;
   const ratio = ratioValue === null || ratioValue === undefined ? NaN : Number(ratioValue);
   const syncOffset = Number(payload?.last_sync_offset_ms);
@@ -1149,14 +1154,32 @@ function updatePx6dCapturePanel(payload = {}) {
       : "--"
   );
   const output = payload?.output_directory;
+  const selectedOutputs = Array.isArray(payload?.selected_outputs) ? payload.selected_outputs : [];
+  const selectedText = selectedOutputs.length ? selectedOutputs.join(" + ") : "no streams selected";
   setText(
     "px6dCaptureOutput",
     output
-      ? `Output: ${output}${payload?.last_error ? ` · ${payload.last_error}` : ""}`
-      : payload?.last_error || "Output appears here after recording starts."
+      ? `Saved streams: ${selectedText} · ${output}${payload?.last_error ? ` · ${payload.last_error}` : ""}`
+      : payload?.last_error || "All selected CSV files share capture_index, timestamp, and elapsed time."
   );
+  if (px6dCaptureOutputRoot && document.activeElement !== px6dCaptureOutputRoot) {
+    const preferredRoot = payload?.requested_output_root || payload?.default_output_root;
+    if (preferredRoot && !px6dCaptureOutputRoot.dataset.userEdited) {
+      px6dCaptureOutputRoot.value = preferredRoot;
+    }
+  }
   const locked = running || state.px6dCaptureRequestInFlight;
-  [px6dCapturePosition, px6dCaptureAction, px6dCaptureTrial, px6dCaptureNote].forEach((control) => {
+  [
+    px6dCapturePosition,
+    px6dCaptureAction,
+    px6dCaptureTrial,
+    px6dCaptureNote,
+    px6dCaptureSpectrum,
+    px6dCaptureResponse,
+    px6dCaptureForce,
+    px6dCaptureOutputRoot,
+    px6dCaptureBrowseButton,
+  ].forEach((control) => {
     if (control) control.disabled = locked;
   });
   if (px6dCaptureStartButton) px6dCaptureStartButton.disabled = locked;
@@ -7289,8 +7312,45 @@ async function performPx6dSoftwareZero() {
 px6dTareButton?.addEventListener("click", performPx6dSoftwareZero);
 diagnosticPx6dTareButton?.addEventListener("click", performPx6dSoftwareZero);
 
+px6dCaptureOutputRoot?.addEventListener("input", () => {
+  px6dCaptureOutputRoot.dataset.userEdited = "true";
+});
+
+px6dCaptureBrowseButton?.addEventListener("click", async () => {
+  if (state.px6dCaptureRequestInFlight) return;
+  const chooser = window.pywebview?.api?.choose_output_directory;
+  if (typeof chooser !== "function") {
+    setCommandFeedback(
+      "Folder browsing is available in the desktop app. Enter the full folder path here in browser mode.",
+      "warning",
+      { autoHideMs: 5000 }
+    );
+    px6dCaptureOutputRoot?.focus();
+    return;
+  }
+  try {
+    const result = await chooser(px6dCaptureOutputRoot?.value || "");
+    if (result?.ok && result?.path && px6dCaptureOutputRoot) {
+      px6dCaptureOutputRoot.value = result.path;
+      px6dCaptureOutputRoot.dataset.userEdited = "true";
+      setCommandFeedback("Capture folder selected.", "success", { autoHideMs: 1800 });
+    }
+  } catch (error) {
+    setCommandFeedback(commandErrorMessage(error, "Unable to choose capture folder"), "error", { autoHideMs: 5000 });
+  }
+});
+
 px6dCaptureStartButton?.addEventListener("click", async () => {
   if (state.px6dCaptureRequestInFlight) return;
+  const selectedOutputs = [
+    [px6dCaptureSpectrum, "spectrum"],
+    [px6dCaptureResponse, "response"],
+    [px6dCaptureForce, "force"],
+  ].filter(([control]) => control?.checked).map(([, value]) => value);
+  if (!selectedOutputs.length) {
+    setCommandFeedback("Select at least one data stream to save.", "warning", { autoHideMs: 4000 });
+    return;
+  }
   state.px6dCaptureRequestInFlight = true;
   updatePx6dCapturePanel(state.px6dCaptureStatus || {});
   try {
@@ -7304,12 +7364,18 @@ px6dCaptureStartButton?.addEventListener("click", async () => {
           action_label: px6dCaptureAction?.value || "unlabeled",
           trial_id: px6dCaptureTrial?.value || "trial_001",
           operator_note: px6dCaptureNote?.value || "",
+          output_root: px6dCaptureOutputRoot?.value?.trim() || null,
+          selected_outputs: selectedOutputs,
         }),
       },
       { timeoutMs: 2500 }
     );
     updatePx6dCapturePanel(payload);
-    setCommandFeedback("Linked optical and PX6D recording started.", "success", { autoHideMs: 2400 });
+    setCommandFeedback(
+      `Synchronized recording started: ${selectedOutputs.join(" + ")}.`,
+      "success",
+      { autoHideMs: 2400 }
+    );
   } catch (error) {
     setCommandFeedback(commandErrorMessage(error, "Unable to start linked recording"), "error", { autoHideMs: 6000 });
   } finally {

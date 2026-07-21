@@ -152,6 +152,33 @@ def run_backend(port: int, server_holder: dict[str, uvicorn.Server]) -> None:
         raise
 
 
+class DesktopApi:
+    """Small native-only API exposed to the bundled pywebview frontend."""
+
+    def choose_output_directory(self, current_path: str = "") -> dict[str, object]:
+        try:
+            initial = Path(str(current_path or "")).expanduser()
+            if not initial.is_dir():
+                initial = initial.parent if initial.parent.is_dir() else Path.home()
+            if not webview.windows:
+                return {"ok": False, "status": "desktop_window_not_ready"}
+            selected = webview.windows[0].create_file_dialog(
+                webview.FileDialog.FOLDER,
+                directory=str(initial),
+            )
+            if not selected:
+                return {"ok": False, "status": "folder_selection_cancelled"}
+            path = selected[0] if isinstance(selected, (list, tuple)) else selected
+            return {"ok": True, "status": "folder_selected", "path": str(Path(path))}
+        except Exception as exc:
+            write_log(f"Output folder selection failed: {type(exc).__name__}: {exc}")
+            return {
+                "ok": False,
+                "status": "folder_selection_failed",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+
+
 def main() -> int:
     app_root = configure_runtime_paths()
     write_log(f"Starting {APP_TITLE}; app_root={app_root}")
@@ -178,6 +205,7 @@ def main() -> int:
         min_size=(1024, 680),
         maximized=True,
         background_color="#f5f9fc",
+        js_api=DesktopApi(),
     )
 
     def on_closed() -> None:

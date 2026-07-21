@@ -29,6 +29,7 @@ Thumbs.db
 data/
 data collection/
 *.DAT
+*.dat
 
 # Delivery archives are published separately when needed
 *.zip

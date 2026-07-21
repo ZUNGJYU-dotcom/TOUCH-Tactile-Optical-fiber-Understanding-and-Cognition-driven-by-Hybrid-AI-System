@@ -87,21 +87,25 @@ sample count, and an `excellent/good/acceptable/poor` alignment grade. A missing
 optical frame is shown as `NO FRAME`; it does not make the independently running
 PX6D invalid.
 
-The same workspace provides in-app synchronized recording. Choose a position,
-action, and trial ID, then select **Start linked recording**. Each unique BaySpec
-spectrum is paired by host timestamp with median PX6D samples and written below
-`data/px6d_synchronized/`. **Stop & save** finalizes:
+The same workspace provides selectable synchronized recording. Choose a
+position, action, trial ID, save folder, and any one, two, or all three data
+streams. **Stop & save** finalizes the selected primary files:
 
-- `synchronized_frames.jsonl`: complete wavelength/intensity arrays plus raw and
-  software-zeroed six-axis reference data;
-- `frame_summary.csv`: compact flat fields suitable for model training and QA;
-- `session_metadata.json`: labels, counts, paired-frame ratio, paths, and sync
-  semantics.
+- `spectrum_timeseries.csv`: full wavelength/intensity samples for every frame;
+- `tactile_response_timeseries.csv`: contact, position, and light/normal/hard
+  temporal-model outputs and probabilities;
+- `force_timeseries.csv`: raw and software-zeroed six-axis PX6D reference data.
 
-In the portable desktop build, this `data/px6d_synchronized/` directory is
-created beside the executable. The Diagnostics panel always shows the exact
-session directory, so an experiment folder can be located without opening the
-application internals.
+All selected files share the exact `capture_index`,
+`timeline_timestamp_epoch_sec`, and `elapsed_time_sec`. Unselected primary CSVs
+are not created. `synchronized_frames.jsonl`, `frame_summary.csv`, and
+`session_metadata.json` are audit sidecars; metadata records the selected
+streams and verifies cross-file timeline equality.
+
+The desktop app's **Browse** control opens a native Windows folder chooser. If
+no custom path is chosen, `data/px6d_synchronized/` is created beside the
+portable executable. Browser-only development mode accepts a manually entered
+absolute path.
 
 This force is an independent ground-truth measurement used to synchronize and
 label BaySpec optical fingerprints. It is not a force estimate produced by the

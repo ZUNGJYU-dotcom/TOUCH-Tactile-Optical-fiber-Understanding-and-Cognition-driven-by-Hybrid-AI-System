@@ -155,22 +155,26 @@ To record full optical fingerprints with timestamp-aligned force labels:
   --duration-sec 30 `
   --position P22 `
   --action static_press `
-  --trial-id trial_001
+  --trial-id trial_001 `
+  --outputs spectrum,response,force `
+  --output-root "E:\experiment\TOUCH captures"
 ```
 
-Each unique BaySpec frame is saved with its complete wavelength/intensity
-arrays and the median PX6D `[Fx, Fy, Fz, Mx, My, Mz]` sample inside the
-configured timestamp window. Formal capture skips frames without a valid,
-tared force label. Outputs are written below `data/px6d_synchronized/` as
-JSONL, a compact CSV index, and session metadata.
+The user may select any one, two, or all three streams: `spectrum`, `response`,
+and `force`. Optical-driven captures use each unique BaySpec host timestamp as
+the canonical timeline; the PX6D row is the median six-axis sample inside that
+timestamp window. Every selected CSV shares `capture_index`,
+`timeline_timestamp_epoch_sec`, and `elapsed_time_sec` exactly. Force-only
+capture uses the PX6D host timestamp and does not wait for BaySpec. The three
+primary files are `spectrum_timeseries.csv`, `tactile_response_timeseries.csv`,
+and `force_timeseries.csv`; unselected files are not created.
 
-The same workflow is available directly in Diagnostics: select **Force**,
-set the position/action/trial fields, choose **Start linked recording**, and
-finish with **Stop & save**. The UI shows paired-frame count, pair ratio, last
-sync grade, and the exact output directory. PX6D remains an independent ground
-truth reference; the optical model is not presented as calibrated force.
-For the portable desktop build, synchronized sessions are stored in
-`data/px6d_synchronized/` beside the executable rather than inside the bundled
-runtime files.
+The same workflow is available directly in Diagnostics: select **Force**, set
+the labels, tick the desired streams, and choose a save folder with **Browse**.
+**Start linked recording** and **Stop & save** create one session subfolder.
+`session_metadata.json` includes an automatic cross-file timeline audit.
+PX6D remains an independent ground-truth reference; the optical model is not
+presented as calibrated force. If no custom folder is chosen, portable desktop
+builds default to `data/px6d_synchronized/` beside the executable.
 
 Public research repository for the TOUCH System.

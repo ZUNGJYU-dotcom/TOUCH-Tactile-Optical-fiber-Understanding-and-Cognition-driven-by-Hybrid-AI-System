@@ -41,7 +41,19 @@ capture:
   poll_interval_sec: 0.05
   require_software_tare: true
   require_valid_spectrum: true
-  note: "Each saved spectrum frame carries timestamp-aligned raw and software-zeroed PX6D six-axis data."
+  default_selected_outputs:
+    - spectrum
+    - response
+    - force
+  available_outputs:
+    - spectrum
+    - response
+    - force
+  canonical_timeline_keys:
+    - capture_index
+    - timeline_timestamp_epoch_sec
+    - elapsed_time_sec
+  note: "The user may save any one, two, or all three streams. Selected files share one canonical timeline; optical-driven captures align PX6D data to the spectrum host timestamp."
 
 semantics:
   primary_display_axis: Fz

@@ -444,7 +444,9 @@ def _dynamic_temporal_shadow_status() -> dict[str, Any]:
     }
 
 
-def _predict_dynamic_temporal_shadow() -> dict[str, Any]:
+def _predict_dynamic_temporal_shadow(
+    latest_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Evaluate each unique spectrum on the model's trained temporal scale."""
 
     global DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN
@@ -475,6 +477,17 @@ def _predict_dynamic_temporal_shadow() -> dict[str, Any]:
             "drives_digital_twin": False,
         }
     latest = pair["latest"]
+    if (
+        isinstance(latest_override, dict)
+        and isinstance(latest_override.get("wavelength_nm"), list)
+        and isinstance(latest_override.get("intensity"), list)
+        and latest_override.get("wavelength_nm")
+        and len(latest_override["wavelength_nm"]) == len(latest_override["intensity"])
+    ):
+        # Synchronized recording passes the exact spectrum frame being written.
+        # This avoids a one-frame race if the live SDK publishes again between
+        # the capture read and temporal-model inference.
+        latest = latest_override
     baseline = pair["baseline"]
     baseline_token = _spectrum_token(
         baseline["wavelength_nm"],
@@ -1515,7 +1528,7 @@ def _px6d_reference_for_record(record: dict[str, Any] | None) -> dict[str, Any]:
     if not PX6D_REFERENCE_CONFIG.get("enabled", True):
         return {"ok": False, "status": "disabled"}
     if not isinstance(record, dict):
-        return {"ok": False, "status": "spectrum_record_missing"}
+        return px6d_reader.synchronized_snapshot(time.time())
     timestamp = record.get("ingested_at")
     if timestamp is None:
         timestamp = record.get("timestamp_epoch_sec")
@@ -1532,6 +1545,28 @@ def _capture_spectrum_frame() -> dict[str, Any]:
     return bridge.frame(channel_id="P22", trace_limit=1, include_spectrum=True)
 
 
+def _capture_temporal_response(latest: dict[str, Any]) -> dict[str, Any]:
+    payload = _predict_dynamic_temporal_shadow(latest_override=latest)
+    prediction = payload.get("prediction")
+    if not isinstance(prediction, dict):
+        return {
+            "model_source": "dynamic_temporal_v3",
+            "model_status": payload.get("status") or "dynamic_temporal_unavailable",
+            "model_ready": False,
+            "reason": payload.get("reason"),
+            "inference_latency_ms": payload.get("inference_latency_ms"),
+        }
+    return {
+        "model_source": "dynamic_temporal_v3",
+        "model_status": payload.get("status") or prediction.get("status"),
+        "model_ready": bool(payload.get("ok") and prediction.get("ready")),
+        "inference_latency_ms": payload.get("inference_latency_ms"),
+        "inference_executed_this_frame": payload.get("inference_executed_this_frame"),
+        "temporal_resample_steps": payload.get("temporal_resample_steps"),
+        **prediction,
+    }
+
+
 def _resolve_capture_output_root() -> Path:
     runtime_override = os.environ.get("TOUCH_CAPTURE_OUTPUT_ROOT")
     if runtime_override:
@@ -1545,6 +1580,7 @@ optical_force_capture = OpticalForceCaptureManager(
     frame_provider=_capture_spectrum_frame,
     force_provider=_px6d_reference_for_record,
     force_status_provider=px6d_reader.status,
+    model_provider=_capture_temporal_response,
     poll_interval_sec=float(PX6D_REFERENCE_CONFIG.get("capture_poll_interval_sec") or 0.05),
     require_software_tare=bool(
         PX6D_REFERENCE_CONFIG.get("capture_require_software_tare", True)
@@ -2671,6 +2707,8 @@ async def px6d_capture_start(request: Request) -> dict:
         action_label=str(payload.get("action_label") or "unlabeled"),
         trial_id=str(payload.get("trial_id") or "trial_001"),
         operator_note=str(payload.get("operator_note") or ""),
+        output_root=payload.get("output_root"),
+        selected_outputs=payload.get("selected_outputs"),
     )
     return {"mode": "optical_px6d_synchronized_capture", **result}
 

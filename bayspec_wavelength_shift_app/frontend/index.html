@@ -667,6 +667,18 @@
               <label class="diagnostic-capture-note-field">Note
                 <input id="px6dCaptureNote" type="text" placeholder="optional" maxlength="120" />
               </label>
+              <fieldset class="diagnostic-capture-stream-field">
+                <legend>Data to save</legend>
+                <label><input id="px6dCaptureSpectrum" type="checkbox" value="spectrum" checked /> Full spectrum</label>
+                <label><input id="px6dCaptureResponse" type="checkbox" value="response" checked /> Tactile time series</label>
+                <label><input id="px6dCaptureForce" type="checkbox" value="force" checked /> PX6D force</label>
+              </fieldset>
+              <label class="diagnostic-capture-output-field">Save location
+                <span class="diagnostic-capture-path-row">
+                  <input id="px6dCaptureOutputRoot" type="text" placeholder="Choose or enter a folder" />
+                  <button id="px6dCaptureBrowseButton" type="button" title="Choose output folder"><i data-lucide="folder-open" aria-hidden="true"></i><span>Browse</span></button>
+                </span>
+              </label>
             </div>
             <div class="diagnostic-capture-actions">
               <button id="px6dCaptureStartButton" type="button"><i data-lucide="circle-dot" aria-hidden="true"></i><span>Start linked recording</span></button>
@@ -674,7 +686,7 @@
             </div>
             <div class="diagnostic-capture-progress">
               <div><span>Status</span><strong id="px6dCaptureStatus">idle</strong></div>
-              <div><span>Paired frames</span><strong id="px6dCaptureFrames">0</strong></div>
+              <div><span>Timeline frames</span><strong id="px6dCaptureFrames">0</strong></div>
               <div><span>Pair ratio</span><strong id="px6dCaptureRatio">--</strong></div>
               <div><span>Last sync</span><strong id="px6dCaptureLastSync">--</strong></div>
             </div>
