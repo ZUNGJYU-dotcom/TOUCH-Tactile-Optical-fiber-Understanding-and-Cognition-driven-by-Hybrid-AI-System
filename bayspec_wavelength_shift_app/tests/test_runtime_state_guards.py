@@ -3,13 +3,15 @@ from __future__ import annotations
 import time
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 
 import numpy as np
 
 from backend import main as backend_main
 from backend.main import SenseExportWatcher, _model_display_source_gate
 from bridge import BaySpecWavelengthShiftBridge
-from desktop_launcher import health_payload_is_expected
+from desktop_launcher import health_payload_is_expected, run_self_test
+from sdk_live import BaySpecSdkLiveReader
 from src.hybrid_spectrum.session_level_calibration import (
     CORE_FEATURE_NAMES,
     PerPositionOrdinalCalibrator,
@@ -21,12 +23,50 @@ class _AliveThread:
         return True
 
 
+class _JoinForbiddenThread:
+    def is_alive(self) -> bool:
+        return True
+
+    def join(self, timeout: float | None = None) -> None:
+        raise AssertionError("idempotent start must not join the active worker")
+
+
+class _BridgeStub:
+    def ingest(self, _payload):
+        return {"ok": True}
+
+
 class RuntimeResponsivenessConfigTests(unittest.TestCase):
     def test_temporal_history_preroll_is_enabled_for_live_runtime(self) -> None:
         config = backend_main._load_runtime_baseline_recovery_config()
 
         self.assertTrue(config["prime_temporal_history_with_baseline"])
         self.assertEqual(config["baseline_preroll_frames"], 20)
+
+
+class SdkLiveReaderStateTests(unittest.TestCase):
+    def _reader(self) -> BaySpecSdkLiveReader:
+        return BaySpecSdkLiveReader(_BridgeStub(), Path("."))
+
+    def test_start_is_idempotent_while_session_is_active(self) -> None:
+        reader = self._reader()
+        reader.desired_active = True
+        reader.thread = _JoinForbiddenThread()
+        reader.channel_id = "P22"
+
+        status = reader.start(channel_id="P22", interval_ms=100, integration=40000)
+
+        self.assertTrue(status["active"])
+        self.assertEqual(status["freshness"], "waiting_for_sdk_frame")
+
+    def test_pre_frame_helper_failure_is_reported_as_error(self) -> None:
+        reader = self._reader()
+        reader.desired_active = True
+        reader.last_error = "failed to start SDK helper"
+
+        status = reader.status()
+
+        self.assertEqual(status["freshness"], "error")
 
 
 class ModelDisplaySourceGateTests(unittest.TestCase):
@@ -311,6 +351,86 @@ class DynamicTemporalShadowEndpointTests(unittest.TestCase):
         self.assertEqual(sum(call["physical_frame"] for call in adapter.calls), 2)
         self.assertTrue(adapter.calls[-1]["run_inference"])
         self.assertTrue(adapter.calls[-1]["external_no_contact_hint"])
+
+    def test_rejected_runtime_baseline_is_rolled_back_in_adapter(self) -> None:
+        pair = self._spectrum_pair(frame_id=7, timestamp=7.0)
+        original_baseline = np.asarray(pair["baseline"]["intensity"], dtype=float)
+        recovered_baseline = original_baseline * 1.05
+
+        class AdapterStub:
+            bundle = {"frame_interval_sec_estimated": 0.04}
+
+            def __init__(self) -> None:
+                self.baselines: list[np.ndarray] = []
+                self.pending = {
+                    "wavelength_nm": np.asarray(
+                        pair["baseline"]["wavelength_nm"], dtype=float
+                    ),
+                    "intensity": recovered_baseline,
+                    "sample_count": 8,
+                    "span_sec": 1.0,
+                }
+
+            def clear(self) -> None:
+                return None
+
+            def set_baseline(self, _wavelength, intensity) -> None:
+                self.baselines.append(np.asarray(intensity, dtype=float).copy())
+
+            def consume_pending_runtime_baseline_update(self):
+                pending, self.pending = self.pending, None
+                return pending
+
+            def update(
+                self,
+                _wavelength,
+                _intensity,
+                *,
+                run_inference: bool,
+                physical_frame: bool,
+                external_no_contact_hint: bool | None,
+                source_timestamp_sec: float | None = None,
+            ) -> dict:
+                return {
+                    "status": "runtime_reference_reanchored",
+                    "ready": False,
+                }
+
+        adapter = AdapterStub()
+        with patch.object(
+            backend_main,
+            "DYNAMIC_TEMPORAL_SHADOW_ADAPTER",
+            adapter,
+        ), patch.object(
+            backend_main.bridge,
+            "spectral_model_input",
+            return_value=pair,
+        ), patch.object(
+            backend_main.bridge,
+            "set_runtime_recovery_spectrum_baseline",
+            return_value={
+                "ok": False,
+                "status": "runtime_recovery_baseline_invalid",
+            },
+        ):
+            backend_main._reset_dynamic_temporal_shadow("test_rollback")
+            result = backend_main._predict_dynamic_temporal_shadow()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(adapter.baselines), 2)
+        np.testing.assert_allclose(adapter.baselines[0], original_baseline)
+        np.testing.assert_allclose(adapter.baselines[1], original_baseline)
+        update = result["runtime_baseline_update"]
+        self.assertFalse(update["ok"])
+        self.assertTrue(update["adapter_baseline_rollback_applied"])
+        self.assertEqual(
+            update["rollback_baseline_token"],
+            backend_main._spectrum_token(
+                pair["baseline"]["wavelength_nm"],
+                pair["baseline"]["intensity"],
+            ),
+        )
+        self.assertEqual(result["baseline_token"], update["rollback_baseline_token"])
 
     def test_global_frame_does_not_run_dynamic_shadow_by_default(self) -> None:
         stopped = {"active": False, "freshness": "stopped"}
@@ -659,6 +779,65 @@ class AcquisitionSourceMutualExclusionTests(unittest.TestCase):
         reset_bridge.assert_called_once_with(keep_baseline=False)
         self.assertTrue(result["acquisition_session_reset"]["baseline_invalidated"])
 
+    def test_duplicate_sdk_start_preserves_current_baseline(self) -> None:
+        sdk_status = {
+            "active": True,
+            "freshness": "live",
+            "channel_id": "P22",
+            "interval_ms": 100,
+            "integration": 40000,
+        }
+        with patch.object(
+            backend_main.sdk_live_reader, "status", return_value=sdk_status
+        ), patch.object(
+            backend_main.sdk_live_reader, "start"
+        ) as start_sdk, patch.object(
+            backend_main, "_begin_acquisition_session"
+        ) as reset_session:
+            result = backend_main.sdk_start(
+                channel_id="P22", interval_ms=100, integration=40000
+            )
+
+        start_sdk.assert_not_called()
+        reset_session.assert_not_called()
+        self.assertFalse(
+            result["acquisition_session_reset"]["baseline_invalidated"]
+        )
+        self.assertEqual(result["mode"], "bayspec_direct_sdk_already_running")
+
+    def test_duplicate_live_start_uses_same_clamped_sdk_interval(self) -> None:
+        sdk_status = {
+            "active": True,
+            "freshness": "live",
+            "channel_id": "P22",
+            "interval_ms": 2000,
+            "integration": 40000,
+        }
+        with patch.object(
+            backend_main.sdk_live_reader, "status", return_value=sdk_status
+        ), patch.object(
+            backend_main.sdk_live_reader, "stop"
+        ) as stop_sdk, patch.object(
+            backend_main.sdk_live_reader, "start"
+        ) as start_sdk, patch.object(
+            backend_main, "_begin_acquisition_session"
+        ) as reset_session:
+            result = backend_main.live_start(
+                channel_id="P22",
+                export_root=None,
+                interval_sec=5.0,
+                control_sense=False,
+                source="direct_sdk",
+            )
+
+        stop_sdk.assert_not_called()
+        start_sdk.assert_not_called()
+        reset_session.assert_not_called()
+        self.assertFalse(
+            result["acquisition_session_reset"]["baseline_invalidated"]
+        )
+        self.assertEqual(result["mode"], "bayspec_live_twin_already_running")
+
     def test_direct_live_start_invalidates_previous_session_baseline(self) -> None:
         sdk_status = {"active": True, "freshness": "waiting"}
         with patch.object(backend_main.export_watcher, "stop"), patch.object(
@@ -674,6 +853,52 @@ class AcquisitionSourceMutualExclusionTests(unittest.TestCase):
 
         reset_bridge.assert_called_once_with(keep_baseline=False)
         self.assertTrue(result["acquisition_session_reset"]["baseline_invalidated"])
+
+
+class FastDatIngestRegressionTests(unittest.TestCase):
+    def test_fast_dat_uses_decoded_spectrum_length_for_wavelength_grid(self) -> None:
+        class LayoutStub:
+            frame_count = 2
+            prefix_words = 16
+            record_words = 516
+            spectrum_words = 512
+            trailing_words = 0
+            median_adjacent_correlation = 0.99
+            score_margin = 0.5
+            name = "test_layout"
+
+        class SequenceStub:
+            layout = LayoutStub()
+            spectra = np.vstack(
+                [
+                    np.linspace(100.0, 200.0, 512),
+                    np.linspace(110.0, 220.0, 512),
+                ]
+            )
+
+        test_bridge = BaySpecWavelengthShiftBridge()
+        wavelength_grid = np.linspace(1526.0, 1562.0, 512).tolist()
+        with patch(
+            "bridge.read_sense_fast_dat",
+            return_value=SequenceStub(),
+        ), patch.object(
+            test_bridge,
+            "_latest_wavelength_grid",
+            return_value=wavelength_grid,
+        ) as find_grid, patch.object(
+            test_bridge,
+            "ingest",
+            return_value={"ok": True, "records_ingested": 1},
+        ) as ingest:
+            result = test_bridge.ingest_fast_record_dat("synthetic.dat")
+
+        find_grid.assert_called_once_with(Path("."), expected_points=512)
+        payload = ingest.call_args.args[0]
+        channel = payload["channels"][0]
+        self.assertEqual(len(channel["intensity"]), 512)
+        self.assertEqual(len(channel["wavelength_nm"]), 512)
+        self.assertEqual(result["dat_frame_count"], 2)
+        self.assertEqual(result["dat_parser"], "test_layout")
 
 
 class BridgeResetTests(unittest.TestCase):
@@ -914,6 +1139,15 @@ class UnifiedBaselineEndpointTests(unittest.TestCase):
 
 
 class DesktopLauncherIdentityTests(unittest.TestCase):
+    def test_source_self_test_loads_runtime_without_hardware_autostart(self) -> None:
+        with patch.dict("os.environ", {}, clear=False), patch(
+            "desktop_launcher.write_log"
+        ) as write_log:
+            exit_code = run_self_test()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("\"ok\": true", write_log.call_args.args[0])
+
     def test_expected_backend_identity_is_accepted(self) -> None:
         self.assertTrue(
             health_payload_is_expected(
@@ -921,6 +1155,32 @@ class DesktopLauncherIdentityTests(unittest.TestCase):
                     "ok": True,
                     "app": "TOUCH System Trained Static Spectrum Twin",
                     "mode": "standalone_bayspec_trained_static_spectrum_twin",
+                    "backend_contract_version": "trained_static_spectrum_api_v2",
+                    "trained_static_model_primary": True,
+                }
+            )
+        )
+
+    def test_legacy_backend_without_contract_version_is_rejected(self) -> None:
+        self.assertFalse(
+            health_payload_is_expected(
+                {
+                    "ok": True,
+                    "app": "TOUCH System Trained Static Spectrum Twin",
+                    "mode": "standalone_bayspec_trained_static_spectrum_twin",
+                    "trained_static_model_primary": True,
+                }
+            )
+        )
+
+    def test_backend_with_mismatched_contract_version_is_rejected(self) -> None:
+        self.assertFalse(
+            health_payload_is_expected(
+                {
+                    "ok": True,
+                    "app": "TOUCH System Trained Static Spectrum Twin",
+                    "mode": "standalone_bayspec_trained_static_spectrum_twin",
+                    "backend_contract_version": "trained_static_spectrum_api_v1",
                     "trained_static_model_primary": True,
                 }
             )

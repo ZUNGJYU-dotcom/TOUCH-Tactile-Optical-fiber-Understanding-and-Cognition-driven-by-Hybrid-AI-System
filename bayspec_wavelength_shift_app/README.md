@@ -41,10 +41,21 @@ run_desktop.bat
 Source server:
 
 ```powershell
-D:\anaconda\miniconda3\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8640
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8640
 ```
 
 The desktop launcher embeds the same local UI.
+
+Before connecting hardware on a new computer, the portable desktop build can
+verify its bundled frontend, backend contract, SDK helper, and model artifacts
+without opening a window, binding port `8640`, or starting PX6D acquisition:
+
+```powershell
+& '.\TOUCH System - Trained Static Spectrum Twin.exe' --self-test
+```
+
+The process exits with code `0` when every check passes. Details are written to
+`%LOCALAPPDATA%\TouchSystemTrainedStaticSpectrumTwin\logs\desktop_launcher.log`.
 
 ## Key API
 
