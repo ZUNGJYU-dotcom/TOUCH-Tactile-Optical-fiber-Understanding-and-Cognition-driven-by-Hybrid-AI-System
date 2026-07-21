@@ -496,16 +496,26 @@ class Px6dReader:
 
         duration_sec = max(0.25, min(5.0, float(duration_sec)))
         maximum_std = self.auto_tare_max_std_n if max_std_n is None else max(0.01, float(max_std_n))
+        starting_sequence: int | None = None
         if wait_for_new_samples:
             starting_sequence = self.latest_sequence
+            started_monotonic = time.monotonic()
             deadline = time.monotonic() + duration_sec + 1.0
             while time.monotonic() < deadline:
-                if self.latest_sequence > starting_sequence and self._history_span_sec() >= duration_sec:
+                if time.monotonic() - started_monotonic >= duration_sec:
                     break
                 time.sleep(0.02)
         cutoff = time.time() - duration_sec
         with self._lock:
-            candidates = [sample for sample in self._samples if sample.timestamp_epoch_sec >= cutoff]
+            candidates = [
+                sample
+                for sample in self._samples
+                if (
+                    sample.sequence_id > starting_sequence
+                    if starting_sequence is not None
+                    else sample.timestamp_epoch_sec >= cutoff
+                )
+            ]
         minimum_samples = max(8, int(self.poll_hz * duration_sec * 0.40))
         if len(candidates) < minimum_samples:
             with self._lock:
@@ -538,6 +548,10 @@ class Px6dReader:
             self._tare_status = "ready"
             self._tare_fz_std_n = fz_std
             self._tare_sample_count = len(candidates)
+            # A new zero changes the meaning of every zero-relative value. Do
+            # not expose pre-tare raw frames through the new zero or attach
+            # them to a later optical frame as if they belonged to this zero.
+            self._samples.clear()
             self._reset_conditioner_locked()
         return {
             "ok": True,
@@ -546,6 +560,10 @@ class Px6dReader:
             "fz_std_n": fz_std,
             "tare": dict(zip(AXIS_NAMES, medians)),
             "software_only": True,
+            "history_reset": True,
+            "sampling_scope": (
+                "post_request_samples" if wait_for_new_samples else "recent_samples"
+            ),
         }
 
     @property

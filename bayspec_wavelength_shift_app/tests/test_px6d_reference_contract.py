@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import struct
 import sys
+import threading
 import time
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = APP_ROOT.parent
@@ -19,6 +21,7 @@ from backend.px6d_reader import (
     crc8,
     parse_data_frame,
 )
+from backend import main as backend_main
 
 
 def make_sample(sequence_id: int, timestamp: float, *, fz_n: float) -> Px6dSample:
@@ -71,6 +74,8 @@ class Px6dReferenceForceTests(unittest.TestCase):
 
         tare = reader.tare(duration_sec=1.0, wait_for_new_samples=False)
         self.assertTrue(tare["ok"])
+        self.assertTrue(tare["history_reset"])
+        self.assertEqual(reader.trace()["count"], 0)
         reader._append_sample(make_sample(21, now + 0.05, fz_n=0.30))
 
         latest = reader.latest()["sample"]
@@ -83,6 +88,37 @@ class Px6dReferenceForceTests(unittest.TestCase):
         self.assertIn("shear_resultant_n", latest["mechanical"])
         self.assertEqual(latest["mechanical"]["utilization_status"], "ok")
         self.assertIsNotNone(latest["tare_fz_std_n"])
+
+    def test_manual_tare_uses_only_samples_captured_after_request(self) -> None:
+        reader = Px6dReader(
+            {
+                "poll_hz": 20.0,
+                "compression_sign": -1,
+                "auto_tare_max_std_n": 0.05,
+            }
+        )
+        now = time.time()
+        for index in range(20):
+            reader._append_sample(
+                make_sample(index + 1, now - 1.0 + index * 0.04, fz_n=8.0)
+            )
+
+        def append_new_zero_samples() -> None:
+            for index in range(10):
+                time.sleep(0.025)
+                reader._append_sample(
+                    make_sample(21 + index, time.time(), fz_n=1.0)
+                )
+
+        producer = threading.Thread(target=append_new_zero_samples)
+        producer.start()
+        tare = reader.tare(duration_sec=0.25, wait_for_new_samples=True)
+        producer.join(timeout=1.0)
+
+        self.assertTrue(tare["ok"])
+        self.assertEqual(tare["sampling_scope"], "post_request_samples")
+        self.assertAlmostEqual(tare["tare"]["fz_n"], 1.0, places=6)
+        self.assertEqual(reader.trace()["count"], 0)
 
     def test_spectrum_timestamp_uses_window_median_force_label(self) -> None:
         reader = Px6dReader(
@@ -206,6 +242,22 @@ class Px6dReferenceForceTests(unittest.TestCase):
 
 
 class Px6dIntegrationContractTests(unittest.TestCase):
+    def test_environment_can_disable_px6d_autostart_for_safe_secondary_instance(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "TOUCH_PX6D_ENABLED": "true",
+                "TOUCH_PX6D_AUTO_START": "false",
+                "TOUCH_PX6D_PORT": "COM19",
+            },
+            clear=False,
+        ):
+            config = backend_main._load_px6d_reference_config()
+
+        self.assertTrue(config["enabled"])
+        self.assertFalse(config["auto_start"])
+        self.assertEqual(config["port"], "COM19")
+
     def test_config_and_ui_keep_reference_force_semantics_explicit(self) -> None:
         config_text = (PROJECT_ROOT / "config" / "px6d_reference.yaml").read_text(
             encoding="utf-8"
@@ -236,6 +288,8 @@ class Px6dIntegrationContractTests(unittest.TestCase):
         self.assertIn("output_root: px6dCaptureOutputRoot", javascript)
         self.assertIn("choose_output_directory", javascript)
         self.assertIn("drift_offset_n", javascript)
+        self.assertIn("function finiteNumberOrNull(value)", javascript)
+        self.assertNotIn("const sampleAge = Number(status?.last_sample_age_sec)", javascript)
         self.assertIn('"px6d_reference": _px6d_reference_for_record', backend)
         self.assertIn("OpticalForceCaptureManager", backend)
 

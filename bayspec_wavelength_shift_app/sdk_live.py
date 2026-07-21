@@ -57,7 +57,7 @@ class BaySpecSdkLiveReader:
             if not self.desired_active:
                 freshness = "stopped"
             elif self.last_frame_time is None:
-                freshness = "waiting_for_sdk_frame"
+                freshness = "error" if self.last_error else "waiting_for_sdk_frame"
             elif age is not None and age <= max(3.0, self.interval_ms / 1000.0 * 12):
                 freshness = "live"
             else:
@@ -91,6 +91,11 @@ class BaySpecSdkLiveReader:
 
     def start(self, channel_id: str = "P22", interval_ms: int = 100, integration: int = 40000) -> dict[str, Any]:
         with self.lock:
+            # Start is intentionally idempotent. A duplicate UI/API request must
+            # not wait on the live worker or turn a healthy session into an
+            # apparent stopping error.
+            if self.desired_active:
+                return self.status()
             previous_thread = self.thread
         if previous_thread is not None and previous_thread.is_alive():
             previous_thread.join(timeout=3.0)
@@ -102,6 +107,8 @@ class BaySpecSdkLiveReader:
             requested_channel = channel_id
             requested_interval = max(20, min(int(interval_ms), 2000))
             requested_integration = max(1, int(integration))
+            # The session may have been started by another request while an old
+            # worker was finishing.
             if self.desired_active:
                 return self.status()
 
@@ -183,6 +190,7 @@ class BaySpecSdkLiveReader:
                 "--frames",
                 "1",
             ]
+            process: subprocess.Popen[str] | None = None
             try:
                 process = subprocess.Popen(
                     args,
@@ -217,7 +225,14 @@ class BaySpecSdkLiveReader:
                         with self.lock:
                             self.last_error = f"invalid SDK JSON: {exc}"
                 for message in messages:
-                    self._handle_message(message)
+                    try:
+                        self._handle_message(message)
+                    except Exception as exc:  # keep the acquisition supervisor alive
+                        with self.lock:
+                            self.last_error = (
+                                "SDK frame processing failed: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
                 with self.lock:
                     self.last_exit_code = process.returncode
                     self.last_stderr = stderr.strip() or None
@@ -241,6 +256,17 @@ class BaySpecSdkLiveReader:
                 with self.lock:
                     self.process = None
                     self.last_error = f"failed to start SDK helper: {exc}"
+                    self.restart_count += 1
+            except Exception as exc:  # defensive guard around vendor/helper output
+                if process is not None and process.poll() is None:
+                    process.kill()
+                with self.lock:
+                    if self.process is process:
+                        self.process = None
+                    self.last_error = (
+                        "unexpected SDK acquisition failure: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
                     self.restart_count += 1
             time.sleep(max(0.02, interval_ms / 1000.0))
 
