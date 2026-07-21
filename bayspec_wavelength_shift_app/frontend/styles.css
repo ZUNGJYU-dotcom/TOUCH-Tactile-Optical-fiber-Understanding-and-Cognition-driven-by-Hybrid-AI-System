@@ -2962,6 +2962,10 @@ button.active-watch,
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.34);
 }
 
+.operator-mode .mini-pixel.coupled-neighbor {
+  border-color: rgba(91, 137, 158, 0.42);
+}
+
 .operator-mode .mini-pixel.dominant {
   outline: 2px solid rgba(27, 147, 203, 0.54);
   outline-offset: 1px;
@@ -2982,10 +2986,10 @@ button.active-watch,
   border-radius: 999px;
   background: linear-gradient(
     90deg,
-    #dfeef4 0 var(--response-no-contact-end, 3%),
-    #63b7b7 var(--response-no-contact-end, 3%) var(--response-small-end, 34%),
-    #f0d57a var(--response-small-end, 34%) var(--response-moderate-end, 70%),
-    #c8665f var(--response-moderate-end, 70%) 100%
+    #dfeef4 0 var(--response-no-contact-end, 25%),
+    #63b7b7 var(--response-no-contact-end, 25%) var(--response-small-end, 80%),
+    #f0d57a var(--response-small-end, 80%) var(--response-moderate-end, 90%),
+    #c8665f var(--response-moderate-end, 90%) 100%
   );
   overflow: visible;
 }
@@ -3271,11 +3275,6 @@ button.active-watch,
   border-left: 4px solid #0a8ec5;
 }
 
-.diagnostics-mode .diagnostic-array-card {
-  order: 3;
-  border-left: 4px solid #80b7cf;
-}
-
 .diagnostics-mode .diagnostic-frame-card {
   order: 4;
   border-left: 4px solid #d29119;
@@ -3291,10 +3290,6 @@ button.active-watch,
 
 .diagnostics-mode .diagnostic-alignment-card {
   order: 7;
-}
-
-.diagnostics-mode .diagnostic-bridge-card {
-  order: 8;
 }
 
 .diagnostics-mode .prediction-card h3 {
@@ -3795,7 +3790,7 @@ button.active-watch,
   right: 12px;
   z-index: 47;
   display: none;
-  width: min(340px, calc(100vw - 24px));
+  width: min(292px, calc(100vw - 24px));
   max-height: calc(100vh - 104px);
   overflow-y: auto;
   padding: 12px;
@@ -3897,16 +3892,6 @@ button.active-watch,
 
 .settings-wide-button {
   width: 100%;
-}
-
-.settings-footer-status {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 0 2px;
-  color: #607487;
-  font-size: 10px;
 }
 
 .operator-mode #settingsButton.settings-open,
@@ -4476,6 +4461,356 @@ button.active-watch,
   }
 }
 
+/* TOUCH operator simplification: icon-first commands and one clear visual hierarchy. */
+.ui-icon-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.ui-icon-button svg,
+.icon-chip svg,
+.status-item svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+
+.ui-icon-button .icon-active {
+  display: none;
+}
+
+.ui-icon-button.active-watch .icon-default,
+.ui-icon-button.active-pause .icon-default,
+#surfaceFullscreenButton.active .icon-default {
+  display: none;
+}
+
+.ui-icon-button.active-watch .icon-active,
+.ui-icon-button.active-pause .icon-active,
+#surfaceFullscreenButton.active .icon-active {
+  display: block;
+}
+
+.operator-mode.app-shell {
+  grid-template-rows: 58px minmax(0, 1fr) !important;
+  gap: 7px !important;
+}
+
+.operator-mode.app-shell::before {
+  inset: 65px 10px 8px !important;
+}
+
+.operator-mode .topbar {
+  min-height: 58px !important;
+  max-height: 58px !important;
+  grid-template-columns: 172px minmax(360px, 1fr) auto !important;
+  gap: 12px !important;
+  padding: 7px 10px !important;
+  overflow: visible !important;
+}
+
+.operator-mode .touch-brand-main {
+  font-size: 24px !important;
+}
+
+.operator-mode .touch-brand-tag {
+  padding: 2px 7px 3px !important;
+  font-size: 9px !important;
+}
+
+.operator-mode .status-strip {
+  display: flex !important;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px !important;
+}
+
+.operator-mode .status-strip .status-item {
+  position: relative;
+  min-width: 0;
+  min-height: 34px !important;
+  height: 34px;
+  display: inline-flex !important;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px !important;
+  border: 1px solid #d8e3ec !important;
+  border-radius: 8px !important;
+  background: #f8fafc !important;
+}
+
+.operator-mode .status-strip .status-item:nth-child(1) {
+  flex: 0 1 132px;
+}
+
+.operator-mode .status-strip .status-item:nth-child(2) {
+  flex: 0 1 166px;
+}
+
+.operator-mode .status-strip .status-item:nth-child(3) {
+  flex: 0 1 112px;
+}
+
+.operator-mode .status-strip .status-item svg {
+  width: 15px;
+  height: 15px;
+  color: #2689b4;
+}
+
+.operator-mode .status-strip .status-item small {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.operator-mode .status-strip .status-item strong {
+  min-width: 0;
+  color: #17354a !important;
+  font-size: 11px !important;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operator-mode .control-zone,
+.operator-mode .control-actions {
+  width: auto !important;
+  min-width: 0 !important;
+}
+
+.operator-mode .control-actions {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 5px !important;
+  overflow: visible !important;
+}
+
+.operator-mode .control-actions .ui-icon-button,
+.operator-mode #liveTwinButton,
+.operator-mode #exportWatchButton,
+.operator-mode #baselineButton,
+.operator-mode #pauseButton,
+.operator-mode #surfaceFullscreenButton {
+  flex: 0 0 34px !important;
+  width: 34px !important;
+  min-width: 34px !important;
+  height: 34px !important;
+  min-height: 34px !important;
+  padding: 0 !important;
+  display: inline-grid !important;
+  place-items: center;
+  border-radius: 8px !important;
+}
+
+.lucide-ready .operator-mode .ui-icon-button .command-label {
+  display: none !important;
+}
+
+.operator-mode .ui-icon-button svg {
+  width: 17px;
+  height: 17px;
+}
+
+.operator-mode .ui-icon-button[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 7px);
+  left: 50%;
+  width: max-content;
+  max-width: 190px;
+  padding: 5px 7px;
+  border: 1px solid #c9dbe7;
+  border-radius: 6px;
+  background: #102236;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0;
+  text-transform: none;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, -2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+  white-space: nowrap;
+}
+
+.operator-mode .ui-icon-button[data-tooltip]:hover::after,
+.operator-mode .ui-icon-button[data-tooltip]:focus-visible::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.operator-mode .control-actions .ui-icon-button:last-child::after {
+  right: 0;
+  left: auto;
+  transform: translate(0, -2px);
+}
+
+.operator-mode .control-actions .ui-icon-button:last-child:hover::after,
+.operator-mode .control-actions .ui-icon-button:last-child:focus-visible::after {
+  transform: translate(0, 0);
+}
+
+.operator-mode #liveTwinButton {
+  border-color: #9bcde2 !important;
+  color: #087fac !important;
+}
+
+.operator-mode #liveTwinButton.active-watch,
+.operator-mode #exportWatchButton.active-watch,
+.operator-mode #pauseButton.active-pause,
+.operator-mode #demoMenuButton.menu-open,
+.operator-mode #settingsButton.settings-open,
+.operator-mode #surfaceFullscreenButton.active {
+  border-color: #268fb9 !important;
+  background: #e8f6fb !important;
+  color: #087ca8 !important;
+}
+
+.operator-mode .stage-header {
+  min-height: 34px !important;
+  padding: 0 2px !important;
+}
+
+.operator-mode .stage-header > div:first-child {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.operator-mode .stage-header h2 {
+  font-size: 17px !important;
+  white-space: nowrap;
+}
+
+.operator-mode #surfaceProxyCaption {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operator-mode .stage-actions {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.operator-mode .stage-actions .level-badge,
+.operator-mode .stage-actions .coupling-badge,
+.operator-mode .three-mount .scene-caption,
+.operator-mode .three-mount .pressure-scale {
+  display: none !important;
+}
+
+.operator-mode .response-hud {
+  height: 144px !important;
+  min-height: 144px !important;
+}
+
+.operator-mode .left-panel {
+  grid-template-rows: 144px minmax(0, 1fr) !important;
+}
+
+.operator-mode .response-hud #traceChip {
+  display: none !important;
+}
+
+.operator-mode .summary-hud .hud-title-row p {
+  display: none !important;
+}
+
+.operator-mode .icon-chip {
+  width: 28px;
+  min-width: 28px;
+  height: 28px !important;
+  min-height: 28px !important;
+  justify-content: center;
+  padding: 0 !important;
+  border-radius: 7px !important;
+}
+
+.operator-mode .icon-chip svg {
+  width: 15px;
+  height: 15px;
+}
+
+.operator-mode .summary-hud > .optical-kpi-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  grid-template-rows: repeat(2, 46px) !important;
+  gap: 6px !important;
+}
+
+.operator-mode .optical-kpi-grid > div {
+  padding: 5px 6px !important;
+}
+
+.operator-mode .operator-summary-card,
+.operator-mode .operator-footprint-card,
+.operator-mode .operator-band-card {
+  border-radius: 9px !important;
+  box-shadow: 0 5px 16px rgba(45, 88, 120, 0.06) !important;
+}
+
+.diagnostics-mode .ui-icon-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.diagnostics-mode .ui-icon-button .command-label {
+  display: inline;
+}
+
+@media (max-width: 1100px) {
+  .operator-mode .topbar {
+    grid-template-columns: 150px minmax(270px, 1fr) auto !important;
+    gap: 7px !important;
+  }
+
+  .operator-mode .status-strip .status-item {
+    padding-inline: 7px !important;
+  }
+
+  .operator-mode .status-strip .status-item:nth-child(1) {
+    flex-basis: 105px;
+  }
+
+  .operator-mode .status-strip .status-item:nth-child(2) {
+    flex-basis: 130px;
+  }
+
+  .operator-mode .status-strip .status-item:nth-child(3) {
+    flex-basis: 96px;
+  }
+
+  .operator-mode .control-actions .ui-icon-button {
+    flex: 0 0 31px !important;
+    width: 31px !important;
+    min-width: 31px !important;
+    height: 31px !important;
+    min-height: 31px !important;
+  }
+
+  .operator-mode #surfaceProxyCaption {
+    display: none !important;
+  }
+}
+
 .operator-mode .operator-alert button:focus-visible {
   outline: 2px solid currentColor !important;
   outline-offset: 2px;
@@ -4677,7 +5012,7 @@ button.active-watch,
   z-index: 20;
   order: 0;
   display: grid !important;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 3px;
   width: 100%;
   padding: 3px;
@@ -4690,17 +5025,37 @@ button.active-watch,
 .diagnostics-mode .diagnostic-tabs button {
   width: 100%;
   min-width: 0;
-  height: 30px;
-  min-height: 30px;
-  padding: 0 5px;
+  height: 38px;
+  min-height: 38px;
+  padding: 3px 2px;
   border: 0;
   border-radius: 4px;
   background: transparent;
   color: #567084;
-  font-size: 9.5px;
+  display: grid;
+  grid-template-rows: 14px 11px;
+  place-items: center;
+  align-content: center;
+  gap: 2px;
+  font-size: 8.5px;
   font-weight: 800;
   letter-spacing: 0;
+  line-height: 1;
   box-shadow: none;
+}
+
+.diagnostics-mode .diagnostic-tabs button .lucide {
+  width: 13px;
+  height: 13px;
+  stroke-width: 2;
+}
+
+.diagnostics-mode .diagnostic-tabs button span {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .diagnostics-mode .diagnostic-tabs button:hover {
@@ -4745,6 +5100,13 @@ button.active-watch,
   padding-right: 2px;
   scrollbar-gutter: stable;
   overscroll-behavior: contain;
+}
+
+/* Demo controls live outside the diagnostic card stack so they remain
+   available to the Operator menu. Collapse the empty stack in the dedicated
+   diagnostics workspace instead of pushing the controls to the rail bottom. */
+.diagnostics-mode .diagnostic-card-stack.diagnostic-stack-empty {
+  display: none !important;
 }
 
 .diagnostics-mode .diagnostic-card,
@@ -4945,10 +5307,443 @@ button.active-watch,
 
 .diagnostics-mode .diagnostic-frame-card {
   order: 2;
+  border-left: 4px solid #d29119;
 }
 
-.diagnostics-mode .diagnostic-bridge-card {
-  order: 3;
+.diagnostics-mode .diagnostic-frame-card[open] {
+  min-height: max-content;
+}
+
+.diagnostics-mode .diagnostic-card-stack:has(> .diagnostic-frame-card:not(.diagnostic-group-hidden)) {
+  grid-auto-rows: max-content;
+}
+
+.diagnostics-mode .diagnostic-acquisition-headline {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  align-items: end;
+  gap: 8px;
+  margin: 8px 8px 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #dce7ee;
+}
+
+.diagnostics-mode .diagnostic-acquisition-headline > div {
+  min-width: 0;
+}
+
+.diagnostics-mode .diagnostic-acquisition-headline span,
+.diagnostics-mode .diagnostic-acquisition-kpi-grid span,
+.diagnostics-mode .diagnostic-acquisition-state-row span {
+  display: block;
+  margin-bottom: 3px;
+  color: #60798b;
+  font-size: 9.5px;
+  font-weight: 750;
+}
+
+.diagnostics-mode .diagnostic-acquisition-headline h3 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #087fa7;
+  font-size: 17px;
+  font-weight: 900;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostics-mode .diagnostic-acquisition-stream strong {
+  display: block;
+  padding: 4px 5px;
+  overflow: hidden;
+  border: 1px solid #d7e3ea;
+  border-radius: 4px;
+  background: #f7fafc;
+  color: #17384e;
+  font-size: 10.5px;
+  font-weight: 900;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostics-mode .diagnostic-acquisition-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px;
+}
+
+.diagnostics-mode .diagnostic-acquisition-kpi-grid > div {
+  min-width: 0;
+  min-height: 50px;
+  padding: 7px 8px;
+  border: 1px solid #d9e6ee;
+  border-radius: 5px;
+  background: #f8fbfd;
+}
+
+.diagnostics-mode .diagnostic-acquisition-kpi-grid strong {
+  display: block;
+  overflow: hidden;
+  color: #17384e;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostics-mode .diagnostic-acquisition-state-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 8px 8px;
+  padding-top: 7px;
+  border-top: 1px solid #dce7ee;
+}
+
+.diagnostics-mode .diagnostic-acquisition-state-row > div {
+  min-width: 0;
+}
+
+.diagnostics-mode .diagnostic-acquisition-state-row strong {
+  display: block;
+  overflow: hidden;
+  color: #17384e;
+  font-size: 10.5px;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostics-mode .diagnostic-source-adapter .diagnostic-wide {
+  grid-column: 1 / -1;
+}
+
+/* PX6D is an external mechanical reference, so it receives its own focused
+   workspace instead of being buried among raw acquisition fields. */
+.diagnostics-mode .diagnostic-reference-card,
+.diagnostics-mode .diagnostic-sync-card,
+.diagnostics-mode .diagnostic-capture-card {
+  border-left: 4px solid #278c78;
+}
+
+.diagnostics-mode .diagnostic-card-stack:has(> .diagnostic-reference-card:not(.diagnostic-group-hidden)) {
+  grid-auto-rows: max-content;
+}
+
+.diagnostics-mode .diagnostic-reference-headline {
+  display: grid;
+  grid-template-columns: minmax(0, 1.18fr) minmax(96px, 0.82fr);
+  align-items: end;
+  gap: 8px;
+  margin: 8px 8px 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #dce7ee;
+}
+
+.diagnostics-mode .diagnostic-reference-headline span,
+.diagnostics-mode .diagnostic-mechanical-axis-grid span,
+.diagnostics-mode .diagnostic-mechanical-derived-grid span,
+.diagnostics-mode .diagnostic-reference-status-grid span,
+.diagnostics-mode .diagnostic-sync-grid span,
+.diagnostics-mode .diagnostic-sync-quality-row span,
+.diagnostics-mode .diagnostic-capture-progress span {
+  display: block;
+  margin-bottom: 3px;
+  color: #60798b;
+  font-size: 9.5px;
+  font-weight: 750;
+}
+
+.diagnostics-mode .diagnostic-reference-headline h3 {
+  margin: 0;
+  overflow: hidden;
+  color: #19745f;
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostics-mode .diagnostic-reference-primary {
+  min-width: 0;
+  padding-left: 8px;
+  border-left: 1px solid #d8e7e2;
+}
+
+.diagnostics-mode .diagnostic-reference-primary strong {
+  color: #087fa7;
+  font-size: 17px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.diagnostics-mode .diagnostic-mechanical-axis-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  padding: 8px 8px 6px;
+}
+
+.diagnostics-mode .diagnostic-mechanical-axis-grid > div {
+  min-width: 0;
+  min-height: 50px;
+  padding: 6px 7px;
+  border: 1px solid #d8e7e2;
+  border-radius: 5px;
+  background: #f7fbfa;
+}
+
+.diagnostics-mode .diagnostic-mechanical-axis-grid strong {
+  display: block;
+  overflow: hidden;
+  color: #17384e;
+  font-size: 11.5px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostics-mode .diagnostic-mechanical-derived-grid,
+.diagnostics-mode .diagnostic-reference-status-grid,
+.diagnostics-mode .diagnostic-sync-grid,
+.diagnostics-mode .diagnostic-capture-progress {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 10px;
+  margin: 0 8px;
+  border-top: 1px solid #dce7ee;
+}
+
+.diagnostics-mode .diagnostic-mechanical-derived-grid > div,
+.diagnostics-mode .diagnostic-reference-status-grid > div,
+.diagnostics-mode .diagnostic-sync-grid > div,
+.diagnostics-mode .diagnostic-capture-progress > div {
+  min-width: 0;
+  min-height: 43px;
+  padding: 6px 2px 5px;
+  border-bottom: 1px solid #e3ebf0;
+}
+
+.diagnostics-mode .diagnostic-mechanical-derived-grid strong,
+.diagnostics-mode .diagnostic-reference-status-grid strong,
+.diagnostics-mode .diagnostic-sync-grid strong,
+.diagnostics-mode .diagnostic-capture-progress strong {
+  display: block;
+  overflow: hidden;
+  color: #17384e;
+  font-size: 11px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostics-mode .diagnostic-mechanical-derived-grid strong[data-health-tone="warning"] {
+  color: #a96806;
+}
+
+.diagnostics-mode .diagnostic-mechanical-derived-grid strong[data-health-tone="ok"] {
+  color: #19745f;
+}
+
+.diagnostics-mode .diagnostic-reference-actions,
+.diagnostics-mode .diagnostic-capture-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+}
+
+.diagnostics-mode .diagnostic-reference-actions button,
+.diagnostics-mode .diagnostic-capture-actions button {
+  min-height: 32px;
+  padding: 6px 9px;
+  border: 1px solid #a9cfc5;
+  border-radius: 5px;
+  background: #f3faf8;
+  color: #176b59;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.diagnostics-mode .diagnostic-reference-actions button .lucide,
+.diagnostics-mode .diagnostic-capture-actions button .lucide {
+  width: 14px;
+  height: 14px;
+}
+
+.diagnostics-mode .diagnostic-reference-actions > span {
+  color: #60798b;
+  font-size: 9.5px;
+  font-weight: 750;
+}
+
+.diagnostics-mode .diagnostic-sync-card {
+  border-left-color: #258eae;
+}
+
+.diagnostics-mode .diagnostic-sync-quality-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  gap: 8px;
+  margin: 8px;
+  padding: 8px;
+  border: 1px solid #d7e6ed;
+  border-radius: 5px;
+  background: #f8fbfd;
+}
+
+.diagnostics-mode .diagnostic-sync-quality-row strong {
+  color: #17384e;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.diagnostics-mode [data-sync-tone="excellent"],
+.diagnostics-mode [data-sync-tone="good"] {
+  color: #19745f !important;
+}
+
+.diagnostics-mode [data-sync-tone="acceptable"] {
+  color: #a96806 !important;
+}
+
+.diagnostics-mode [data-sync-tone="poor"] {
+  color: #b33e46 !important;
+}
+
+.diagnostics-mode .diagnostic-sync-note,
+.diagnostics-mode .diagnostic-capture-output {
+  margin: 8px;
+  padding: 7px 8px;
+  border-left: 3px solid #78b9cb;
+  background: #f5fafc;
+  color: #506b7e;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.diagnostics-mode .diagnostic-capture-card {
+  border-left-color: #7b6db2;
+}
+
+.diagnostics-mode .diagnostic-capture-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  padding: 8px;
+}
+
+.diagnostics-mode .diagnostic-capture-form label {
+  min-width: 0;
+  color: #60798b;
+  font-size: 9.5px;
+  font-weight: 750;
+}
+
+.diagnostics-mode .diagnostic-capture-form select,
+.diagnostics-mode .diagnostic-capture-form input {
+  width: 100%;
+  height: 31px;
+  margin-top: 4px;
+  padding: 4px 7px;
+  border: 1px solid #d1dfe8;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #17384e;
+  font-size: 10.5px;
+  font-weight: 750;
+}
+
+.diagnostics-mode .diagnostic-capture-note-field {
+  grid-column: 1 / -1;
+}
+
+.diagnostics-mode .diagnostic-capture-actions {
+  justify-content: flex-start;
+  padding-top: 0;
+}
+
+.diagnostics-mode .diagnostic-capture-actions button:first-child {
+  border-color: #9e93c8;
+  background: #f7f5fc;
+  color: #5d4d91;
+}
+
+.diagnostics-mode .diagnostic-capture-actions button:disabled,
+.diagnostics-mode .diagnostic-reference-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.diagnostics-mode .diagnostic-capture-output {
+  overflow: hidden;
+  border-left-color: #9e93c8;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostics-mode .diagnostic-runtime-content {
+  display: grid;
+  gap: 8px;
+  padding: 0 8px 8px;
+}
+
+.diagnostics-mode .diagnostic-runtime-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid #d9e6ee;
+  border-radius: 5px;
+  background: #ffffff;
+}
+
+.diagnostics-mode .diagnostic-runtime-status span {
+  color: #60798b;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.diagnostics-mode .diagnostic-runtime-status strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #17384e;
+  font-size: 11px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostics-mode .diagnostic-runtime-buttons button {
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 7px;
+  border: 1px solid #c9dbe8;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #24465e;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.diagnostics-mode .diagnostic-runtime-buttons button.active {
+  border-color: #168fbd;
+  background: #e4f5fb;
+  color: #08749d;
 }
 
 .diagnostics-mode .diagnostic-metrics-card {
@@ -4969,6 +5764,41 @@ button.active-watch,
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
   padding: 8px;
+}
+
+.diagnostics-mode .diagnostic-surface-headline {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 74px;
+  align-items: end;
+  gap: 8px;
+  margin: 8px 8px 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #dce7ee;
+}
+
+.diagnostics-mode .diagnostic-surface-headline > div {
+  min-width: 0;
+}
+
+.diagnostics-mode .diagnostic-surface-headline span {
+  display: block;
+  margin-bottom: 3px;
+  color: #60798b;
+  font-size: 9.5px;
+  font-weight: 750;
+}
+
+.diagnostics-mode .diagnostic-surface-headline h3 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #087fa7;
+  font-size: 18px;
+  font-weight: 900;
+  line-height: 1.08;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .diagnostics-mode .diagnostic-surface-kpi-grid > div {
@@ -5008,6 +5838,10 @@ button.active-watch,
   margin: 0 8px 8px;
   padding-top: 7px;
   border-top: 1px solid #dce7ee;
+}
+
+.diagnostics-mode .diagnostic-surface-state-row-single {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .diagnostics-mode .diagnostic-surface-state-row > div {
@@ -5143,13 +5977,36 @@ button.active-watch,
   grid-column: 1 / -1;
 }
 
-.diagnostics-mode .diagnostic-array-card {
-  order: 5;
+.diagnostics-mode .diagnostic-array-status > .status-grid {
+  gap: 0 8px;
+  padding: 0 8px 7px;
 }
 
-.diagnostics-mode .diagnostic-coupling-card {
-  order: 6;
-  border-left: 4px solid #5a9db8;
+.diagnostics-mode .diagnostic-array-status > .status-grid > div {
+  min-width: 0;
+  min-height: 40px;
+  padding: 6px 2px 5px;
+  border: 0;
+  border-top: 1px solid #e1eaf0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.diagnostics-mode .diagnostic-array-status > .status-grid > div:nth-child(-n + 2) {
+  border-top: 0;
+}
+
+.diagnostics-mode .diagnostic-array-status > .small-note {
+  margin: 0 8px 8px;
+}
+
+.diagnostics-mode .diagnostic-coupling-raw > .coupling-view-control {
+  margin: 8px;
+}
+
+.diagnostics-mode .diagnostic-coupling-raw > .diagnostic-raw-block {
+  margin: 0 8px 8px;
 }
 
 .diagnostics-mode .diagnostic-surface-state {
@@ -5261,6 +6118,26 @@ button.active-watch,
 /* Compact industrial desktops: keep every primary command reachable without
    wrapping or pushing Diagnostics / Settings outside the viewport. */
 @media (max-width: 1100px) {
+  .diagnostics-mode .control-actions {
+    display: flex !important;
+    justify-content: flex-end !important;
+    gap: 4px !important;
+    overflow: visible !important;
+  }
+
+  .lucide-ready .diagnostics-mode .control-actions .ui-icon-button {
+    flex: 0 0 28px !important;
+    width: 28px !important;
+    min-width: 28px !important;
+    height: 28px !important;
+    min-height: 28px !important;
+    padding: 0 !important;
+  }
+
+  .lucide-ready .diagnostics-mode .control-actions .ui-icon-button .command-label {
+    display: none !important;
+  }
+
   .operator-mode .control-zone,
   .operator-mode .control-actions {
     min-width: 0 !important;
@@ -5314,8 +6191,8 @@ button.active-watch,
   }
 
   .diagnostics-mode .diagnostic-tabs button {
-    padding-inline: 3px;
-    font-size: 8.5px;
+    padding-inline: 2px;
+    font-size: 8px;
   }
 
   .diagnostics-mode .stage-header {
@@ -5380,6 +6257,7 @@ button.active-watch,
 }
 
 .operator-mode .summary-hud > .optical-preview-shell {
+  position: relative;
   min-height: 0 !important;
   padding: 0 !important;
   overflow: hidden;
@@ -5393,6 +6271,43 @@ button.active-watch,
   width: 100%;
   height: 100%;
   min-height: 0;
+}
+
+.operator-mode .optical-preview-empty-state {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 5px;
+  color: #73889a;
+  text-align: center;
+  pointer-events: none;
+}
+
+.operator-mode .optical-preview-empty-state svg {
+  width: 22px;
+  height: 22px;
+  color: #78a9bd;
+  stroke-width: 1.5;
+}
+
+.operator-mode .optical-preview-empty-state strong {
+  color: #506b7e !important;
+  font-size: 10px !important;
+  font-weight: 650 !important;
+}
+
+.operator-mode .optical-preview-empty-state span {
+  color: #8497a6 !important;
+  font-size: 8px !important;
+  font-weight: 650 !important;
+  letter-spacing: 0.08em !important;
+}
+
+.operator-mode .summary-hud[data-measurement-state="no_data"] .optical-preview-empty-state {
+  display: flex;
 }
 
 .operator-mode .summary-hud > .optical-kpi-grid {
@@ -5717,4 +6632,402 @@ button.active-watch,
 
 .diagnostics-mode .diagnostic-alignment-card.diagnostic-group-hidden {
   display: none !important;
+}
+
+/* Final cascade lock for the simplified Operator workspace. */
+.operator-mode .dashboard {
+  grid-template-columns:
+    clamp(174px, 15.5vw, 210px)
+    minmax(0, 1fr)
+    clamp(224px, 20vw, 278px) !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+}
+
+.operator-mode .dashboard > *,
+.operator-mode .left-panel,
+.operator-mode .right-panel,
+.operator-mode .twin-stage,
+.operator-mode .hud-card,
+.operator-mode .operator-summary-card,
+.operator-mode .operator-footprint-card,
+.operator-mode .operator-band-card {
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.operator-mode .left-panel,
+.operator-mode .right-panel {
+  overflow: hidden !important;
+}
+
+.operator-mode .left-panel {
+  grid-template-rows: 144px minmax(0, 1fr) !important;
+}
+
+.operator-mode .response-hud {
+  height: 144px !important;
+  min-height: 144px !important;
+}
+
+.operator-mode .summary-hud {
+  height: 100% !important;
+  min-height: 0 !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  grid-template-rows: auto minmax(110px, 1fr) auto !important;
+}
+
+.operator-mode .summary-hud > .optical-kpi-grid {
+  min-height: 0 !important;
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  grid-template-rows: repeat(2, 46px) !important;
+  gap: 6px !important;
+}
+
+.operator-mode .control-actions .ui-icon-button,
+.operator-mode #surfaceFullscreenButton {
+  flex: 0 0 34px !important;
+  width: 34px !important;
+  min-width: 34px !important;
+  height: 34px !important;
+  min-height: 34px !important;
+  padding: 0 !important;
+}
+
+.lucide-ready .operator-mode #liveTwinButton.active-watch::before,
+.lucide-ready .operator-mode #exportWatchButton.active-watch::before {
+  display: none !important;
+}
+
+@media (max-width: 1100px) {
+  .operator-mode .control-actions .ui-icon-button {
+    flex: 0 0 31px !important;
+    width: 31px !important;
+    min-width: 31px !important;
+    height: 31px !important;
+    min-height: 31px !important;
+    padding: 0 !important;
+  }
+}
+
+/* Apple-inspired industrial structure while preserving the established TOUCH
+   color palette. This pass changes hierarchy and interaction, not colors. */
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", sans-serif;
+}
+
+body {
+  font-variant-numeric: tabular-nums;
+}
+
+.operator-mode.app-shell {
+  padding: 7px !important;
+  gap: 8px !important;
+}
+
+.operator-mode.app-shell::before {
+  display: none !important;
+}
+
+.operator-mode .topbar {
+  border-radius: 8px !important;
+  backdrop-filter: saturate(160%) blur(16px);
+}
+
+.operator-mode .touch-brand-main {
+  font-weight: 720 !important;
+}
+
+.operator-mode .touch-brand-tag {
+  font-weight: 650 !important;
+}
+
+.operator-mode .status-strip .status-item {
+  min-height: 32px !important;
+  height: 32px !important;
+  border-radius: 7px !important;
+}
+
+.operator-mode .status-strip .status-item strong {
+  font-weight: 620 !important;
+}
+
+.operator-mode .control-actions .ui-icon-button,
+.operator-mode #surfaceFullscreenButton,
+.operator-mode .icon-chip,
+.operator-mode .control-actions .ui-icon-button:hover,
+.operator-mode #surfaceFullscreenButton:hover,
+.operator-mode .icon-chip:hover {
+  transform: none !important;
+}
+
+.operator-mode .dashboard {
+  gap: 8px !important;
+}
+
+.operator-mode .hud-card,
+.operator-mode .twin-stage,
+.operator-mode .operator-summary-card,
+.operator-mode .operator-footprint-card,
+.operator-mode .operator-band-card {
+  border-radius: 8px !important;
+}
+
+.operator-mode .hud-card {
+  padding: 9px !important;
+}
+
+.operator-mode .hud-card h2,
+.operator-mode .stage-header h2 {
+  font-weight: 660 !important;
+}
+
+.operator-mode .section-label {
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+  font-size: 11px !important;
+  font-weight: 650 !important;
+}
+
+.operator-mode .trace-kpi-strip small {
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+  font-weight: 600 !important;
+}
+
+.operator-mode .optical-kpi-grid span {
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+  font-weight: 520 !important;
+}
+
+.operator-mode .trace-kpi-strip strong,
+.operator-mode .optical-kpi-grid strong,
+.operator-mode .operator-summary-grid strong {
+  font-weight: 650 !important;
+}
+
+.operator-mode .chart-canvas,
+.operator-mode .summary-hud > .optical-preview-shell,
+.operator-mode .three-mount,
+.operator-mode .optical-kpi-grid > div,
+.operator-mode .mini-pixel {
+  border-radius: 7px !important;
+}
+
+.operator-mode .summary-hud > .optical-kpi-grid,
+.operator-mode .summary-hud > div.optical-kpi-grid {
+  gap: 5px !important;
+}
+
+.operator-mode .right-panel {
+  gap: 8px !important;
+}
+
+.operator-mode .operator-summary-card,
+.operator-mode .operator-footprint-card,
+.operator-mode .operator-band-card {
+  padding: 10px !important;
+}
+
+.operator-mode #surfaceResponseLevel {
+  font-weight: 680 !important;
+}
+
+.operator-mode .mini-array-grid {
+  gap: 6px !important;
+}
+
+.operator-mode .ui-icon-button[data-tooltip]::after {
+  font-weight: 560 !important;
+  backdrop-filter: blur(12px);
+}
+
+.app-shell.surface-fullscreen-active .operator-summary-card {
+  backdrop-filter: saturate(160%) blur(18px);
+}
+
+/* Restored desktop windows can expose a wider CSS viewport than their Windows
+   frame at display scaling above 100%. Keep every primary command and evidence
+   rail reachable without changing the maximized information hierarchy. */
+@media (max-width: 1920px) {
+  .operator-mode .topbar {
+    grid-template-columns: 170px 390px minmax(252px, 1fr) !important;
+    gap: 6px !important;
+  }
+
+  .operator-mode .control-actions {
+    gap: 4px !important;
+  }
+
+  .operator-mode .status-strip .status-item:nth-child(1) {
+    flex: 1 1 108px !important;
+  }
+
+  .operator-mode .status-strip .status-item:nth-child(2) {
+    flex: 1.25 1 145px !important;
+  }
+
+  .operator-mode .status-strip .status-item:nth-child(3) {
+    flex: 0.9 1 112px !important;
+  }
+
+  .operator-mode .status-strip .qa-status-item {
+    padding-inline: 7px !important;
+  }
+
+  .operator-mode .status-strip .qa-status-item strong {
+    font-size: 10.5px !important;
+  }
+
+  .operator-mode .status-strip .status-item:nth-child(2) svg,
+  .operator-mode .status-strip .status-item:nth-child(3) svg {
+    display: none !important;
+  }
+
+  .operator-mode .control-actions .ui-icon-button {
+    flex: 0 0 32px !important;
+    width: 32px !important;
+    min-width: 32px !important;
+    height: 32px !important;
+    min-height: 32px !important;
+  }
+
+  .operator-mode .dashboard {
+    grid-template-columns:
+      clamp(160px, 13.5vw, 190px)
+      minmax(0, 1fr)
+      clamp(194px, 17vw, 232px) !important;
+    gap: 6px !important;
+  }
+
+  .operator-mode .operator-summary-card,
+  .operator-mode .operator-footprint-card,
+  .operator-mode .operator-band-card {
+    padding: 8px !important;
+  }
+
+  .operator-mode .mini-array-grid {
+    gap: 4px !important;
+  }
+
+  .operator-mode .spectrum-open-chip {
+    flex: 0 0 38px !important;
+    width: 38px !important;
+    min-width: 38px !important;
+    padding-inline: 0 !important;
+  }
+
+  .diagnostics-mode .topbar {
+    grid-template-columns: 160px 350px minmax(0, 1fr) !important;
+    gap: 6px !important;
+  }
+
+  .diagnostics-mode .control-actions {
+    gap: 3px !important;
+  }
+
+  .diagnostics-mode .control-actions button {
+    min-width: 0 !important;
+    padding-inline: 3px !important;
+  }
+
+  .diagnostics-mode .dashboard {
+    grid-template-columns: 180px minmax(0, 1fr) 300px !important;
+    gap: 7px !important;
+  }
+}
+
+/* An idle spectrum still needs a clear evidence target, but four empty KPI
+   tiles add no operational value. They return automatically with a frame. */
+.operator-mode .summary-hud[data-measurement-state="no_data"] {
+  grid-template-rows: auto minmax(0, 1fr) !important;
+}
+
+.operator-mode .summary-hud[data-measurement-state="no_data"] > .optical-kpi-grid {
+  display: none !important;
+}
+.px6d-reference-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border, #d8e3ec);
+}
+
+.px6d-reference-row > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.px6d-reference-row span {
+  color: var(--muted, #607487);
+  font-size: 0.72rem;
+}
+
+.px6d-reference-row strong {
+  color: var(--text, #102236);
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+.px6d-reference-row .px6d-reference-status {
+  padding: 3px 7px;
+  border: 1px solid #cbd9e5;
+  border-radius: 5px;
+  background: #f7fafc;
+  color: #607487;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.px6d-reference-row .px6d-reference-status[data-state="ready"] {
+  border-color: #8ccdb8;
+  background: #edf9f4;
+  color: #167559;
+}
+
+.px6d-reference-row .px6d-reference-status[data-state="warning"] {
+  border-color: #e3bd6d;
+  background: #fff8e8;
+  color: #8a641e;
+}
+
+.px6d-reference-row button {
+  min-height: 30px;
+  padding: 4px 9px;
+  border: 1px solid #9db9cf;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #174d73;
+  font-size: 0.76rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.px6d-reference-row button:hover:not(:disabled) {
+  border-color: #198fbd;
+  background: #f0f9fd;
+}
+
+.px6d-reference-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+@media (max-width: 1180px) {
+  .px6d-reference-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .px6d-reference-row button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
 }

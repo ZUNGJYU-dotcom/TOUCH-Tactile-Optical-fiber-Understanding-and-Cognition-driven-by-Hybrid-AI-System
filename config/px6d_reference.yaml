@@ -1,0 +1,50 @@
+enabled: true
+auto_start: true
+
+serial:
+  port: COM3
+  baud_rate: 921600
+  device_id: 127
+  poll_hz: 50.0
+  read_timeout_sec: 0.20
+  reconnect_interval_sec: 1.0
+
+signal:
+  history_seconds: 300.0
+  compression_sign: -1
+  filter_alpha: 0.25
+
+mechanical:
+  primary_axis: Fz
+  force_full_scale_per_axis_n: 50.0
+  moment_full_scale_per_axis_nm: 2.0
+  warning_utilization_percent: 90.0
+  note: "Configured nominal PX6D-75 axis ranges; raw and software-zeroed values are both retained."
+
+software_tare:
+  auto_tare_on_start: true
+  duration_sec: 1.0
+  maximum_fz_std_n: 0.12
+  note: "Software zero only; the PX6D hardware calibration command is never sent."
+
+synchronization:
+  force_window_half_width_sec: 0.25
+  maximum_nearest_sample_age_sec: 1.0
+  timestamp_basis: host_epoch_clock
+  aggregation: median
+  excellent_max_offset_ms: 50.0
+  good_max_offset_ms: 150.0
+  acceptable_max_offset_ms: 250.0
+
+capture:
+  output_directory: data/px6d_synchronized
+  poll_interval_sec: 0.05
+  require_software_tare: true
+  require_valid_spectrum: true
+  note: "Each saved spectrum frame carries timestamp-aligned raw and software-zeroed PX6D six-axis data."
+
+semantics:
+  primary_display_axis: Fz
+  display_name: PX6D Reference Fz
+  optical_model_role: synchronized_ground_truth_reference
+  note: "This is the measured PX6D reference force, not an optical force prediction."

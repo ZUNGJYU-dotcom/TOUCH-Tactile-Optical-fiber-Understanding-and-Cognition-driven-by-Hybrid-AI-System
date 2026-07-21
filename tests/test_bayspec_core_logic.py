@@ -295,8 +295,11 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
             "globalEventPeakShiftPm / WAVELENGTH_SHIFT_FULL_SCALE_PM",
             app_js,
         )
-        self.assertIn("var(--response-small-end, 34%)", styles_css)
-        self.assertIn("var(--response-moderate-end, 70%)", styles_css)
+        self.assertIn("var(--response-no-contact-end, 25%)", styles_css)
+        self.assertIn("var(--response-small-end, 80%)", styles_css)
+        self.assertIn("var(--response-moderate-end, 90%)", styles_css)
+        self.assertIn("0.5 * (RESPONSE_BAND_THRESHOLDS.noContactMax + RESPONSE_BAND_THRESHOLDS.smallMax)", app_js)
+        self.assertIn("0.5 * (RESPONSE_BAND_THRESHOLDS.smallMax + RESPONSE_BAND_THRESHOLDS.moderateMax)", app_js)
         self.assertIn("Normalized visual response: no contact below", app_js)
         self.assertIn("responseLevelFromSurfaceValue(proxyResponseRatio)", app_js)
         self.assertIn("const trainedModelTrace", app_js)
@@ -308,26 +311,26 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
         self.assertIn("snapDisplayedFrameToCurrentTargets();", app_js)
         self.assertIn("hasActiveSurfaceResponse && (", app_js)
         self.assertIn("surfaceHasActiveResponse", app_js)
-        self.assertIn('ARRAY_ONE_SHOT_SCENARIOS = new Set(["tap", "release"])', app_js)
+        self.assertIn('state.arrayDemoPlaybackMode !== "loop"', app_js)
+        self.assertIn('const frameScenario = actionFinished ? "no_contact"', app_js)
 
-    def test_operator_spectrum_entry_preserves_its_full_label(self) -> None:
+    def test_operator_spectrum_entry_uses_compact_accessible_icon(self) -> None:
         index_html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
         styles_css = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
 
-        self.assertIn('class="chip spectrum-open-chip">Spectrum</span>', index_html)
-        self.assertIn(".operator-mode .summary-hud .spectrum-open-chip", styles_css)
-        self.assertIn("grid-template-columns: minmax(0, 1fr) auto !important;", styles_css)
-        self.assertIn("min-width: 76px;", styles_css)
+        self.assertIn('class="chip spectrum-open-chip icon-chip"', index_html)
+        self.assertIn('data-lucide="chart-spline"', index_html)
+        self.assertIn(".operator-mode .icon-chip", styles_css)
+        self.assertIn("width: 28px;", styles_css)
 
-    def test_operator_qa_status_has_the_widest_status_column(self) -> None:
+    def test_operator_status_strip_uses_compact_icons(self) -> None:
         index_html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
         styles_css = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
 
-        self.assertIn('class="qa-status-item"><small>QA status</small>', index_html)
-        self.assertIn(
-            "grid-template-columns: minmax(105px, 0.9fr) minmax(115px, 1fr) minmax(158px, 1.35fr) !important;",
-            styles_css,
-        )
+        self.assertIn('class="status-item qa-status-item"', index_html)
+        self.assertIn('data-lucide="shield-check"', index_html)
+        self.assertIn(".operator-mode .status-strip .status-item", styles_css)
+        self.assertIn("min-height: 34px !important;", styles_css)
         self.assertIn(".operator-mode #topQaStatus", styles_css)
 
     def test_global_candidate_baseline_uses_complete_recent_nine_peak_frames(self) -> None:
@@ -490,7 +493,7 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
 class WavelengthArraySimulationTests(unittest.TestCase):
     SCENARIO_STEPS = {
         "no_contact": 1,
-        "center_press": 14,
+        "center_press": 50,
         "off_center_fingertip_contact": 14,
         "broad_fingertip_contact": 14,
         "vertical_slide_p11_p12_p13": 12,
@@ -502,7 +505,7 @@ class WavelengthArraySimulationTests(unittest.TestCase):
 
     def test_no_contact_and_center_contact_shift_peaks_not_peak_height(self) -> None:
         idle = backend_main.simulated_array_frame("no_contact", step=0)
-        contact = backend_main.simulated_array_frame("center_press", step=7)
+        contact = backend_main.simulated_array_frame("center_press", step=30)
         self.assertLess(idle["peak_wavelength_shift_pm"], 1.0)
         self.assertGreater(contact["peak_wavelength_shift_pm"], 50.0)
         idle_channels = {item["channel_id"]: item for item in idle["channels"]}
@@ -519,7 +522,7 @@ class WavelengthArraySimulationTests(unittest.TestCase):
         self.assertNotIn("same_fiber_downstream_optical_coupling", contact["coupling_sources"])
 
     def test_synthetic_spectrum_peak_centers_follow_channel_shifts(self) -> None:
-        frame = backend_main.simulated_array_frame("center_press", step=7)
+        frame = backend_main.simulated_array_frame("center_press", step=30)
         channels = {item["channel_id"]: item for item in frame["channels"]}
         peaks = {item["channel_id"]: item for item in frame["spectrum"]["peaks"]}
         self.assertAlmostEqual(
@@ -533,7 +536,7 @@ class WavelengthArraySimulationTests(unittest.TestCase):
     def test_synthetic_spectrum_peak_height_is_invariant_across_scenarios(self) -> None:
         frames = [
             backend_main.simulated_array_frame("no_contact", step=0),
-            backend_main.simulated_array_frame("center_press", step=7),
+            backend_main.simulated_array_frame("center_press", step=30),
             backend_main.simulated_array_frame("broad_fingertip_contact", step=7),
             backend_main.simulated_array_frame("vertical_slide_p11_p12_p13", step=5),
         ]

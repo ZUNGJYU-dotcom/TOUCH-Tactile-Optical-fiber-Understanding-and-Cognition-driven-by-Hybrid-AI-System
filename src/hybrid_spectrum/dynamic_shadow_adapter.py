@@ -31,6 +31,75 @@ def _aligned_probability(model: Any, values: np.ndarray, labels: list[str]) -> n
     return aligned
 
 
+def _select_response_level_index(
+    probabilities: np.ndarray,
+    labels: list[str],
+    config: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Resolve only a validated, narrow light/normal probability boundary."""
+
+    values = np.asarray(probabilities, dtype=float).reshape(-1)
+    if len(values) != len(labels) or not len(labels):
+        raise ValueError("response probability and label counts must match")
+    raw_index = int(np.argmax(values))
+    raw_label = str(labels[raw_index])
+    decision = {
+        "raw_label": raw_label,
+        "selected_label": raw_label,
+        "overridden": False,
+        "decision_rule": "probability_argmax",
+    }
+
+    postprocess = dict(config or {})
+    if not bool(postprocess.get("enabled", False)):
+        return raw_index, decision
+    preference = dict(postprocess.get("light_preference") or {})
+    required_labels = {"light", "normal", "hard"}
+    if not required_labels.issubset(set(labels)):
+        decision["decision_rule"] = "probability_argmax_missing_standard_labels"
+        return raw_index, decision
+
+    light_index = labels.index("light")
+    normal_index = labels.index("normal")
+    hard_index = labels.index("hard")
+    minimum_light_probability = float(
+        preference.get("minimum_light_probability", 0.40)
+    )
+    maximum_margin = float(
+        preference.get("maximum_normal_minus_light_margin", 0.10)
+    )
+    normal_minus_light_margin = float(values[normal_index] - values[light_index])
+    hard_not_dominant = values[hard_index] < max(
+        values[light_index], values[normal_index]
+    )
+    decision.update(
+        {
+            "light_probability": float(values[light_index]),
+            "normal_probability": float(values[normal_index]),
+            "hard_probability": float(values[hard_index]),
+            "normal_minus_light_margin": normal_minus_light_margin,
+        }
+    )
+    if (
+        raw_label == str(preference.get("only_override_raw_label", "normal"))
+        and values[light_index] >= minimum_light_probability
+        and 0.0 <= normal_minus_light_margin <= maximum_margin
+        and (
+            not bool(preference.get("require_hard_not_dominant", True))
+            or hard_not_dominant
+        )
+    ):
+        decision.update(
+            {
+                "selected_label": "light",
+                "overridden": True,
+                "decision_rule": "grouped_oof_borderline_light_preference",
+            }
+        )
+        return light_index, decision
+    return raw_index, decision
+
+
 def _positive_class_probability(
     model: Any,
     values: np.ndarray,
@@ -874,6 +943,7 @@ class DynamicTemporalShadowAdapter:
         bundle: dict[str, Any],
         peak_windows: Iterable[PeakWindow],
         runtime_recovery_config: dict[str, Any] | None = None,
+        response_level_config: dict[str, Any] | None = None,
     ) -> None:
         self.bundle = bundle
         self.peak_windows = tuple(peak_windows)
@@ -901,6 +971,7 @@ class DynamicTemporalShadowAdapter:
         self._runtime_baseline_recovery = RuntimeBaselineRecoveryGuard(
             recovery_config
         )
+        self._response_level_config = dict(response_level_config or {})
         self._runtime_baseline_revision = 0
         self._pending_runtime_baseline_update: dict[str, Any] | None = None
         self._last_ready_output: dict[str, Any] | None = None
@@ -918,11 +989,13 @@ class DynamicTemporalShadowAdapter:
         model_path: Path,
         peak_config_path: Path,
         runtime_recovery_config: dict[str, Any] | None = None,
+        response_level_config: dict[str, Any] | None = None,
     ) -> "DynamicTemporalShadowAdapter":
         return cls(
             load_dynamic_shadow_bundle(model_path),
             load_peak_windows(peak_config_path.resolve()),
             runtime_recovery_config=runtime_recovery_config,
+            response_level_config=response_level_config,
         )
 
     @property
@@ -1153,7 +1226,11 @@ class DynamicTemporalShadowAdapter:
                 models["response_rbf_svm"], summary, list(labels["response_level"])
             )[0]
             position_index = int(np.argmax(position_probability))
-            response_index = int(np.argmax(response_probability))
+            response_index, response_decision = _select_response_level_index(
+                response_probability,
+                list(labels["response_level"]),
+                self._response_level_config,
+            )
             output["position"] = {
                 "label": str(labels["position"][position_index]),
                 "confidence": float(position_probability[position_index]),
@@ -1166,6 +1243,9 @@ class DynamicTemporalShadowAdapter:
             output["response_level"] = {
                 "label": str(labels["response_level"][response_index]),
                 "confidence": float(response_probability[response_index]),
+                "raw_label": response_decision["raw_label"],
+                "decision_rule": response_decision["decision_rule"],
+                "postprocess_overridden": response_decision["overridden"],
                 "probabilities": {
                     label: float(response_probability[index])
                     for index, label in enumerate(labels["response_level"])

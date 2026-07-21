@@ -89,7 +89,9 @@ diagnostic-only and cannot drive the UI or deformation.
 ## Scientific Boundary
 
 - `light`, `normal`, and `hard` are approximate operator response levels.
-- No calibrated pressure, displacement, or `force_N` is output.
+- The optical model does not output calibrated force, pressure, or displacement.
+- `PX6D Reference Fz` is an independently measured ground-truth label in N;
+  it is not an optical-model force prediction.
 - Static snapshots do not support tap, slide, or release-dynamics recognition.
 - The visual surface is a digital-twin proxy driven by model output, not a
   measured pressure field.
@@ -135,4 +137,40 @@ wavelength-shift application.
 D:\anaconda\miniconda3\python.exe -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-Private repository. All rights reserved.
+## PX6D Optical-Force Synchronization
+
+The TOUCH backend can read the PX6D six-axis sensor directly on `COM3` at
+921600 baud while BaySpec supplies full-spectrum frames. The Operator summary
+shows the software-zeroed `PX6D Reference Fz`. The Diagnostics **Force**
+workspace exposes zeroed `Fx/Fy/Fz/Mx/My/Mz`, force and moment resultants,
+configured range utilization, tare quality, sample freshness, and explicit
+optical-to-mechanical timestamp alignment quality. `Zero Fz` changes only the
+software offset and never sends a hardware calibration command.
+
+To record full optical fingerprints with timestamp-aligned force labels:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\record_bayspec_px6d_synchronized.py `
+  --base-url http://127.0.0.1:8640 `
+  --duration-sec 30 `
+  --position P22 `
+  --action static_press `
+  --trial-id trial_001
+```
+
+Each unique BaySpec frame is saved with its complete wavelength/intensity
+arrays and the median PX6D `[Fx, Fy, Fz, Mx, My, Mz]` sample inside the
+configured timestamp window. Formal capture skips frames without a valid,
+tared force label. Outputs are written below `data/px6d_synchronized/` as
+JSONL, a compact CSV index, and session metadata.
+
+The same workflow is available directly in Diagnostics: select **Force**,
+set the position/action/trial fields, choose **Start linked recording**, and
+finish with **Stop & save**. The UI shows paired-frame count, pair ratio, last
+sync grade, and the exact output directory. PX6D remains an independent ground
+truth reference; the optical model is not presented as calibrated force.
+For the portable desktop build, synchronized sessions are stored in
+`data/px6d_synchronized/` beside the executable rather than inside the bundled
+runtime files.
+
+Public research repository for the TOUCH System.

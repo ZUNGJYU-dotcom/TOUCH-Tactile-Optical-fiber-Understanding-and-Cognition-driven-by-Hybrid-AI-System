@@ -28,6 +28,8 @@ if str(APP_ROOT) not in sys.path:
 
 from bridge import bridge
 from bridge import BAYSPEC_CHANNEL_CONFIG, CHANNEL_ORDER
+from backend.optical_force_capture import OpticalForceCaptureManager
+from backend.px6d_reader import Px6dReader
 from sdk_live import BaySpecSdkLiveReader
 from src.array_surface.surface_mapper import SurfaceConfig, map_surface, matrices_from_channels
 from src.hybrid_spectrum.dynamic_shadow_adapter import DynamicTemporalShadowAdapter
@@ -71,6 +73,7 @@ DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH = (
 RUNTIME_CONTACT_STATE_CONFIG_PATH = (
     PROJECT_ROOT / "config" / "runtime_contact_state.yaml"
 )
+PX6D_REFERENCE_CONFIG_PATH = PROJECT_ROOT / "config" / "px6d_reference.yaml"
 STATIC_SPECTRAL_MODEL_LOCK = threading.Lock()
 STATIC_SPECTRAL_MODEL_CACHE_KEY: tuple | None = None
 STATIC_SPECTRAL_MODEL_CACHE_VALUE: dict | None = None
@@ -92,6 +95,124 @@ DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD: dict[str, Any] | None = None
 DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC: float | None = None
 DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM: np.ndarray | None = None
 DYNAMIC_TEMPORAL_SHADOW_MAX_RESAMPLE_STEPS = 12
+
+
+def _load_px6d_reference_config() -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "enabled": True,
+        "auto_start": True,
+        "port": "COM3",
+        "baud_rate": 921600,
+        "device_id": 127,
+        "poll_hz": 50.0,
+        "read_timeout_sec": 0.20,
+        "reconnect_interval_sec": 1.0,
+        "history_seconds": 300.0,
+        "compression_sign": -1,
+        "filter_alpha": 0.25,
+        "auto_tare_on_start": True,
+        "auto_tare_duration_sec": 1.0,
+        "auto_tare_max_std_n": 0.12,
+        "sync_window_sec": 0.25,
+        "sync_max_age_sec": 1.0,
+        "force_full_scale_per_axis_n": 50.0,
+        "moment_full_scale_per_axis_nm": 2.0,
+        "warning_utilization_percent": 90.0,
+        "sync_excellent_max_offset_ms": 50.0,
+        "sync_good_max_offset_ms": 150.0,
+        "sync_acceptable_max_offset_ms": 250.0,
+        "capture_output_directory": "data/px6d_synchronized",
+        "capture_poll_interval_sec": 0.05,
+        "capture_require_software_tare": True,
+    }
+    if yaml is None or not PX6D_REFERENCE_CONFIG_PATH.exists():
+        return defaults
+    try:
+        payload = yaml.safe_load(
+            PX6D_REFERENCE_CONFIG_PATH.read_text(encoding="utf-8")
+        ) or {}
+    except Exception:
+        return defaults
+    serial_config = payload.get("serial") or {}
+    signal_config = payload.get("signal") or {}
+    tare_config = payload.get("software_tare") or {}
+    sync_config = payload.get("synchronization") or {}
+    mechanical_config = payload.get("mechanical") or {}
+    capture_config = payload.get("capture") or {}
+    defaults.update(
+        {
+            "enabled": bool(payload.get("enabled", defaults["enabled"])),
+            "auto_start": bool(payload.get("auto_start", defaults["auto_start"])),
+            "port": serial_config.get("port", defaults["port"]),
+            "baud_rate": serial_config.get("baud_rate", defaults["baud_rate"]),
+            "device_id": serial_config.get("device_id", defaults["device_id"]),
+            "poll_hz": serial_config.get("poll_hz", defaults["poll_hz"]),
+            "read_timeout_sec": serial_config.get(
+                "read_timeout_sec", defaults["read_timeout_sec"]
+            ),
+            "reconnect_interval_sec": serial_config.get(
+                "reconnect_interval_sec", defaults["reconnect_interval_sec"]
+            ),
+            "history_seconds": signal_config.get(
+                "history_seconds", defaults["history_seconds"]
+            ),
+            "compression_sign": signal_config.get(
+                "compression_sign", defaults["compression_sign"]
+            ),
+            "filter_alpha": signal_config.get(
+                "filter_alpha", defaults["filter_alpha"]
+            ),
+            "auto_tare_on_start": tare_config.get(
+                "auto_tare_on_start", defaults["auto_tare_on_start"]
+            ),
+            "auto_tare_duration_sec": tare_config.get(
+                "duration_sec", defaults["auto_tare_duration_sec"]
+            ),
+            "auto_tare_max_std_n": tare_config.get(
+                "maximum_fz_std_n", defaults["auto_tare_max_std_n"]
+            ),
+            "sync_window_sec": sync_config.get(
+                "force_window_half_width_sec", defaults["sync_window_sec"]
+            ),
+            "sync_max_age_sec": sync_config.get(
+                "maximum_nearest_sample_age_sec", defaults["sync_max_age_sec"]
+            ),
+            "force_full_scale_per_axis_n": mechanical_config.get(
+                "force_full_scale_per_axis_n",
+                defaults["force_full_scale_per_axis_n"],
+            ),
+            "moment_full_scale_per_axis_nm": mechanical_config.get(
+                "moment_full_scale_per_axis_nm",
+                defaults["moment_full_scale_per_axis_nm"],
+            ),
+            "warning_utilization_percent": mechanical_config.get(
+                "warning_utilization_percent",
+                defaults["warning_utilization_percent"],
+            ),
+            "sync_excellent_max_offset_ms": sync_config.get(
+                "excellent_max_offset_ms",
+                defaults["sync_excellent_max_offset_ms"],
+            ),
+            "sync_good_max_offset_ms": sync_config.get(
+                "good_max_offset_ms", defaults["sync_good_max_offset_ms"]
+            ),
+            "sync_acceptable_max_offset_ms": sync_config.get(
+                "acceptable_max_offset_ms",
+                defaults["sync_acceptable_max_offset_ms"],
+            ),
+            "capture_output_directory": capture_config.get(
+                "output_directory", defaults["capture_output_directory"]
+            ),
+            "capture_poll_interval_sec": capture_config.get(
+                "poll_interval_sec", defaults["capture_poll_interval_sec"]
+            ),
+            "capture_require_software_tare": capture_config.get(
+                "require_software_tare",
+                defaults["capture_require_software_tare"],
+            ),
+        }
+    )
+    return defaults
 
 
 def _spectrum_fingerprint(
@@ -226,6 +347,16 @@ def _load_runtime_baseline_recovery_config() -> dict[str, Any]:
     return dict(section) if isinstance(section, dict) else {}
 
 
+def _load_response_level_postprocess_config() -> dict[str, Any]:
+    if yaml is None or not RUNTIME_CONTACT_STATE_CONFIG_PATH.exists():
+        return {}
+    payload = yaml.safe_load(
+        RUNTIME_CONTACT_STATE_CONFIG_PATH.read_text(encoding="utf-8")
+    ) or {}
+    section = payload.get("response_level_postprocess", {})
+    return dict(section) if isinstance(section, dict) else {}
+
+
 try:
     STATIC_SPECTRAL_PREDICTOR = StaticSpectralPredictor(STATIC_SPECTRAL_MODEL_PATH)
     STATIC_SPECTRAL_MODEL_ERROR = None
@@ -245,6 +376,7 @@ try:
         DYNAMIC_TEMPORAL_SHADOW_MODEL_PATH,
         DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH,
         runtime_recovery_config=_load_runtime_baseline_recovery_config(),
+        response_level_config=_load_response_level_postprocess_config(),
     )
     DYNAMIC_TEMPORAL_SHADOW_ERROR = None
 except Exception as exc:  # pragma: no cover - exposed through diagnostics
@@ -1375,6 +1507,49 @@ class SenseExportWatcher:
 export_watcher = SenseExportWatcher()
 sense_controller = SenseWindowController()
 sdk_live_reader = BaySpecSdkLiveReader(bridge=bridge, app_root=APP_ROOT)
+PX6D_REFERENCE_CONFIG = _load_px6d_reference_config()
+px6d_reader = Px6dReader(PX6D_REFERENCE_CONFIG)
+
+
+def _px6d_reference_for_record(record: dict[str, Any] | None) -> dict[str, Any]:
+    if not PX6D_REFERENCE_CONFIG.get("enabled", True):
+        return {"ok": False, "status": "disabled"}
+    if not isinstance(record, dict):
+        return {"ok": False, "status": "spectrum_record_missing"}
+    timestamp = record.get("ingested_at")
+    if timestamp is None:
+        timestamp = record.get("timestamp_epoch_sec")
+    if timestamp is None:
+        timestamp = record.get("timestamp")
+    try:
+        timestamp_value = float(timestamp)
+    except (TypeError, ValueError):
+        return {"ok": False, "status": "spectrum_timestamp_missing"}
+    return px6d_reader.synchronized_snapshot(timestamp_value)
+
+
+def _capture_spectrum_frame() -> dict[str, Any]:
+    return bridge.frame(channel_id="P22", trace_limit=1, include_spectrum=True)
+
+
+def _resolve_capture_output_root() -> Path:
+    runtime_override = os.environ.get("TOUCH_CAPTURE_OUTPUT_ROOT")
+    if runtime_override:
+        return Path(runtime_override).expanduser().resolve()
+    configured = Path(str(PX6D_REFERENCE_CONFIG.get("capture_output_directory") or "data/px6d_synchronized"))
+    return configured if configured.is_absolute() else PROJECT_ROOT / configured
+
+
+optical_force_capture = OpticalForceCaptureManager(
+    output_root=_resolve_capture_output_root(),
+    frame_provider=_capture_spectrum_frame,
+    force_provider=_px6d_reference_for_record,
+    force_status_provider=px6d_reader.status,
+    poll_interval_sec=float(PX6D_REFERENCE_CONFIG.get("capture_poll_interval_sec") or 0.05),
+    require_software_tare=bool(
+        PX6D_REFERENCE_CONFIG.get("capture_require_software_tare", True)
+    ),
+)
 
 WAVELENGTH_PLAN_ORDER = ["P11", "P12", "P13", "P21", "P22", "P23", "P31", "P32", "P33"]
 SIMULATED_FBG_WAVELENGTHS = {
@@ -1417,12 +1592,33 @@ COUPLING_EXPLANATION = (
 )
 
 
+def _operator_response_band_thresholds() -> dict[str, float | str]:
+    """Return one validated response-band contract for API and demo logic."""
+
+    raw = BAYSPEC_CHANNEL_CONFIG.get("operator_response_bands", {}) or {}
+    no_contact_max = float(raw.get("no_contact_max_ratio", 0.25))
+    light_max = float(raw.get("light_max_ratio", 0.80))
+    normal_max = float(raw.get("normal_max_ratio", 0.90))
+    if not (0.0 < no_contact_max < light_max < normal_max < 1.0):
+        no_contact_max, light_max, normal_max = 0.25, 0.80, 0.90
+    return {
+        "no_contact_max": no_contact_max,
+        "light_max": light_max,
+        "normal_max": normal_max,
+        "semantics": str(
+            raw.get("semantics")
+            or "uncalibrated_normalized_visual_response_not_force_N"
+        ),
+    }
+
+
 def _response_level_from_shift_ratio(response_ratio: float) -> str:
-    if response_ratio < 0.02:
+    thresholds = _operator_response_band_thresholds()
+    if response_ratio < float(thresholds["no_contact_max"]):
         return "no_contact"
-    if response_ratio < 0.15:
+    if response_ratio < float(thresholds["light_max"]):
         return "small_shift"
-    if response_ratio < 0.50:
+    if response_ratio < float(thresholds["normal_max"]):
         return "moderate_shift"
     return "large_shift"
 
@@ -1475,22 +1671,22 @@ def _array_wavelength_plan_payload() -> dict:
 
 _CENTER_CONTACT_ENVELOPE = (
     # 0.0-0.5 s: light fingertip contact.
-    0.12,
-    0.20,
-    0.26,
-    0.28,
-    0.28,
+    0.30,
+    0.42,
+    0.52,
+    0.56,
+    0.56,
     # 0.5-2.5 s: fully released while the spectrum keeps advancing.
     *((0.0,) * 20),
-    # 2.5-4.5 s: hard contact, including a short in-band onset.
-    0.76,
-    0.86,
-    *((0.92,) * 18),
+    # 2.5-4.5 s: hard contact.
+    0.90,
+    0.90,
+    *((0.94,) * 18),
     # 4.5-5.0 s: smooth final release before the next loop.
-    0.68,
-    0.42,
-    0.20,
-    0.06,
+    0.74,
+    0.48,
+    0.22,
+    0.08,
     0.0,
 )
 
@@ -2324,6 +2520,7 @@ def simulated_array_frame(scenario: str, step: int = 0, coupling_view: str = "ra
         "grid_x": surface["grid_x"],
         "grid_y": surface["grid_y"],
         "surface_metrics": surface["surface_metrics"],
+        "response_band_thresholds": _operator_response_band_thresholds(),
         "surface_note": (
             "simulated mechanically coupled wavelength-shift response, not real measured array data"
         ),
@@ -2344,10 +2541,20 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=FRONTEND_ROOT), name="static")
 
 
+@app.on_event("startup")
+def startup_reference_sources() -> None:
+    if PX6D_REFERENCE_CONFIG.get("enabled", True) and PX6D_REFERENCE_CONFIG.get(
+        "auto_start", True
+    ):
+        px6d_reader.start()
+
+
 @app.on_event("shutdown")
 def shutdown_live_sources() -> None:
+    optical_force_capture.stop()
     sdk_live_reader.stop()
     export_watcher.stop()
+    px6d_reader.stop()
 
 
 @app.get("/")
@@ -2379,6 +2586,7 @@ def health() -> dict:
         "static_spectral_fallback_available": STATIC_SPECTRAL_PREDICTOR is not None,
         "position_output_semantics": "approximate_manual_fingertip_contact_region",
         "response_level_semantics": "approximate_manual_light_normal_hard_not_force_N",
+        "response_band_thresholds": _operator_response_band_thresholds(),
         "not_pd_voltage": True,
         "calibrated_physical_output": False,
         "trained_static_spectral_model": _static_spectral_model_status(),
@@ -2389,12 +2597,88 @@ def health() -> dict:
         "export_watcher": export_watcher.status(),
         "sdk_live": sdk_live_reader.status(),
         "sense_control": sense_controller.status(),
+        "px6d_reference": px6d_reader.status(),
+        "optical_force_capture": optical_force_capture.status(),
     }
 
 
 @app.get("/api/status")
 def status() -> dict:
-    return bridge.status()
+    result = bridge.status()
+    result["px6d_reference"] = px6d_reader.status()
+    result["optical_force_capture"] = optical_force_capture.status()
+    return result
+
+
+@app.get("/api/px6d/status")
+def px6d_status() -> dict:
+    return {"ok": True, "mode": "px6d_reference_force", **px6d_reader.status()}
+
+
+@app.post("/api/px6d/start")
+def px6d_start() -> dict:
+    status_payload = px6d_reader.start()
+    return {"ok": True, "mode": "px6d_reference_force", **status_payload}
+
+
+@app.post("/api/px6d/stop")
+def px6d_stop() -> dict:
+    status_payload = px6d_reader.stop()
+    return {"ok": True, "mode": "px6d_reference_force", **status_payload}
+
+
+@app.post("/api/px6d/tare")
+def px6d_tare(duration_sec: float = Query(default=1.0, ge=0.25, le=5.0)) -> dict:
+    result = px6d_reader.tare(duration_sec=duration_sec)
+    result.update(
+        {
+            "mode": "px6d_software_tare",
+            "hardware_calibration_command_used": False,
+        }
+    )
+    return result
+
+
+@app.get("/api/px6d/latest")
+def px6d_latest() -> dict:
+    result = px6d_reader.latest()
+    result["sample_ready"] = bool(result.pop("ok", False))
+    result["ok"] = True
+    result["mode"] = "px6d_reference_force"
+    return result
+
+
+@app.get("/api/px6d/trace")
+def px6d_trace(limit: int = Query(default=500, ge=1, le=20000)) -> dict:
+    result = px6d_reader.trace(limit=limit)
+    result["mode"] = "px6d_reference_force_trace"
+    return result
+
+
+@app.get("/api/px6d_capture/status")
+def px6d_capture_status() -> dict:
+    return {"ok": True, "mode": "optical_px6d_synchronized_capture", **optical_force_capture.status()}
+
+
+@app.post("/api/px6d_capture/start")
+async def px6d_capture_start(request: Request) -> dict:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    result = optical_force_capture.start(
+        position_label=str(payload.get("position_label") or "unlabeled"),
+        action_label=str(payload.get("action_label") or "unlabeled"),
+        trial_id=str(payload.get("trial_id") or "trial_001"),
+        operator_note=str(payload.get("operator_note") or ""),
+    )
+    return {"mode": "optical_px6d_synchronized_capture", **result}
+
+
+@app.post("/api/px6d_capture/stop")
+def px6d_capture_stop() -> dict:
+    result = optical_force_capture.stop()
+    return {"mode": "optical_px6d_synchronized_capture", **result}
 
 
 @app.get("/api/shadow/session_level_calibration")
@@ -2827,6 +3111,10 @@ def frame(
     result["export_watcher"] = export_watcher.status()
     result["sdk_live"] = sdk_live_reader.status()
     result["sense_control"] = sense_controller.status()
+    result["response_band_thresholds"] = _operator_response_band_thresholds()
+    result["px6d_reference"] = _px6d_reference_for_record(result.get("latest"))
+    result["px6d_status"] = px6d_reader.status()
+    result["optical_force_capture"] = optical_force_capture.status()
     return result
 
 
@@ -3144,10 +3432,14 @@ def global_spectrum_frame(
             "trained_static_spectral_shadow_prediction": static_shadow_prediction,
             "dynamic_temporal_shadow": dynamic_temporal_shadow,
             "dynamic_temporal_display": dynamic_temporal_display,
+            "response_band_thresholds": _operator_response_band_thresholds(),
             "blockers": global_frame_qa.get("blockers", []),
             "export_watcher": watcher_status,
             "sdk_live": sdk_status,
             "sense_control": sense_controller.status(),
+            "px6d_reference": _px6d_reference_for_record(result.get("latest")),
+            "px6d_status": px6d_reader.status(),
+            "optical_force_capture": optical_force_capture.status(),
         }
     )
     return result
@@ -3216,6 +3508,7 @@ def array_demo_frame(
         "array_frame": frame,
         "surface_grid": frame.get("surface_grid"),
         "surface_note": frame.get("surface_note"),
+        "response_band_thresholds": _operator_response_band_thresholds(),
         "message": (
             "mechanically coupled wavelength-shift simulation, not real calibrated 3x3 data"
         ),

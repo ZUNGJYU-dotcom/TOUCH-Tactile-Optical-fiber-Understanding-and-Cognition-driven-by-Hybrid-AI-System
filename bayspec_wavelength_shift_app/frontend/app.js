@@ -56,9 +56,6 @@ const settingsCloseButton = document.getElementById("settingsCloseButton");
 const settingsThumbHolderButton = document.getElementById("settingsThumbHolderButton");
 const settingsSurfaceOnlyButton = document.getElementById("settingsSurfaceOnlyButton");
 const settingsResetCameraButton = document.getElementById("settingsResetCameraButton");
-const settingsOperatorModeButton = document.getElementById("settingsOperatorModeButton");
-const settingsDiagnosticsModeButton = document.getElementById("settingsDiagnosticsModeButton");
-const settingsSpectrumButton = document.getElementById("settingsSpectrumButton");
 const settingsTemporalValidationButton = document.getElementById("settingsTemporalValidationButton");
 const settingsStaticFallbackButton = document.getElementById("settingsStaticFallbackButton");
 const operatorDiagnosticsButton = document.getElementById("operatorDiagnosticsButton");
@@ -70,22 +67,79 @@ const operatorAlert = document.getElementById("operatorAlert");
 const operatorAlertSeverity = document.getElementById("operatorAlertSeverity");
 const operatorAlertMessage = document.getElementById("operatorAlertMessage");
 const operatorAlertDiagnosticsButton = document.getElementById("operatorAlertDiagnosticsButton");
+const px6dTareButton = document.getElementById("px6dTareButton");
+const diagnosticPx6dTareButton = document.getElementById("diagnosticPx6dTareButton");
+const px6dCapturePosition = document.getElementById("px6dCapturePosition");
+const px6dCaptureAction = document.getElementById("px6dCaptureAction");
+const px6dCaptureTrial = document.getElementById("px6dCaptureTrial");
+const px6dCaptureNote = document.getElementById("px6dCaptureNote");
+const px6dCaptureStartButton = document.getElementById("px6dCaptureStartButton");
+const px6dCaptureStopButton = document.getElementById("px6dCaptureStopButton");
 const diagnosticAccordionCards = Array.from(
   document.querySelectorAll(".right-panel details.diagnostic-card, .right-panel > details.demo-module")
 );
 const diagnosticTabButtons = Array.from(document.querySelectorAll("[data-diagnostic-tab]"));
 const diagnosticGroupedCards = Array.from(document.querySelectorAll("[data-diagnostic-group]"));
 let spectrumDrawerOpener = null;
+let settingsPanelOpener = null;
+
+function refreshLucideIcons() {
+  if (!window.lucide?.createIcons) return;
+  window.lucide.createIcons({
+    attrs: {
+      "aria-hidden": "true",
+      focusable: "false",
+      "stroke-width": 1.8,
+    },
+  });
+  document.documentElement.classList.add("lucide-ready");
+}
+
+function setCommandButtonLabel(button, label) {
+  if (!button) return;
+  const labelNode = button.querySelector(".command-label");
+  if (labelNode) labelNode.textContent = label;
+  else button.textContent = label;
+}
+
+function setCommandButtonDescription(button, label, tooltip = label) {
+  if (!button) return;
+  setCommandButtonLabel(button, label);
+  button.setAttribute("aria-label", label);
+  button.dataset.tooltip = tooltip;
+}
+
+refreshLucideIcons();
 
 const DEMO_BASELINE = 42000;
 const DEMO_TARGET_WAVELENGTH_NM = 1546.7124;
 const DEMO_BASELINE_WAVELENGTH_NM = 1546.89;
 const WAVELENGTH_SHIFT_FULL_SCALE_PM = 500;
-const RESPONSE_BAND_THRESHOLDS = Object.freeze({
-  noContactMax: 0.03,
-  smallMax: 0.34,
-  moderateMax: 0.70,
-});
+const RESPONSE_BAND_THRESHOLDS = {
+  noContactMax: 0.25,
+  smallMax: 0.80,
+  moderateMax: 0.90,
+};
+const COUPLED_CHANNEL_VISIBILITY_THRESHOLD = 0.05;
+
+function applyResponseBandThresholds(raw = {}) {
+  const noContactMax = Number(raw?.no_contact_max);
+  const smallMax = Number(raw?.light_max);
+  const moderateMax = Number(raw?.normal_max);
+  if (
+    Number.isFinite(noContactMax) &&
+    Number.isFinite(smallMax) &&
+    Number.isFinite(moderateMax) &&
+    0 < noContactMax &&
+    noContactMax < smallMax &&
+    smallMax < moderateMax &&
+    moderateMax < 1
+  ) {
+    RESPONSE_BAND_THRESHOLDS.noContactMax = noContactMax;
+    RESPONSE_BAND_THRESHOLDS.smallMax = smallMax;
+    RESPONSE_BAND_THRESHOLDS.moderateMax = moderateMax;
+  }
+}
 const DEMO_PRESETS = {
   no_contact: { label: "no_contact", intensity: 40000, shiftPm: 0, description: "stable Bragg wavelength baseline" },
   light_press: { label: "small_shift", intensity: 40000, shiftPm: 55, description: "small Bragg wavelength shift" },
@@ -131,6 +185,8 @@ const DEMO_TRACE_WINDOW_POINTS = 80;
 // 0.4 s. Polling at 25 Hz only redrew identical spectra and made the desktop UI
 // contend with model inference. Animation remains requestAnimationFrame-based.
 const LIVE_MODEL_POLL_INTERVAL_MS = 160;
+const PX6D_UI_POLL_INTERVAL_MS = 100;
+const PX6D_CAPTURE_POLL_INTERVAL_MS = 500;
 const RECOGNITION_MODE_STORAGE_KEY = "touch-recognition-mode";
 const ARRAY_DISPLAY_ROWS = [
   ["P11", "P21", "P31"],
@@ -286,7 +342,13 @@ function trainedStaticModelSurface(prediction) {
       respondingChannels: [],
     };
   }
-  const peakByForce = { light: 0.28, normal: 0.58, hard: 0.92 };
+  // Keep the trained label, response marker, color band, and deformation on
+  // one contract even when the operator thresholds are tuned in config.
+  const peakByForce = {
+    light: 0.5 * (RESPONSE_BAND_THRESHOLDS.noContactMax + RESPONSE_BAND_THRESHOLDS.smallMax),
+    normal: 0.5 * (RESPONSE_BAND_THRESHOLDS.smallMax + RESPONSE_BAND_THRESHOLDS.moderateMax),
+    hard: 0.5 * (RESPONSE_BAND_THRESHOLDS.moderateMax + 1.0),
+  };
   const peak = peakByForce[forceLevel] ?? Math.max(0.08, Math.min(1, Number(twin.deformation_proxy) || 0));
   const providedGrid = Array.isArray(twin.surface_grid) && twin.surface_grid.length === 3
     ? twin.surface_grid.map((row) => (Array.isArray(row) ? row.map((value) => Math.max(0, Math.min(1, Number(value) || 0))) : []))
@@ -890,6 +952,12 @@ const state = {
   lastCommittedFrameRequest: 0,
   frameRequestInFlight: false,
   forcedFrameRequestQueued: false,
+  px6dRequestInFlight: false,
+  px6dLatest: null,
+  px6dAligned: null,
+  px6dOpticalFrame: null,
+  px6dCaptureRequestInFlight: false,
+  px6dCaptureStatus: null,
 };
 
 let scene;
@@ -921,6 +989,211 @@ function setText(id, value) {
   if (element) {
     element.textContent = value;
   }
+}
+
+function updatePx6dPanel(payload = {}) {
+  if (Object.prototype.hasOwnProperty.call(payload, "px6d_reference")) {
+    state.px6dAligned = payload?.px6d_reference || null;
+    const latest = payload?.latest;
+    state.px6dOpticalFrame = latest && typeof latest === "object"
+      ? {
+          frameId: latest.frame_id ?? "--",
+          timestamp: latest.ingested_at ?? latest.timestamp_epoch_sec ?? latest.timestamp ?? null,
+          source: latest.source || "optical spectrum",
+        }
+      : null;
+  }
+  const status = payload?.px6d_status || payload?.status || state.px6dLatest?.status || {};
+  const pair = state.px6dAligned;
+  const aligned = pair?.ok === true ? pair : null;
+  const sample = payload?.sample || state.px6dLatest?.sample || null;
+  const mechanicalSource = aligned || sample || {};
+  const zeroed = mechanicalSource?.zeroed || {};
+  const mechanical = mechanicalSource?.mechanical || {};
+  const referenceValue = Number(
+    aligned?.reference_fz_display_n ??
+    sample?.filtered_reference_fz_n ??
+    sample?.reference_fz_display_n
+  );
+  const rawFz = Number(aligned?.raw?.fz_n ?? sample?.raw?.fz_n);
+  const connected = status?.connected === true;
+  const tareReady = Boolean(aligned?.tare_ready ?? sample?.tare_ready ?? status?.tare_ready);
+  const sampleAge = Number(status?.last_sample_age_sec);
+  const fresh = connected && Number.isFinite(sampleAge) && sampleAge < 0.5;
+  const stateLabel = !connected
+    ? "offline"
+    : !tareReady
+      ? "tare required"
+      : fresh
+        ? "ready"
+        : "stale";
+  const stateTone = connected && tareReady && fresh ? "ready" : "warning";
+
+  setText("px6dReferenceFz", Number.isFinite(referenceValue) ? `${Math.max(0, referenceValue).toFixed(2)} N` : "-- N");
+  setText("px6dReferenceStatus", stateLabel);
+  const statusElement = document.getElementById("px6dReferenceStatus");
+  if (statusElement) statusElement.dataset.state = stateTone;
+  [px6dTareButton, diagnosticPx6dTareButton].forEach((button) => {
+    if (button) button.disabled = !connected || state.commandPending !== null;
+  });
+
+  setText("diagnosticPx6dConnection", connected ? `${status.port || "COM3"} · connected` : `${status.port || "COM3"} · offline`);
+  setText("diagnosticPx6dFirmware", `Firmware ${status?.firmware_version || "--"}`);
+  setText("diagnosticPx6dRawFz", Number.isFinite(rawFz) ? `${rawFz.toFixed(3)} N` : "--");
+  setText("diagnosticPx6dReferenceFz", Number.isFinite(referenceValue) ? `${referenceValue.toFixed(3)} N` : "-- N");
+  const axisSpecs = [
+    ["diagnosticPx6dFx", zeroed?.fx_n, 3],
+    ["diagnosticPx6dFy", zeroed?.fy_n, 3],
+    ["diagnosticPx6dFz", zeroed?.fz_n, 3],
+    ["diagnosticPx6dMx", zeroed?.mx_nm, 4],
+    ["diagnosticPx6dMy", zeroed?.my_nm, 4],
+    ["diagnosticPx6dMz", zeroed?.mz_nm, 4],
+  ];
+  axisSpecs.forEach(([id, value, digits]) => {
+    const numeric = Number(value);
+    setText(id, Number.isFinite(numeric) ? numeric.toFixed(digits) : "--");
+  });
+  const derivedSpecs = [
+    ["diagnosticPx6dForceResultant", mechanical?.force_resultant_n, "N", 3],
+    ["diagnosticPx6dShearResultant", mechanical?.shear_resultant_n, "N", 3],
+    ["diagnosticPx6dMomentResultant", mechanical?.moment_resultant_nm, "N·m", 4],
+    ["diagnosticPx6dUtilization", mechanical?.peak_utilization_percent, "%", 1],
+  ];
+  derivedSpecs.forEach(([id, value, unit, digits]) => {
+    const numeric = Number(value);
+    setText(id, Number.isFinite(numeric) ? `${numeric.toFixed(digits)} ${unit}` : `-- ${unit}`);
+  });
+  const utilizationElement = document.getElementById("diagnosticPx6dUtilization");
+  if (utilizationElement) utilizationElement.dataset.healthTone = mechanical?.utilization_status === "warning" ? "warning" : "ok";
+  setText("diagnosticPx6dTareStatus", tareReady ? "ready" : status?.tare_status || sample?.tare_status || "required");
+  const tareNoise = Number(aligned?.tare_fz_std_n ?? sample?.tare_fz_std_n ?? status?.tare_fz_std_n);
+  setText("diagnosticPx6dTareNoise", Number.isFinite(tareNoise) ? `${tareNoise.toFixed(4)} N` : "--");
+  const observedRate = Number(status?.observed_sample_hz);
+  setText("diagnosticPx6dSampleRate", Number.isFinite(observedRate) ? `${observedRate.toFixed(1)} Hz` : "--");
+  setText("diagnosticPx6dSampleAge", Number.isFinite(sampleAge) ? `${(sampleAge * 1000).toFixed(0)} ms` : "--");
+  setText("diagnosticPx6dCompressionSign", Number(status?.compression_sign) < 0 ? "raw −Fz = compression" : "raw +Fz = compression");
+  const forceRange = Number(status?.force_full_scale_per_axis_n);
+  const momentRange = Number(status?.moment_full_scale_per_axis_nm);
+  setText("diagnosticPx6dForceRange", Number.isFinite(forceRange) ? `±${forceRange.toFixed(0)} N / axis` : "--");
+  setText("diagnosticPx6dMomentRange", Number.isFinite(momentRange) ? `±${momentRange.toFixed(1)} N·m / axis` : "--");
+
+  const syncOffset = Number(pair?.sync_offset_ms);
+  const syncQuality = aligned?.sync_quality || (state.px6dOpticalFrame ? "not paired" : "waiting");
+  const syncQualityElement = document.getElementById("diagnosticPx6dSyncQuality");
+  if (syncQualityElement) {
+    syncQualityElement.textContent = syncQuality;
+    syncQualityElement.dataset.syncTone = aligned?.sync_quality || "waiting";
+  }
+  setText("diagnosticPx6dSyncOffset", Number.isFinite(syncOffset) ? `${syncOffset.toFixed(1)} ms` : "-- ms");
+  setText("diagnosticOpticalFrameId", state.px6dOpticalFrame ? String(state.px6dOpticalFrame.frameId ?? "--") : "NO FRAME");
+  const sequenceStart = Number(aligned?.force_sequence_start);
+  const sequenceEnd = Number(aligned?.force_sequence_end);
+  setText(
+    "diagnosticForceFrameId",
+    Number.isFinite(sequenceStart)
+      ? sequenceStart === sequenceEnd
+        ? `#${sequenceStart}`
+        : `#${sequenceStart}–${sequenceEnd}`
+      : sample?.sequence_id
+        ? `#${sample.sequence_id}`
+        : "--"
+  );
+  setText("diagnosticPx6dSyncMethod", aligned?.sync_method || "--");
+  setText("diagnosticPx6dSyncSamples", Number.isFinite(Number(aligned?.sample_count)) ? String(aligned.sample_count) : "--");
+  const syncNote = aligned
+    ? `Paired by host timestamp. ${syncQuality} alignment at ${Math.abs(syncOffset).toFixed(1)} ms; PX6D remains an external reference.`
+    : state.px6dOpticalFrame
+      ? `Optical frame present, but force pairing is unavailable: ${pair?.status || "force frame missing"}.`
+      : "Waiting for an optical spectrum frame. PX6D can continue independently.";
+  setText("diagnosticPx6dSync", syncNote);
+  setText(
+    "diagnosticPx6dError",
+    status?.last_error || (tareReady ? "software zero ready; raw six-axis values retained" : "stable no-load zero pending")
+  );
+}
+
+async function fetchPx6dReference() {
+  if (state.px6dRequestInFlight) return;
+  state.px6dRequestInFlight = true;
+  try {
+    const payload = await requestJSON("/api/px6d/latest", { cache: "no-store" }, { timeoutMs: 1200 });
+    state.px6dLatest = payload;
+    updatePx6dPanel(payload);
+  } catch (error) {
+    updatePx6dPanel({
+      status: {
+        connected: false,
+        port: "COM3",
+        last_error: commandErrorMessage(error, "PX6D reference unavailable"),
+      },
+    });
+  } finally {
+    state.px6dRequestInFlight = false;
+  }
+}
+
+function updatePx6dCapturePanel(payload = {}) {
+  state.px6dCaptureStatus = payload;
+  const running = payload?.running === true;
+  const captured = Number(payload?.captured_paired_frames || 0);
+  const ratioValue = payload?.paired_frame_ratio;
+  const ratio = ratioValue === null || ratioValue === undefined ? NaN : Number(ratioValue);
+  const syncOffset = Number(payload?.last_sync_offset_ms);
+  setText("px6dCaptureStatus", String(payload?.capture_status || "idle").replaceAll("_", " "));
+  setText("px6dCaptureFrames", String(captured));
+  setText("px6dCaptureRatio", Number.isFinite(ratio) ? `${(ratio * 100).toFixed(1)}%` : "--");
+  setText(
+    "px6dCaptureLastSync",
+    payload?.last_sync_quality
+      ? `${payload.last_sync_quality} · ${Number.isFinite(syncOffset) ? `${syncOffset.toFixed(1)} ms` : "--"}`
+      : "--"
+  );
+  const output = payload?.output_directory;
+  setText(
+    "px6dCaptureOutput",
+    output
+      ? `Output: ${output}${payload?.last_error ? ` · ${payload.last_error}` : ""}`
+      : payload?.last_error || "Output appears here after recording starts."
+  );
+  const locked = running || state.px6dCaptureRequestInFlight;
+  [px6dCapturePosition, px6dCaptureAction, px6dCaptureTrial, px6dCaptureNote].forEach((control) => {
+    if (control) control.disabled = locked;
+  });
+  if (px6dCaptureStartButton) px6dCaptureStartButton.disabled = locked;
+  if (px6dCaptureStopButton) px6dCaptureStopButton.disabled = !running || state.px6dCaptureRequestInFlight;
+}
+
+async function fetchPx6dCaptureStatus() {
+  if (state.px6dCaptureRequestInFlight) return;
+  try {
+    const payload = await requestJSON("/api/px6d_capture/status", { cache: "no-store" }, { timeoutMs: 1200 });
+    updatePx6dCapturePanel(payload);
+  } catch (error) {
+    updatePx6dCapturePanel({
+      ...(state.px6dCaptureStatus || {}),
+      running: false,
+      capture_status: "capture API unavailable",
+      last_error: commandErrorMessage(error, "capture API unavailable"),
+    });
+  }
+}
+
+function setCompactMetric(id, compactValue, fullValue = compactValue) {
+  const element = document.getElementById(id);
+  if (!element) return;
+  const compact = compactValue === null || compactValue === undefined ? "--" : String(compactValue);
+  const full = fullValue === null || fullValue === undefined ? compact : String(fullValue);
+  element.textContent = compact;
+  element.title = full !== compact ? full : "";
+  element.setAttribute("aria-label", full);
+}
+
+function formatCompactNumber(value, digits = 1, signed = false) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  const prefix = signed && number > 0 ? "+" : "";
+  const fixed = number.toFixed(digits).replace(/\.0+$/, "");
+  return `${prefix}${fixed}`;
 }
 
 function setHealthState(id, value, tone = "neutral") {
@@ -1015,11 +1288,7 @@ function normalizedSurfaceResponseRatio(surfaceMetrics = {}, record = null) {
 
 function operatorQaLabel(value, record = {}) {
   const status = String(value || "").trim();
-  const manual =
-    record?.peak_source === "manual_measured_wavelength_override" ||
-    record?.measured_wavelength_status === "provisional_manual" ||
-    status === "ok_with_manual_wavelength";
-  if (status === "stale_frame") return "Stale frame";
+  if (status === "stale_frame") return "STALE";
   if (
     !status ||
     status === "ok" ||
@@ -1028,13 +1297,12 @@ function operatorQaLabel(value, record = {}) {
     status === "ok_with_manual_wavelength" ||
     status === "model_baseline_ready"
   ) {
-    return manual ? "OK · manual λ" : "OK";
+    return "OK";
   }
-  if (status.includes("baseline_required")) return "Baseline required";
-  if (status === "model_low_confidence_warning") return "Model confidence warning";
-  if (status === "warning") return "Warning";
-  if (status === "invalid") return "Review";
-  return status.replace(/_/g, " ");
+  if (status.includes("baseline_required")) return "BASELINE";
+  if (status === "model_low_confidence_warning") return "REVIEW";
+  if (status === "warning") return "CHECK";
+  return "REVIEW";
 }
 
 function operatorFreshnessLabel(value) {
@@ -1051,7 +1319,7 @@ function acquisitionDisplayState(watcher = {}, sdkLive = {}) {
   if (state.demoModeActive) {
     const operatorMode = state.displayMode === "operator";
     return {
-      label: operatorMode ? "Local response" : state.arrayDemoActive ? "Demo · 3×3" : "Demo · legacy P22",
+      label: operatorMode ? "LOCAL" : state.arrayDemoActive ? "Demo · 3×3" : "Demo · legacy P22",
       short: operatorMode ? "LOCAL" : "DEMO",
       tone: "demo",
       detail: operatorMode ? "Local synchronized response scenario" : "Simulated Bragg wavelength response",
@@ -1277,6 +1545,11 @@ function updateOperatorAlert(context) {
     "aria-label",
     diagnosticsAttention ? "Diagnostics, attention required" : "Diagnostics"
   );
+  if (operatorDiagnosticsButton) {
+    operatorDiagnosticsButton.dataset.tooltip = diagnosticsAttention
+      ? "Diagnostics · attention"
+      : "Diagnostics";
+  }
   if (operatorAlert) {
     operatorAlert.classList.remove("visible");
     operatorAlert.setAttribute("aria-hidden", "true");
@@ -1734,6 +2007,10 @@ function setChartTargets(trace, record) {
 
 function drawVisibleCharts() {
   drawTrace(state.smoothTraceRecords);
+  // The compact Operator preview is independent from the full spectrum drawer.
+  // Keep it live at all times while the heavier overview/zoom canvases remain
+  // gated behind Diagnostics or the explicitly opened drawer.
+  drawOpticalPreview(state.smoothSpectrumRecord);
   const diagnosticsVisible = state.displayMode === "diagnostics";
   const spectrumVisible = diagnosticsVisible || spectrumDrawer?.classList.contains("open");
   if (spectrumVisible) {
@@ -1864,9 +2141,19 @@ function updateTraceKpis(records) {
     : Number.NaN;
   const peak = measurementAvailable && values.length ? Math.max(...values.map(Math.abs)) : Number.NaN;
 
-  const unit = modelResponseTrace ? "%" : " pm";
-  setText("traceCurrentValue", Number.isFinite(current) ? `${current.toFixed(1)}${unit}` : "--");
-  setText("tracePeakValue", Number.isFinite(peak) ? `${peak.toFixed(1)}${unit}` : "--");
+  const unit = modelResponseTrace ? "%" : "pm";
+  setText("traceCurrentLabel", `Now · ${unit}`);
+  setText("tracePeakLabel", `Peak · ${unit}`);
+  setCompactMetric(
+    "traceCurrentValue",
+    formatCompactNumber(current, Math.abs(current) >= 100 ? 0 : 1),
+    Number.isFinite(current) ? `${current.toFixed(1)} ${unit}` : "--"
+  );
+  setCompactMetric(
+    "tracePeakValue",
+    formatCompactNumber(peak, Math.abs(peak) >= 100 ? 0 : 1),
+    Number.isFinite(peak) ? `${peak.toFixed(1)} ${unit}` : "--"
+  );
 
   if (!measurementAvailable) {
     setText("traceHistoryValue", "IDLE");
@@ -1904,14 +2191,14 @@ function drawTrace(records) {
         ? plotRecords.some((item) => Number.isFinite(Number(item?.trained_model_visual_response_ratio)))
           ? "Collecting model response history"
           : "Collecting Δλ history"
-        : "No wavelength frame",
+        : "No response history",
       18,
       30
     );
     if (!frameHasMeasurement(state.frame)) {
       ctx.font = "9px system-ui, sans-serif";
       ctx.fillStyle = useDarkCanvas() ? "#55768d" : "#8a9cab";
-      ctx.fillText("Start Live, Watch, or Response", 18, 47);
+      ctx.fillText("IDLE", 18, 47);
     }
     return;
   }
@@ -2320,9 +2607,8 @@ function drawOpticalPreview(record) {
 
   const { xValues, intensity, axisIsPixel } = spectrumArrays(record);
   if (!xValues.length || xValues.length !== intensity.length) {
-    ctx.fillStyle = darkCanvas ? "#7fa8bd" : "#71889d";
-    ctx.font = "10px system-ui, sans-serif";
-    ctx.fillText("No spectrum frame", 10, 22);
+    // The state-driven DOM overlay owns the concise no-frame message. Keep
+    // only the grid in the canvas so empty-state text is never duplicated.
     return;
   }
 
@@ -3497,6 +3783,13 @@ function applySurfaceFullscreenState(active) {
   surfaceFullscreenButton?.classList.toggle("active", state.surfaceFullscreenActive);
   surfaceFullscreenButton?.setAttribute("aria-pressed", String(state.surfaceFullscreenActive));
   surfaceFullscreenButton?.setAttribute(
+    "aria-label",
+    state.surfaceFullscreenActive ? "Exit tactile surface fullscreen" : "Enter tactile surface fullscreen"
+  );
+  if (surfaceFullscreenButton) {
+    surfaceFullscreenButton.dataset.tooltip = state.surfaceFullscreenActive ? "Exit fullscreen" : "Fullscreen";
+  }
+  surfaceFullscreenButton?.setAttribute(
     "title",
     state.surfaceFullscreenActive
       ? "Press Esc to exit full-screen tactile surface"
@@ -4094,12 +4387,13 @@ function updateChannelSelectorLabels(channels) {
   });
 }
 
-const DIAGNOSTIC_WORKSPACES = new Set(["signal", "surface", "demo", "acquisition", "geometry"]);
+const DIAGNOSTIC_WORKSPACES = new Set(["signal", "surface", "demo", "acquisition", "reference", "geometry"]);
 const DIAGNOSTIC_DEFAULT_CARD = {
   signal: ".diagnostic-channel-card",
   surface: ".diagnostic-metrics-card",
   demo: ".demo-module",
   acquisition: ".diagnostic-frame-card",
+  reference: ".diagnostic-reference-card",
   geometry: ".diagnostic-alignment-card",
 };
 
@@ -4123,6 +4417,7 @@ function updateDiagnosticWorkspace(workspace) {
   }
   const cardStack = document.querySelector(".diagnostic-card-stack");
   if (state.displayMode === "diagnostics" && cardStack) {
+    cardStack.classList.toggle("diagnostic-stack-empty", nextWorkspace === "demo");
     cardStack.scrollTop = 0;
   }
   if (nextWorkspace === "geometry") {
@@ -4140,8 +4435,6 @@ function updateDisplayMode(mode) {
   appShell?.classList.toggle("operator-mode", state.displayMode !== "diagnostics");
   operatorModeButton?.classList.toggle("active", state.displayMode === "operator");
   diagnosticsModeButton?.classList.toggle("active", state.displayMode === "diagnostics");
-  settingsOperatorModeButton?.classList.toggle("active", state.displayMode === "operator");
-  settingsDiagnosticsModeButton?.classList.toggle("active", state.displayMode === "diagnostics");
   if (scene) {
     scene.background = new THREE.Color("#fafdff");
   }
@@ -4249,11 +4542,11 @@ function updateArrayDiagnostics(arrayFrame, record, measurementAvailable = true)
   setText(
     "surfaceRuleSource",
     mode === "simulated_array_demo"
-      ? "coupled response"
+      ? "coupled"
       : trainedStaticMode
-        ? "trained spectrum model"
+        ? "coupled"
       : globalSpectrumMode
-        ? "global mixed spectral fingerprint"
+        ? "coupled"
       : fallbackLike
         ? "P22 fallback"
         : arrayFrame?.coupling_view
@@ -4338,7 +4631,7 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
   const dominantCandidateId = surfaceMetrics?.contact_evidence_passed
     ? dominantGlobalCandidate(record)?.candidate_id || null
     : null;
-  setText("footprintTitle", globalCandidateView ? "GLOBAL FBG FINGERPRINT" : "CONTACT FOOTPRINT");
+  setText("footprintTitle", globalCandidateView ? "Global FBG Fingerprint" : "Contact Footprint");
   const fallbackLike = !arrayFrame || ["p22_fallback", "single_point_p22", "no_valid_channel", ""].includes(String(arrayFrame.mode || ""));
   const globalEventPeakShiftPm = Number(surfaceMetrics?.global_event_absolute_shift_pm ?? record?.absolute_shift_pm);
   const responseBlockReason = String(record?.response_block_reason || "");
@@ -4355,7 +4648,8 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
     : Number.NaN;
   const hasActiveSurfaceResponse =
     Number.isFinite(peak) && peak >= RESPONSE_BAND_THRESHOLDS.noContactMax;
-  const responding = [];
+  const contactChannels = [];
+  const coupledNeighborChannels = [];
   for (const id of channelIds) {
     const cell = document.getElementById(`footprint${id}`);
     if (!cell) continue;
@@ -4370,9 +4664,15 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
       : Number.NaN;
     if (!Number.isFinite(value)) value = fallbackLike && id === "P22" ? peak : NaN;
     value = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : NaN;
-    const active = Number.isFinite(value) && value >= 0.05;
-    if (active) responding.push(id);
+    const active = Number.isFinite(value) && value >= RESPONSE_BAND_THRESHOLDS.noContactMax;
+    const coupledNeighbor =
+      Number.isFinite(value) &&
+      value >= COUPLED_CHANNEL_VISIBILITY_THRESHOLD &&
+      !active;
+    if (active) contactChannels.push(id);
+    else if (coupledNeighbor) coupledNeighborChannels.push(id);
     cell.classList.toggle("active", active);
+    cell.classList.toggle("coupled-neighbor", coupledNeighbor);
     cell.classList.toggle(
       "dominant",
       hasActiveSurfaceResponse && (
@@ -4385,6 +4685,12 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
     if (title) title.textContent = id;
     const label = cell.querySelector("span");
     if (label) label.textContent = Number.isFinite(value) ? formatPercent(value, 0) : "--";
+    cell.setAttribute(
+      "aria-label",
+      Number.isFinite(value)
+        ? `${id}, ${formatPercent(value, 0)} response, ${active ? "above contact threshold" : coupledNeighbor ? "coupled neighbor below contact threshold" : "below response threshold"}`
+        : `${id}, no response value`
+    );
     if (Number.isFinite(value)) {
       const color = colorForAttenuation(value);
       const alpha = 0.16 + 0.58 * Math.min(1, value);
@@ -4420,21 +4726,39 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
       ? `${trainedForce}_press`
       : "no_contact"
     : responseLevelFromSurfaceValue(peak);
-  setText(
-    "responseBandValue",
-    measurementAvailable
-      ? trainedPrediction
-        ? `${levelLabel(responseBandLevel)} · ${activeModelDisplayName(record, arrayFrame)} · ${formatPercent(peak, 0)} visual response${heldMeasurement ? " · held" : ""}`
-        : `${levelLabel(responseBandLevel)} · ${formatPercent(peak, 0)} normalized · ${formatPm(globalCandidateView ? globalEventPeakShiftPm : arrayFrame?.peak_wavelength_shift_pm ?? record?.absolute_shift_pm, 1)} event peak |Δλ|${heldMeasurement ? " · held" : ""}`
-      : unavailableResponseText
-  );
-  let note = "raw coupled wavelength response";
-  if (!measurementAvailable) note = unavailableResponseText;
-  else if (heldMeasurement) note = "Last frame held; acquisition stopped";
+  const responseBandValue = document.getElementById("responseBandValue");
+  const compactResponseBandText = measurementAvailable
+    ? `${levelLabel(responseBandLevel)} · ${formatPercent(peak, 0)} response${heldMeasurement ? " · held" : ""}`
+    : unavailableResponseText;
+  setText("responseBandValue", compactResponseBandText);
+  if (responseBandValue) {
+    const eventPeakShift = globalCandidateView
+      ? globalEventPeakShiftPm
+      : arrayFrame?.peak_wavelength_shift_pm ?? record?.absolute_shift_pm;
+    const evidenceDetail = trainedPrediction
+      ? `${activeModelDisplayName(record, arrayFrame)}; ${formatPercent(peak, 0)} normalized visual response`
+      : `${formatPercent(peak, 0)} normalized response; ${formatPm(eventPeakShift, 1)} event peak |Δλ|`;
+    responseBandValue.title = measurementAvailable ? evidenceDetail : unavailableResponseText;
+    responseBandValue.setAttribute(
+      "aria-label",
+      measurementAvailable ? `${compactResponseBandText}. ${evidenceDetail}` : unavailableResponseText
+    );
+  }
+  let note = "raw coupled response";
+  let noteDetail = "Raw coupled wavelength response";
+  if (!measurementAvailable) note = noteDetail = unavailableResponseText;
+  else if (heldMeasurement) note = noteDetail = "Last frame held; acquisition stopped";
   else if (arrayMode === "simulated_array_demo") {
-    note = responding.length
-      ? `${responding.length} responding ${responding.length === 1 ? "pixel" : "pixels"}, single-finger patch`
-      : "No responding pixels · baseline / recovery";
+    note = contactChannels.length
+      ? `${contactChannels.length} contact · ${coupledNeighborChannels.length} coupled`
+      : coupledNeighborChannels.length
+        ? `Below threshold · ${coupledNeighborChannels.length} coupled`
+        : "No active channels";
+    noteDetail = contactChannels.length
+      ? `${contactChannels.length} ${contactChannels.length === 1 ? "channel" : "channels"} above the ${formatPercent(RESPONSE_BAND_THRESHOLDS.noContactMax, 0)} contact threshold; ${coupledNeighborChannels.length} coupled ${coupledNeighborChannels.length === 1 ? "neighbor" : "neighbors"} below it`
+      : coupledNeighborChannels.length
+        ? `${coupledNeighborChannels.length} coupled ${coupledNeighborChannels.length === 1 ? "channel" : "channels"} visible below the ${formatPercent(RESPONSE_BAND_THRESHOLDS.noContactMax, 0)} contact threshold`
+        : "No active channels; baseline or recovery state";
   }
   else if (isModelPositionLevelMode(arrayMode)) {
     note = trainedPrediction?.digital_twin?.active
@@ -4447,13 +4771,23 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
       : `${candidatePeaks.length}/9 candidates; incomplete global frame`;
   }
   else if (fallbackLike) note = "P22 fallback, real 3x3 disabled";
+  if (arrayMode !== "simulated_array_demo") noteDetail = note;
   setText("footprintNote", note);
+  const footprintNote = document.getElementById("footprintNote");
+  if (footprintNote) {
+    footprintNote.title = noteDetail;
+    footprintNote.setAttribute("aria-label", noteDetail);
+  }
 }
 
 function syncPrimaryCommandLabels() {
   const liveActive = state.exportWatchActive || state.sdkLiveActive;
   if (liveTwinButton && !liveTwinButton.classList.contains("command-busy")) {
-    liveTwinButton.textContent = liveActive ? "Stop live" : "Live";
+    setCommandButtonDescription(
+      liveTwinButton,
+      liveActive ? "Stop live" : "Live",
+      liveActive ? "Stop live" : "Start live"
+    );
   }
   liveTwinButton?.classList.toggle("active-watch", liveActive);
   liveTwinButton?.setAttribute("aria-pressed", liveActive ? "true" : "false");
@@ -4462,7 +4796,11 @@ function syncPrimaryCommandLabels() {
   }
 
   if (exportWatchButton && !exportWatchButton.classList.contains("command-busy")) {
-    exportWatchButton.textContent = state.exportWatchActive ? "Stop watch" : "Watch";
+    setCommandButtonDescription(
+      exportWatchButton,
+      state.exportWatchActive ? "Stop watch" : "Watch exports",
+      state.exportWatchActive ? "Stop watch" : "Watch exports"
+    );
   }
   exportWatchButton?.classList.toggle("active-watch", state.exportWatchActive);
   exportWatchButton?.setAttribute("aria-pressed", state.exportWatchActive ? "true" : "false");
@@ -4473,13 +4811,13 @@ function syncPrimaryCommandLabels() {
   }
 
   if (baselineButton && !baselineButton.classList.contains("command-busy")) {
-    baselineButton.textContent = "Set baseline";
+    setCommandButtonDescription(baselineButton, "Set baseline");
   }
   if (ingestExportButton && !ingestExportButton.classList.contains("command-busy")) {
-    ingestExportButton.textContent = "Ingest";
+    setCommandButtonDescription(ingestExportButton, "Ingest", "Ingest latest export");
   }
   if (resetButton && !resetButton.classList.contains("command-busy")) {
-    resetButton.textContent = "Reset";
+    setCommandButtonDescription(resetButton, "Reset trace");
   }
   syncCommandAvailability();
 }
@@ -4645,7 +4983,16 @@ function setPaused(paused) {
     // 3D geometry must all represent the same committed frame.
     snapDisplayedFrameToCurrentTargets();
   }
-  pauseButton.textContent = state.paused ? "Resume" : "Hold";
+  setCommandButtonDescription(
+    pauseButton,
+    state.paused ? "Resume display" : "Hold display",
+    state.paused ? "Resume" : "Hold display"
+  );
+  if (pauseButton) {
+    pauseButton.title = state.paused
+      ? "Resume the live display"
+      : "Hold the current display without stopping acquisition";
+  }
   pauseButton.classList.toggle("active-pause", state.paused);
   pauseButton.setAttribute("aria-pressed", state.paused ? "true" : "false");
   syncCommandAvailability();
@@ -4974,6 +5321,9 @@ function updateUI(frame) {
   const sdkLive = frame?.sdk_live || {};
   const senseControl = frame?.sense_control || {};
   const arrayFrame = frame?.array_frame || null;
+  applyResponseBandThresholds(
+    frame?.response_band_thresholds || arrayFrame?.response_band_thresholds || {}
+  );
   const surfaceMetrics = arrayFrame?.surface_metrics || {};
   const syncDiag = frameSyncDiagnostics(frame, record, trace, arrayFrame);
   const trainedModelDisplay = trainedStaticModelDisplayReady(frame);
@@ -5021,7 +5371,7 @@ function updateUI(frame) {
         : "idle"
     : operatorQa.startsWith("OK")
       ? "ok"
-       : operatorQa.toLowerCase().includes("warning") || operatorQa.toLowerCase().includes("baseline required")
+       : operatorQa === "CHECK" || operatorQa === "BASELINE" || operatorQa === "STALE"
          ? "warning"
         : "review";
   const spectrumIsSynthetic = isSyntheticWavelengthSpectrum(record);
@@ -5048,7 +5398,15 @@ function updateUI(frame) {
   updateOperatorAlert({ record, sourceState: sourceDisplayState, operatorQa, measurementAvailable });
   setText("topQaStatus", operatorQa);
   const topQaElement = document.getElementById("topQaStatus");
-  if (topQaElement) topQaElement.dataset.qaTone = qaTone;
+  if (topQaElement) {
+    topQaElement.dataset.qaTone = qaTone;
+    topQaElement.setAttribute(
+      "aria-label",
+      operatorQa === "OK"
+        ? "Quality status OK"
+        : `Quality status ${operatorQa.toLowerCase()}. Open Diagnostics for details.`
+    );
+  }
 
   const sourceName = state.demoModeActive
     ? "SIMULATION"
@@ -5174,7 +5532,7 @@ function updateUI(frame) {
   setText(
     "spectrumChip",
     !syncDiag.hasSpectrum
-      ? "spectrum missing"
+      ? "NO FRAME"
       : spectrumIsSynthetic
         ? state.displayMode === "operator" ? "local 9-FBG" : "simulated 9-FBG"
         : record?.peak_axis_type === "pixel_index"
@@ -5186,7 +5544,7 @@ function updateUI(frame) {
   setText(
     "spectrumStatusMain",
     !syncDiag.hasSpectrum
-      ? "No spectrum frame"
+      ? "Waiting for frame"
       : spectrumIsSynthetic
         ? state.displayMode === "operator" ? "Local 9-FBG frame" : "Simulated 9-FBG frame"
         : record?.peak_axis_type === "pixel_index"
@@ -5224,15 +5582,26 @@ function updateUI(frame) {
   const globalDominantShiftPm = globalDominantPeak ? candidateShiftPm(globalDominantPeak) : Number.NaN;
   const globalEventShiftPm = Number(surfaceMetrics.global_event_absolute_shift_pm ?? displayRecord?.absolute_shift_pm);
   const globalDominantWavelength = Number(globalDominantPeak?.tracked_wavelength_nm ?? globalDominantPeak?.peak_wavelength_nm);
-  setText(
+  const compactPeakWavelength = globalRecognitionFrame
+    ? globalDominantWavelength
+    : Number(displayRecord?.tracked_wavelength_nm ?? displayRecord?.peak_wavelength_nm);
+  const compactSignedShift = Number(globalRecognitionFrame ? globalEventShiftPm : displayRecord?.delta_wavelength_pm);
+  const compactAbsoluteShift = Number(globalRecognitionFrame ? globalEventShiftPm : displayRecord?.absolute_shift_pm);
+  setCompactMetric(
     "metricIntensity",
-    formatWavelength(
-      globalRecognitionFrame ? globalDominantWavelength : displayRecord?.tracked_wavelength_nm ?? displayRecord?.peak_wavelength_nm,
-      5
-    )
+    formatCompactNumber(compactPeakWavelength, 1),
+    formatWavelength(compactPeakWavelength, 5)
   );
-  setText("metricRelative", formatPm(globalRecognitionFrame ? globalEventShiftPm : displayRecord?.delta_wavelength_pm, 1, true));
-  setText("metricLoss", formatPm(globalRecognitionFrame ? globalEventShiftPm : displayRecord?.absolute_shift_pm, 1));
+  setCompactMetric(
+    "metricRelative",
+    formatCompactNumber(compactSignedShift, 1, true),
+    formatPm(compactSignedShift, 1, true)
+  );
+  setCompactMetric(
+    "metricLoss",
+    formatCompactNumber(compactAbsoluteShift, 1),
+    formatPm(compactAbsoluteShift, 1)
+  );
 
   const observedFrameChannel = globalRecognitionFrame
     ? "GLOBAL 9-FBG"
@@ -5665,6 +6034,7 @@ function updateUI(frame) {
   updateWatcherUI(watcher, sdkLive);
   updateOperatorStreamSummary(frame, watcher, sdkLive, operatorQa);
   updateDemoReadout(record);
+  updatePx6dPanel(frame || {});
 
   setChartTargets(trace, record);
   updateThree(record, arrayFrame);
@@ -6169,7 +6539,7 @@ async function requestJSON(url, options = {}, { timeoutMs = 10000 } = {}) {
       }
     }
     if (!response.ok || payload?.ok === false) {
-      const detail = payload?.detail || payload?.message || payload?.error || `HTTP ${response.status}`;
+      const detail = payload?.detail || payload?.message || payload?.error || payload?.status || `HTTP ${response.status}`;
       throw new Error(String(detail));
     }
     return payload;
@@ -6242,7 +6612,7 @@ async function runCommand({ id, button, busyLabel, busyMessage, successMessage, 
   setCommandControlsLocked(true);
   button.classList.add("command-busy");
   button.setAttribute("aria-busy", "true");
-  button.textContent = busyLabel;
+  setCommandButtonDescription(button, busyLabel);
   setCommandFeedback(busyMessage, "busy");
 
   try {
@@ -6580,12 +6950,12 @@ operatorAlertDiagnosticsButton?.addEventListener("click", () => {
   openExclusiveDiagnosticCard(document.querySelector(".diagnostic-frame-card"), { scroll: true });
 });
 
-function setSpectrumDrawerOpen(open) {
+function setSpectrumDrawerOpen(open, restoreFocus = true) {
   const wasOpen = spectrumDrawer?.classList.contains("open");
   if (open) {
     if (!wasOpen && document.activeElement instanceof HTMLElement) spectrumDrawerOpener = document.activeElement;
     setDemoMenuOpen(false);
-    setSettingsPanelOpen(false);
+    setSettingsPanelOpen(false, false);
   }
   spectrumDrawer?.classList.toggle("open", open);
   spectrumDrawer?.setAttribute("aria-hidden", open ? "false" : "true");
@@ -6600,7 +6970,7 @@ function setSpectrumDrawerOpen(open) {
     } else if (!open && wasOpen) {
       const opener = spectrumDrawerOpener;
       spectrumDrawerOpener = null;
-      if (opener?.isConnected) opener.focus();
+      if (restoreFocus && opener?.isConnected) opener.focus();
     }
   });
 }
@@ -6608,8 +6978,8 @@ function setSpectrumDrawerOpen(open) {
 function setDemoMenuOpen(open) {
   if (!demoModule) return;
   if (open) {
-    setSpectrumDrawerOpen(false);
-    setSettingsPanelOpen(false);
+    setSpectrumDrawerOpen(false, false);
+    setSettingsPanelOpen(false, false);
     demoModule.setAttribute("open", "");
   } else {
     demoModule.removeAttribute("open");
@@ -6618,15 +6988,26 @@ function setDemoMenuOpen(open) {
   demoMenuButton?.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
-function setSettingsPanelOpen(open) {
+function setSettingsPanelOpen(open, restoreFocus = true) {
+  const wasOpen = settingsPanel?.classList.contains("open");
   if (open) {
+    if (!wasOpen && document.activeElement instanceof HTMLElement) settingsPanelOpener = document.activeElement;
     setDemoMenuOpen(false);
-    setSpectrumDrawerOpen(false);
+    setSpectrumDrawerOpen(false, false);
   }
   settingsPanel?.classList.toggle("open", open);
   settingsPanel?.setAttribute("aria-hidden", open ? "false" : "true");
   settingsButton?.classList.toggle("settings-open", open);
   settingsButton?.setAttribute("aria-expanded", open ? "true" : "false");
+  requestAnimationFrame(() => {
+    if (open && !wasOpen) {
+      settingsCloseButton?.focus();
+    } else if (!open && wasOpen) {
+      const opener = settingsPanelOpener;
+      settingsPanelOpener = null;
+      if (restoreFocus && opener?.isConnected) opener.focus();
+    }
+  });
 }
 
 spectrumToggleButton?.addEventListener("click", () => {
@@ -6662,7 +7043,6 @@ settingsButton?.addEventListener("click", () => {
 
 settingsCloseButton?.addEventListener("click", () => {
   setSettingsPanelOpen(false);
-  settingsButton?.focus();
 });
 
 settingsThumbHolderButton?.addEventListener("click", () => {
@@ -6680,20 +7060,6 @@ settingsResetCameraButton?.addEventListener("click", () => {
   state.threeNeedsRefresh = true;
 });
 
-settingsOperatorModeButton?.addEventListener("click", () => {
-  updateDisplayMode("operator");
-  setSettingsPanelOpen(false);
-});
-
-settingsDiagnosticsModeButton?.addEventListener("click", () => {
-  updateDisplayMode("diagnostics");
-  setSettingsPanelOpen(false);
-});
-
-settingsSpectrumButton?.addEventListener("click", () => {
-  setSpectrumDrawerOpen(true);
-});
-
 settingsTemporalValidationButton?.addEventListener("click", () => {
   updateRecognitionValidationMode(true);
   setSettingsPanelOpen(false);
@@ -6707,7 +7073,7 @@ settingsStaticFallbackButton?.addEventListener("click", () => {
 document.addEventListener("pointerdown", (event) => {
   const target = event.target;
   if (settingsPanel?.classList.contains("open") && !settingsPanel.contains(target) && !settingsButton?.contains(target)) {
-    setSettingsPanelOpen(false);
+    setSettingsPanelOpen(false, false);
   }
   if (demoModule?.open && !demoModule.contains(target) && !demoMenuButton?.contains(target)) {
     setDemoMenuOpen(false);
@@ -6881,6 +7247,101 @@ demoResetButton?.addEventListener("click", async () => {
   await injectDemoFrame("no_contact", { reset: true });
 });
 
+async function performPx6dSoftwareZero() {
+  if (state.commandPending) return;
+  state.commandPending = "PX6D software zero";
+  [px6dTareButton, diagnosticPx6dTareButton].forEach((button) => {
+    if (!button) return;
+    button.disabled = true;
+    const label = button.querySelector("span");
+    if (label) label.textContent = "Zeroing...";
+    else button.textContent = "Zeroing...";
+  });
+  try {
+    const result = await requestJSON(
+      "/api/px6d/tare?duration_sec=1.0",
+      { method: "POST" },
+      { timeoutMs: 3500 }
+    );
+    setCommandFeedback(
+      `PX6D software zero set from ${result.sample_count || 0} stable samples.`,
+      "success",
+      { autoHideMs: 2600 }
+    );
+    await fetchPx6dReference();
+  } catch (error) {
+    setCommandFeedback(commandErrorMessage(error, "PX6D software zero failed"), "error", { autoHideMs: 6000 });
+  } finally {
+    state.commandPending = null;
+    if (px6dTareButton) {
+      px6dTareButton.textContent = "Zero Fz";
+      px6dTareButton.disabled = false;
+    }
+    if (diagnosticPx6dTareButton) {
+      const label = diagnosticPx6dTareButton.querySelector("span");
+      if (label) label.textContent = "Zero six-axis reference";
+      diagnosticPx6dTareButton.disabled = false;
+      refreshLucideIcons();
+    }
+  }
+}
+
+px6dTareButton?.addEventListener("click", performPx6dSoftwareZero);
+diagnosticPx6dTareButton?.addEventListener("click", performPx6dSoftwareZero);
+
+px6dCaptureStartButton?.addEventListener("click", async () => {
+  if (state.px6dCaptureRequestInFlight) return;
+  state.px6dCaptureRequestInFlight = true;
+  updatePx6dCapturePanel(state.px6dCaptureStatus || {});
+  try {
+    const payload = await requestJSON(
+      "/api/px6d_capture/start",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          position_label: px6dCapturePosition?.value || "unlabeled",
+          action_label: px6dCaptureAction?.value || "unlabeled",
+          trial_id: px6dCaptureTrial?.value || "trial_001",
+          operator_note: px6dCaptureNote?.value || "",
+        }),
+      },
+      { timeoutMs: 2500 }
+    );
+    updatePx6dCapturePanel(payload);
+    setCommandFeedback("Linked optical and PX6D recording started.", "success", { autoHideMs: 2400 });
+  } catch (error) {
+    setCommandFeedback(commandErrorMessage(error, "Unable to start linked recording"), "error", { autoHideMs: 6000 });
+  } finally {
+    state.px6dCaptureRequestInFlight = false;
+    await fetchPx6dCaptureStatus();
+  }
+});
+
+px6dCaptureStopButton?.addEventListener("click", async () => {
+  if (state.px6dCaptureRequestInFlight) return;
+  state.px6dCaptureRequestInFlight = true;
+  updatePx6dCapturePanel(state.px6dCaptureStatus || {});
+  try {
+    const payload = await requestJSON(
+      "/api/px6d_capture/stop",
+      { method: "POST" },
+      { timeoutMs: 5000 }
+    );
+    updatePx6dCapturePanel(payload);
+    setCommandFeedback(
+      `Recording saved with ${payload.captured_paired_frames || 0} paired frames.`,
+      payload.captured_paired_frames > 0 ? "success" : "warning",
+      { autoHideMs: 4000 }
+    );
+  } catch (error) {
+    setCommandFeedback(commandErrorMessage(error, "Unable to stop linked recording"), "error", { autoHideMs: 6000 });
+  } finally {
+    state.px6dCaptureRequestInFlight = false;
+    await fetchPx6dCaptureStatus();
+  }
+});
+
 window.addEventListener("resize", () => {
   cancelAnimationFrame(resizeToken);
   resizeToken = requestAnimationFrame(() => {
@@ -6903,6 +7364,10 @@ async function boot() {
   state.frame = idleFrame;
   updateUI(idleFrame);
   setInterval(fetchFrame, DEMO_FRAME_SCHEDULER_INTERVAL_MS);
+  await fetchPx6dReference();
+  setInterval(fetchPx6dReference, PX6D_UI_POLL_INTERVAL_MS);
+  await fetchPx6dCaptureStatus();
+  setInterval(fetchPx6dCaptureStatus, PX6D_CAPTURE_POLL_INTERVAL_MS);
 }
 
 boot();

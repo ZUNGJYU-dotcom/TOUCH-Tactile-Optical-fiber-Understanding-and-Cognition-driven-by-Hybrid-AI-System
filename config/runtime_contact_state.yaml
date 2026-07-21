@@ -49,3 +49,15 @@ runtime_baseline_recovery:
 
   auto_update_runtime_baseline: true
   policy: multi_evidence_release_then_half_second_spectral_stationarity
+
+# The response classifier remains the primary decision source. This postprocess
+# only resolves a narrow light/normal probability tie that was validated with
+# grouped out-of-fold predictions from the existing 27 dynamic sequences.
+response_level_postprocess:
+  enabled: true
+  light_preference:
+    only_override_raw_label: normal
+    minimum_light_probability: 0.40
+    maximum_normal_minus_light_margin: 0.10
+    require_hard_not_dominant: true
+  semantics: grouped_oof_validated_borderline_light_preference_not_force_N

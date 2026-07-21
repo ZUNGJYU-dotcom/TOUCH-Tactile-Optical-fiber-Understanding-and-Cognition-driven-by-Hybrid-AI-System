@@ -10,6 +10,8 @@ venv/
 # Desktop packaging artifacts
 bayspec_wavelength_shift_app/build/
 bayspec_wavelength_shift_app/dist/
+bayspec_wavelength_shift_app/build_*/
+bayspec_wavelength_shift_app/dist_*/
 bayspec_wavelength_shift_app/runtime_logs/
 bayspec_wavelength_shift_app/sdk_probe/
 bayspec_wavelength_shift_app/pyinstaller_build*.log
@@ -30,3 +32,9 @@ data collection/
 
 # Delivery archives are published separately when needed
 *.zip
+
+# Generated reports and experimental model candidates stay local until promoted
+outputs/
+models/archive/
+models/candidates/*.joblib
+models/candidates/*.json

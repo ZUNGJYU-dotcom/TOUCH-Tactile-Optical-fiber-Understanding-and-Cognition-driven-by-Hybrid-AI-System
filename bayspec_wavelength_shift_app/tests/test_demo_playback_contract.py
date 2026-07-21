@@ -1,22 +1,38 @@
 from pathlib import Path
 import unittest
 
-from backend.main import _demo_envelope, simulated_array_frame
+from backend.main import (
+    _demo_envelope,
+    _operator_response_band_thresholds,
+    _response_level_from_shift_ratio,
+    simulated_array_frame,
+)
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 
 
 class DemoPlaybackContractTests(unittest.TestCase):
+    def test_response_bands_raise_and_widen_light_range(self) -> None:
+        thresholds = _operator_response_band_thresholds()
+        self.assertEqual(thresholds["no_contact_max"], 0.25)
+        self.assertEqual(thresholds["light_max"], 0.80)
+        self.assertEqual(thresholds["normal_max"], 0.90)
+        self.assertEqual(_response_level_from_shift_ratio(0.249), "no_contact")
+        self.assertEqual(_response_level_from_shift_ratio(0.25), "small_shift")
+        self.assertEqual(_response_level_from_shift_ratio(0.79), "small_shift")
+        self.assertEqual(_response_level_from_shift_ratio(0.80), "moderate_shift")
+        self.assertEqual(_response_level_from_shift_ratio(0.90), "large_shift")
+
     def test_center_contact_uses_light_release_hard_timeline(self) -> None:
         light = [_demo_envelope("center_press", step) for step in range(0, 5)]
         released = [_demo_envelope("center_press", step) for step in range(5, 25)]
         hard = [_demo_envelope("center_press", step) for step in range(25, 45)]
         final_release = [_demo_envelope("center_press", step) for step in range(45, 50)]
 
-        self.assertTrue(all(0.05 <= value < 0.34 for value in light))
+        self.assertTrue(all(0.25 <= value < 0.80 for value in light))
         self.assertTrue(all(value == 0.0 for value in released))
-        self.assertTrue(all(value >= 0.70 for value in hard))
+        self.assertTrue(all(value >= 0.90 for value in hard))
         self.assertGreater(final_release[0], final_release[-1])
         self.assertEqual(final_release[-1], 0.0)
 
@@ -28,11 +44,11 @@ class DemoPlaybackContractTests(unittest.TestCase):
         }
         for scenario, channel_id in expected_channels.items():
             with self.subTest(scenario=scenario):
-                self.assertLess(_demo_envelope(scenario, 4), 0.34)
+                self.assertLess(_demo_envelope(scenario, 4), 0.80)
                 self.assertEqual(_demo_envelope(scenario, 5), 0.0)
                 self.assertEqual(_demo_envelope(scenario, 24), 0.0)
-                self.assertGreaterEqual(_demo_envelope(scenario, 25), 0.70)
-                self.assertGreaterEqual(_demo_envelope(scenario, 44), 0.70)
+                self.assertGreaterEqual(_demo_envelope(scenario, 25), 0.90)
+                self.assertGreaterEqual(_demo_envelope(scenario, 44), 0.90)
                 self.assertEqual(_demo_envelope(scenario, 49), 0.0)
 
                 frame = simulated_array_frame(scenario, step=25)

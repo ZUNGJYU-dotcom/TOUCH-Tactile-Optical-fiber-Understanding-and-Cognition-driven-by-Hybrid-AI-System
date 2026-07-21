@@ -13,6 +13,19 @@ app:
   calibrated_pressure_output: false
   strain_temperature_decoupled: false
 
+# Operator response bands use the normalized visual-response proxy. They are
+# display/interaction levels only and are not calibrated force thresholds.
+# The light band is intentionally shifted upward and widened so weak residual
+# drift remains no-contact while practical fingertip light presses do not
+# immediately jump into the normal band. The 2026-07-17 operator adjustment
+# raises both the light entry point and upper bound. These values affect the
+# normalized operator response display, not a calibrated force output.
+operator_response_bands:
+  no_contact_max_ratio: 0.25
+  light_max_ratio: 0.80
+  normal_max_ratio: 0.90
+  semantics: uncalibrated_normalized_visual_response_not_force_N
+
 wavelength_shift_demodulation:
   primary_method: cross_correlation
   fallback_method: weighted_centroid

@@ -60,6 +60,11 @@ def show_error(title: str, message: str) -> None:
 def configure_runtime_paths() -> Path:
     app_root = bundle_root()
     os.environ["BAYSPEC_WAVELENGTH_APP_ROOT"] = str(app_root)
+    if is_frozen():
+        # Keep experiment outputs beside the portable desktop package instead
+        # of burying them in PyInstaller's internal resource directory.
+        portable_data_root = Path(sys.executable).resolve().parent / "data" / "px6d_synchronized"
+        os.environ.setdefault("TOUCH_CAPTURE_OUTPUT_ROOT", str(portable_data_root))
     runtime_roots = [app_root]
     if not is_frozen():
         # Source launches import the shared recognition code from the project
@@ -168,9 +173,10 @@ def main() -> int:
     window = webview.create_window(
         APP_TITLE,
         app_url,
-        width=1560,
-        height=960,
-        min_size=(1180, 740),
+        width=1180,
+        height=760,
+        min_size=(1024, 680),
+        maximized=True,
         background_color="#f5f9fc",
     )
 

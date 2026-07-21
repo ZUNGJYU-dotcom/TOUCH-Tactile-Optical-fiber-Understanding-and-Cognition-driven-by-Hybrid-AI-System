@@ -11,6 +11,7 @@ from src.hybrid_spectrum.dynamic_shadow_adapter import (
     DynamicTemporalShadowAdapter,
     ReleaseResidualGuard,
     RuntimeBaselineRecoveryGuard,
+    _select_response_level_index,
     load_dynamic_shadow_bundle,
 )
 
@@ -35,6 +36,56 @@ V3_MODEL = (
     / "dynamic_temporal_shadow_candidate_v3_compact_runtime_pos240.joblib"
 )
 PEAK_CONFIG = PROJECT_ROOT / "config" / "hybrid_spectrum_channels.yaml"
+
+
+class ResponseLevelPostprocessTests(unittest.TestCase):
+    CONFIG = {
+        "enabled": True,
+        "light_preference": {
+            "only_override_raw_label": "normal",
+            "minimum_light_probability": 0.40,
+            "maximum_normal_minus_light_margin": 0.10,
+            "require_hard_not_dominant": True,
+        },
+    }
+    LABELS = ["light", "normal", "hard"]
+
+    def test_borderline_normal_is_resolved_as_light(self) -> None:
+        index, decision = _select_response_level_index(
+            np.asarray([0.42, 0.47, 0.11]),
+            self.LABELS,
+            self.CONFIG,
+        )
+        self.assertEqual(self.LABELS[index], "light")
+        self.assertEqual(decision["raw_label"], "normal")
+        self.assertTrue(decision["overridden"])
+
+    def test_clear_normal_remains_normal(self) -> None:
+        index, decision = _select_response_level_index(
+            np.asarray([0.25, 0.65, 0.10]),
+            self.LABELS,
+            self.CONFIG,
+        )
+        self.assertEqual(self.LABELS[index], "normal")
+        self.assertFalse(decision["overridden"])
+
+    def test_hard_is_never_overridden(self) -> None:
+        index, decision = _select_response_level_index(
+            np.asarray([0.41, 0.05, 0.54]),
+            self.LABELS,
+            self.CONFIG,
+        )
+        self.assertEqual(self.LABELS[index], "hard")
+        self.assertFalse(decision["overridden"])
+
+    def test_disabled_rule_preserves_argmax(self) -> None:
+        index, decision = _select_response_level_index(
+            np.asarray([0.42, 0.47, 0.11]),
+            self.LABELS,
+            {"enabled": False},
+        )
+        self.assertEqual(self.LABELS[index], "normal")
+        self.assertEqual(decision["decision_rule"], "probability_argmax")
 
 
 class ReleaseResidualGuardTests(unittest.TestCase):

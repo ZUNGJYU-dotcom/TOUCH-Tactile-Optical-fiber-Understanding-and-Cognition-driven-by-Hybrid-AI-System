@@ -20,12 +20,15 @@ hiddenimports = (
     + collect_submodules("src.hybrid_spectrum")
     + collect_submodules("uvicorn")
     + collect_submodules("websockets")
+    + collect_submodules("serial")
     + [
         "sklearn.pipeline",
         "sklearn.impute._base",
         "sklearn.preprocessing._data",
         "sklearn.linear_model._logistic",
         "sklearn.ensemble._forest",
+        "sklearn.cross_decomposition",
+        "sklearn.cross_decomposition._pls",
     ]
 )
 

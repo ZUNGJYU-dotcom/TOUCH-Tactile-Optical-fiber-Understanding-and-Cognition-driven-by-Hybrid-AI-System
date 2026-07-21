@@ -4,6 +4,7 @@ websockets
 pywebview
 pyinstaller
 pyyaml>=6.0
+pyserial==3.5
 # Keep the desktop runtime aligned with the serialized model artifacts.
 numpy==2.3.1
 scipy==1.16.0
