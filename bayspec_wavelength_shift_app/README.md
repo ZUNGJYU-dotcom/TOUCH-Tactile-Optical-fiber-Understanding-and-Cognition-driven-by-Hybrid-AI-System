@@ -4,6 +4,14 @@ Standalone BaySpec desktop application for trained ordinary-FBG static
 spectrum recognition. It is separate from the PD-voltage, optical-intensity,
 and provisional wavelength-shift applications.
 
+## v0.14.0 Desktop Update
+
+Diagnostics now has a dedicated **Record** workspace placed immediately after
+**Signal**. **Input** only shows acquisition and adapter status. The Record
+workspace keeps the complete synchronized capture workflow in one place, and
+the seven-item diagnostic navigation scrolls horizontally when the panel is
+narrow. The selected workspace is automatically scrolled into view.
+
 ## Input and Output
 
 Input is one synchronized 512-point full spectrum plus a stable current-session
@@ -86,39 +94,43 @@ same-frame labeled comparisons before any promotion decision.
 ## PX6D Reference Force
 
 When the PX6D is available on `COM3`, the backend starts a protocol reader and
-exposes `PX6D Reference Fz` in the Surface Summary. Press `Zero Fz` only while
+exposes `PX6D Compression Fz` in the Surface Summary. Press `Zero Fz` only while
 the sensor is unloaded and stable. The button applies a software tare; raw
 six-axis measurements remain unchanged.
 
-Diagnostics has a dedicated **Force** workspace. It shows software-zeroed
-`Fx/Fy/Fz/Mx/My/Mz`, resultant force, shear force, resultant moment, configured
+Diagnostics has a dedicated **Force** workspace. It shows median-despiked,
+low-pass software-zeroed `Fx/Fy/Fz/Mx/My/Mz`, filtered resultant force, shear
+force, resultant moment, configured
 range utilization, zero noise, sample age, and firmware. The adjacent sync card
 reports the optical frame, force sequence, timestamp offset, aggregation method,
 sample count, and an `excellent/good/acceptable/poor` alignment grade. A missing
 optical frame is shown as `NO FRAME`; it does not make the independently running
 PX6D invalid.
 
-For the Operator display, Fz conditioning uses a five-sample median filter,
-low-pass smoothing, a near-zero deadband, and stationary-gated slow zero-drift
-tracking. Drift tracking is limited to a configurable near-zero range and is
-frozen as soon as contact or motion is detected. Diagnostics shows the
+All six axes use the same five-sample median despiker and low-pass smoothing.
+The compression Fz display additionally uses a near-zero deadband and
+stationary-gated slow zero-drift tracking. Drift tracking is limited to Fz and
+is frozen as soon as positive contact or motion is detected. Diagnostics shows the
 low-pass value, estimated drift offset, and current filter state. All settings
 live in `config/px6d_reference.yaml`; the raw six-axis stream is never replaced.
 
 The same workspace provides selectable synchronized recording. Choose a
-position, action, trial ID, save folder, and any one, two, or all three data
-streams. **Stop & save** finalizes the selected primary files:
+position, trial ID, save folder, and any one, two, or all three data streams.
+The former coarse action selector has been replaced by the live continuous
+`PX6D Fz (N)` reference. **Stop** finalizes the selected primary files:
 
 - `spectrum_timeseries.csv`: full wavelength/intensity samples for every frame;
 - `tactile_response_timeseries.csv`: contact, position, and light/normal/hard
   temporal-model outputs and probabilities;
-- `force_timeseries.csv`: raw and software-zeroed six-axis PX6D reference data.
+- `force_timeseries.csv`: raw, software-zeroed, and filtered six-axis PX6D reference data.
 
-The force CSV additionally contains `median_reference_fz_n`,
+The force CSV includes `fx_filtered_n` through `mz_filtered_nm` and additionally
+contains `median_reference_fz_n`,
 `filtered_reference_fz_n`, `drift_offset_n`,
-`drift_corrected_reference_fz_n`, `conditioned_reference_fz_n`, and filter
-state fields. Use the raw/zeroed columns for traceable calibration work and the
-conditioned column for low-jitter visualization or operator feedback.
+`drift_corrected_reference_fz_n`, `conditioned_reference_fz_n`, `force_fz_n`,
+and filter state fields. `force_fz_n` is the continuous non-negative Fz target
+in N; it is not converted into light/normal/hard bins. Use the raw/zeroed
+columns for traceable calibration work and `force_fz_n` for regression.
 
 All selected files share the exact `capture_index`,
 `timeline_timestamp_epoch_sec`, and `elapsed_time_sec`. Unselected primary CSVs

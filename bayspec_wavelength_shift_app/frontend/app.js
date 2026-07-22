@@ -44,6 +44,8 @@ const couplingCompensatedViewButton = document.getElementById("couplingCompensat
 const layoutCheckButton = document.getElementById("layoutCheckButton");
 const layoutCheckOverlay = document.getElementById("layoutCheckOverlay");
 const appShell = document.querySelector(".app-shell");
+const dashboard = document.querySelector(".dashboard");
+const diagnosticsPanelResizer = document.getElementById("diagnosticsPanelResizer");
 const arrayRawTable = document.getElementById("arrayRawTable");
 const arrayJsonPreview = document.getElementById("arrayJsonPreview");
 const demoMenuButton = document.getElementById("demoMenuButton");
@@ -61,6 +63,9 @@ const settingsStaticFallbackButton = document.getElementById("settingsStaticFall
 const operatorDiagnosticsButton = document.getElementById("operatorDiagnosticsButton");
 const demoModule = document.querySelector(".demo-module");
 const opticalSummaryCard = document.querySelector(".summary-hud");
+const operatorCurrentHud = document.querySelector(".operator-current-hud");
+const operatorSummaryCardNode = document.querySelector(".operator-summary-card");
+const operatorForceReadout = document.querySelector(".operator-force-readout");
 const commandFeedback = document.getElementById("commandFeedback");
 const commandFeedbackText = document.getElementById("commandFeedbackText");
 const operatorAlert = document.getElementById("operatorAlert");
@@ -70,8 +75,9 @@ const operatorAlertDiagnosticsButton = document.getElementById("operatorAlertDia
 const px6dTareButton = document.getElementById("px6dTareButton");
 const diagnosticPx6dTareButton = document.getElementById("diagnosticPx6dTareButton");
 const px6dCapturePosition = document.getElementById("px6dCapturePosition");
-const px6dCaptureAction = document.getElementById("px6dCaptureAction");
+const px6dCapturePositionButtons = Array.from(document.querySelectorAll("[data-capture-position]"));
 const px6dCaptureTrial = document.getElementById("px6dCaptureTrial");
+const px6dCaptureNextTrialButton = document.getElementById("px6dCaptureNextTrialButton");
 const px6dCaptureNote = document.getElementById("px6dCaptureNote");
 const px6dCaptureSpectrum = document.getElementById("px6dCaptureSpectrum");
 const px6dCaptureResponse = document.getElementById("px6dCaptureResponse");
@@ -155,6 +161,11 @@ const DEMO_ARRAY_STEP_INTERVAL_MS = 100;
 const DEMO_ARRAY_LOOP_INTERVAL_MS = 5000;
 const DEMO_FRAME_SCHEDULER_INTERVAL_MS = 25;
 const DEMO_PLAYBACK_RATE_STORAGE_KEY = "touch-response-playback-rate";
+const DIAGNOSTICS_PANEL_WIDTH_STORAGE_KEY = "touch-diagnostics-panel-width";
+const DIAGNOSTICS_PANEL_DEFAULT_WIDTH_PX = 420;
+const DIAGNOSTICS_PANEL_MIN_WIDTH_PX = 280;
+const DIAGNOSTICS_PANEL_MAX_WIDTH_PX = 680;
+const DIAGNOSTICS_CENTER_MIN_WIDTH_PX = 400;
 const DEMO_PLAYBACK_RATE_MIN = 0.1;
 const DEMO_PLAYBACK_RATE_MAX = 2.0;
 // Reach a new physical-frame target in about 0.2 s while retaining continuous
@@ -959,6 +970,7 @@ const state = {
   forcedFrameRequestQueued: false,
   px6dRequestInFlight: false,
   px6dLatest: null,
+  px6dUiStatus: null,
   px6dAligned: null,
   px6dOpticalFrame: null,
   px6dCaptureRequestInFlight: false,
@@ -1022,8 +1034,12 @@ function updatePx6dPanel(payload = {}) {
   const sample = payload?.sample || state.px6dLatest?.sample || null;
   const mechanicalSource = aligned || sample || {};
   const zeroed = mechanicalSource?.zeroed || {};
+  const filteredZeroed = mechanicalSource?.filtered_zeroed || zeroed;
   const mechanical = mechanicalSource?.mechanical || {};
+  const displayedMechanical = mechanicalSource?.filtered_mechanical || mechanical;
   const referenceValue = finiteNumberOrNull(
+    aligned?.force_fz_n ??
+    sample?.force_fz_n ??
     aligned?.reference_fz_display_n ??
     sample?.reference_fz_display_n ??
     sample?.conditioned_reference_fz_n ??
@@ -1042,8 +1058,20 @@ function updatePx6dPanel(payload = {}) {
         ? "ready"
         : "stale";
   const stateTone = connected && tareReady && fresh ? "ready" : "warning";
+  state.px6dUiStatus = {
+    connected,
+    tareReady,
+    fresh,
+    stateLabel,
+  };
 
-  setText("px6dReferenceFz", Number.isFinite(referenceValue) ? `${Math.max(0, referenceValue).toFixed(2)} N` : "-- N");
+  const displayedCompressionFz = Number.isFinite(referenceValue)
+    ? Math.max(0, referenceValue)
+    : null;
+  setText(
+    "px6dReferenceFz",
+    Number.isFinite(displayedCompressionFz) ? `${displayedCompressionFz.toFixed(3)} N` : "-- N"
+  );
   setText("px6dReferenceStatus", stateLabel);
   const statusElement = document.getElementById("px6dReferenceStatus");
   if (statusElement) statusElement.dataset.state = stateTone;
@@ -1054,31 +1082,38 @@ function updatePx6dPanel(payload = {}) {
   setText("diagnosticPx6dConnection", connected ? `${status.port || "COM3"} · connected` : `${status.port || "COM3"} · offline`);
   setText("diagnosticPx6dFirmware", `Firmware ${status?.firmware_version || "--"}`);
   setText("diagnosticPx6dRawFz", Number.isFinite(rawFz) ? `${rawFz.toFixed(3)} N` : "--");
-  setText("diagnosticPx6dReferenceFz", Number.isFinite(referenceValue) ? `${referenceValue.toFixed(3)} N` : "-- N");
+  setText(
+    "diagnosticPx6dReferenceFz",
+    Number.isFinite(displayedCompressionFz) ? `${displayedCompressionFz.toFixed(3)} N` : "-- N"
+  );
+  setText(
+    "px6dCaptureForceValue",
+    Number.isFinite(displayedCompressionFz) ? displayedCompressionFz.toFixed(3) : "--"
+  );
   const axisSpecs = [
-    ["diagnosticPx6dFx", zeroed?.fx_n, 3],
-    ["diagnosticPx6dFy", zeroed?.fy_n, 3],
-    ["diagnosticPx6dFz", zeroed?.fz_n, 3],
-    ["diagnosticPx6dMx", zeroed?.mx_nm, 4],
-    ["diagnosticPx6dMy", zeroed?.my_nm, 4],
-    ["diagnosticPx6dMz", zeroed?.mz_nm, 4],
+    ["diagnosticPx6dFx", filteredZeroed?.fx_n, 3],
+    ["diagnosticPx6dFy", filteredZeroed?.fy_n, 3],
+    ["diagnosticPx6dFz", displayedCompressionFz, 3],
+    ["diagnosticPx6dMx", filteredZeroed?.mx_nm, 4],
+    ["diagnosticPx6dMy", filteredZeroed?.my_nm, 4],
+    ["diagnosticPx6dMz", filteredZeroed?.mz_nm, 4],
   ];
   axisSpecs.forEach(([id, value, digits]) => {
     const numeric = finiteNumberOrNull(value);
     setText(id, Number.isFinite(numeric) ? numeric.toFixed(digits) : "--");
   });
   const derivedSpecs = [
-    ["diagnosticPx6dForceResultant", mechanical?.force_resultant_n, "N", 3],
-    ["diagnosticPx6dShearResultant", mechanical?.shear_resultant_n, "N", 3],
-    ["diagnosticPx6dMomentResultant", mechanical?.moment_resultant_nm, "N·m", 4],
-    ["diagnosticPx6dUtilization", mechanical?.peak_utilization_percent, "%", 1],
+    ["diagnosticPx6dForceResultant", displayedMechanical?.force_resultant_n, "N", 3],
+    ["diagnosticPx6dShearResultant", displayedMechanical?.shear_resultant_n, "N", 3],
+    ["diagnosticPx6dMomentResultant", displayedMechanical?.moment_resultant_nm, "N·m", 4],
+    ["diagnosticPx6dUtilization", displayedMechanical?.peak_utilization_percent, "%", 1],
   ];
   derivedSpecs.forEach(([id, value, unit, digits]) => {
     const numeric = finiteNumberOrNull(value);
     setText(id, Number.isFinite(numeric) ? `${numeric.toFixed(digits)} ${unit}` : `-- ${unit}`);
   });
   const utilizationElement = document.getElementById("diagnosticPx6dUtilization");
-  if (utilizationElement) utilizationElement.dataset.healthTone = mechanical?.utilization_status === "warning" ? "warning" : "ok";
+  if (utilizationElement) utilizationElement.dataset.healthTone = displayedMechanical?.utilization_status === "warning" ? "warning" : "ok";
   setText("diagnosticPx6dTareStatus", tareReady ? "ready" : status?.tare_status || sample?.tare_status || "required");
   const tareNoise = finiteNumberOrNull(aligned?.tare_fz_std_n ?? sample?.tare_fz_std_n ?? status?.tare_fz_std_n);
   setText("diagnosticPx6dTareNoise", Number.isFinite(tareNoise) ? `${tareNoise.toFixed(4)} N` : "--");
@@ -1141,6 +1176,7 @@ function updatePx6dPanel(payload = {}) {
     "diagnosticPx6dError",
     status?.last_error || (tareReady ? "conditioned display active; raw six-axis values retained" : "stable no-load zero pending")
   );
+  updateCaptureReadiness();
 }
 
 async function fetchPx6dReference() {
@@ -1163,6 +1199,127 @@ async function fetchPx6dReference() {
   }
 }
 
+const CAPTURE_STREAM_LABELS = {
+  spectrum: "Spectrum",
+  response: "Recognition",
+  force: "Force",
+};
+
+function selectedCaptureOutputs() {
+  return [
+    [px6dCaptureSpectrum, "spectrum"],
+    [px6dCaptureResponse, "response"],
+    [px6dCaptureForce, "force"],
+  ].filter(([control]) => control?.checked).map(([, value]) => value);
+}
+
+function setCaptureReadinessCell(id, value, readinessState) {
+  const element = document.getElementById(id);
+  if (!element) return;
+  element.textContent = value;
+  element.dataset.state = readinessState;
+}
+
+function formatCaptureDuration(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const minutes = Math.floor(total / 60);
+  const remainder = total % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+}
+
+function updateCapturePositionSelection(value = px6dCapturePosition?.value || "") {
+  if (px6dCapturePosition && px6dCapturePosition.value !== value) {
+    px6dCapturePosition.value = value;
+  }
+  px6dCapturePositionButtons.forEach((button) => {
+    const selected = button.dataset.capturePosition === value;
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
+  });
+}
+
+function nextCaptureTrialId() {
+  if (!px6dCaptureTrial) return;
+  const current = String(px6dCaptureTrial.value || "trial_001").trim();
+  const match = current.match(/^(.*?)(\d+)$/);
+  if (!match) {
+    px6dCaptureTrial.value = `${current || "trial"}_002`;
+    return;
+  }
+  const width = match[2].length;
+  const next = String(Number.parseInt(match[2], 10) + 1).padStart(width, "0");
+  px6dCaptureTrial.value = `${match[1]}${next}`;
+}
+
+function updateCaptureReadiness() {
+  const selected = selectedCaptureOutputs();
+  const opticalRequired = selected.includes("spectrum") || selected.includes("response");
+  const forceRequired = selected.includes("force");
+  const opticalActive = Boolean(
+    state.sdkLiveActive || state.exportWatchActive || state.dataStreamActive || state.liveRequested
+  );
+  const opticalReady = opticalActive && Boolean(state.lastRenderedSourceFrameKey);
+  const forceState = state.px6dUiStatus || {};
+  const forceReady = Boolean(forceState.connected && forceState.tareReady && forceState.fresh);
+  const position = String(px6dCapturePosition?.value || "");
+  const folderReady = Boolean(String(px6dCaptureOutputRoot?.value || "").trim());
+
+  setCaptureReadinessCell(
+    "px6dCaptureSpectrumReady",
+    opticalRequired ? (opticalReady ? "Ready" : "Waiting") : "Off",
+    opticalRequired ? (opticalReady ? "ready" : "waiting") : "off"
+  );
+  const forceLabel = !forceRequired
+    ? "Off"
+    : !forceState.connected
+      ? "Offline"
+      : !forceState.tareReady
+        ? "Zero"
+        : !forceState.fresh
+          ? "Stale"
+          : "Ready";
+  setCaptureReadinessCell(
+    "px6dCaptureForceReady",
+    forceLabel,
+    !forceRequired ? "off" : forceReady ? "ready" : forceState.connected ? "waiting" : "error"
+  );
+  setCaptureReadinessCell(
+    "px6dCapturePositionReady",
+    position ? (position === "unlabeled" ? "Unlabeled" : position) : "Select",
+    position ? (position === "unlabeled" ? "waiting" : "ready") : "waiting"
+  );
+  setCaptureReadinessCell(
+    "px6dCaptureFolderReady",
+    folderReady ? "Ready" : "Select",
+    folderReady ? "ready" : "waiting"
+  );
+
+  const missing = [];
+  if (!selected.length) missing.push("data");
+  if (opticalRequired && !opticalReady) missing.push("spectrum");
+  if (forceRequired && !forceReady) missing.push("force");
+  if (!position) missing.push("position");
+  if (!folderReady) missing.push("folder");
+  const ready = missing.length === 0;
+  const payload = state.px6dCaptureStatus || {};
+  const running = payload.running === true;
+  const captured = Number(payload.captured_timeline_frames ?? payload.captured_paired_frames ?? 0);
+  const saved = !running && captured > 0 && Number.isFinite(Number(payload.ended_at_epoch_sec));
+  const failed = !running && Boolean(payload.last_error);
+  const summaryStatus = running ? "Recording" : failed ? "Error" : saved ? "Saved" : ready ? "Ready" : "Check setup";
+  const summaryState = running ? "recording" : failed ? "error" : saved ? "saved" : ready ? "ready" : "waiting";
+  setText("px6dCaptureSummaryStatus", summaryStatus);
+  const summaryElement = document.getElementById("px6dCaptureSummaryStatus");
+  if (summaryElement) summaryElement.dataset.state = summaryState;
+  setText("px6dCaptureStatus", summaryStatus);
+  const statusElement = document.getElementById("px6dCaptureStatus");
+  if (statusElement) statusElement.title = String(payload.capture_status || "idle").replaceAll("_", " ");
+  if (px6dCaptureStartButton) {
+    px6dCaptureStartButton.disabled = running || state.px6dCaptureRequestInFlight || !ready;
+    px6dCaptureStartButton.title = ready ? "Start recording" : `Check ${missing.join(", ")}`;
+  }
+  return { ready, running, selected, missing };
+}
+
 function updatePx6dCapturePanel(payload = {}) {
   state.px6dCaptureStatus = payload;
   const running = payload?.running === true;
@@ -1170,24 +1327,36 @@ function updatePx6dCapturePanel(payload = {}) {
   const ratioValue = payload?.paired_frame_ratio;
   const ratio = ratioValue === null || ratioValue === undefined ? NaN : Number(ratioValue);
   const syncOffset = Number(payload?.last_sync_offset_ms);
-  setText("px6dCaptureStatus", String(payload?.capture_status || "idle").replaceAll("_", " "));
+  const startedAt = Number(payload?.started_at_epoch_sec);
+  const endedAt = running ? Date.now() / 1000 : Number(payload?.ended_at_epoch_sec);
+  const duration = Number.isFinite(startedAt) && Number.isFinite(endedAt) ? Math.max(0, endedAt - startedAt) : 0;
+  setText("px6dCaptureDuration", formatCaptureDuration(duration));
   setText("px6dCaptureFrames", String(captured));
-  setText("px6dCaptureRatio", Number.isFinite(ratio) ? `${(ratio * 100).toFixed(1)}%` : "--");
-  setText(
-    "px6dCaptureLastSync",
-    payload?.last_sync_quality
+  const selectedOutputs = Array.isArray(payload?.selected_outputs) ? payload.selected_outputs : selectedCaptureOutputs();
+  const syncRelevant = selectedOutputs.includes("force") && selectedOutputs.some((value) => value !== "force");
+  setText("px6dCaptureRatio", syncRelevant && Number.isFinite(ratio) ? `${(ratio * 100).toFixed(1)}%` : "N/A");
+  const ratioElement = document.getElementById("px6dCaptureRatio");
+  if (ratioElement) {
+    ratioElement.title = payload?.last_sync_quality
       ? `${payload.last_sync_quality} · ${Number.isFinite(syncOffset) ? `${syncOffset.toFixed(1)} ms` : "--"}`
-      : "--"
-  );
+      : "";
+  }
   const output = payload?.output_directory;
-  const selectedOutputs = Array.isArray(payload?.selected_outputs) ? payload.selected_outputs : [];
-  const selectedText = selectedOutputs.length ? selectedOutputs.join(" + ") : "no streams selected";
-  setText(
-    "px6dCaptureOutput",
-    output
-      ? `Saved streams: ${selectedText} · ${output}${payload?.last_error ? ` · ${payload.last_error}` : ""}`
-      : payload?.last_error || "All selected CSV files share capture_index, timestamp, and elapsed time."
-  );
+  const selectedText = selectedOutputs.length
+    ? selectedOutputs.map((value) => CAPTURE_STREAM_LABELS[value] || value).join(" + ")
+    : "No data selected";
+  const outputMessage = payload?.last_error
+    ? payload.last_error
+    : output
+      ? running
+        ? `Recording: ${selectedText}`
+        : captured > 0
+          ? `Saved: ${output}`
+          : `Folder: ${output}`
+      : "Ready.";
+  setText("px6dCaptureOutput", outputMessage);
+  const outputElement = document.getElementById("px6dCaptureOutput");
+  if (outputElement) outputElement.title = output ? String(output) : outputMessage;
   if (px6dCaptureOutputRoot && document.activeElement !== px6dCaptureOutputRoot) {
     const preferredRoot = payload?.requested_output_root || payload?.default_output_root;
     if (preferredRoot && !px6dCaptureOutputRoot.dataset.userEdited) {
@@ -1197,7 +1366,6 @@ function updatePx6dCapturePanel(payload = {}) {
   const locked = running || state.px6dCaptureRequestInFlight;
   [
     px6dCapturePosition,
-    px6dCaptureAction,
     px6dCaptureTrial,
     px6dCaptureNote,
     px6dCaptureSpectrum,
@@ -1205,11 +1373,16 @@ function updatePx6dCapturePanel(payload = {}) {
     px6dCaptureForce,
     px6dCaptureOutputRoot,
     px6dCaptureBrowseButton,
+    px6dCaptureNextTrialButton,
   ].forEach((control) => {
     if (control) control.disabled = locked;
   });
-  if (px6dCaptureStartButton) px6dCaptureStartButton.disabled = locked;
+  px6dCapturePositionButtons.forEach((button) => {
+    button.disabled = locked;
+  });
+  updateCapturePositionSelection();
   if (px6dCaptureStopButton) px6dCaptureStopButton.disabled = !running || state.px6dCaptureRequestInFlight;
+  updateCaptureReadiness();
 }
 
 async function fetchPx6dCaptureStatus() {
@@ -1475,58 +1648,20 @@ function updateSurfaceFrameState(frame, watcher = {}, sdkLive = {}) {
   if (element) element.dataset.streamTone = tone;
 }
 
-function updateOperatorStreamSummary(frame, watcher, sdkLive, operatorQa) {
-  const sourceState = acquisitionDisplayState(watcher, sdkLive);
-  const heldMeasurement = sourceState.tone === "idle" && frameHasMeasurement(frame);
-  const globalFrame = frame?.scope === GLOBAL_RECOGNITION_SCOPE;
-  const trainedModelTrace = trainedStaticModelDisplayReady(frame);
-  const channel = globalFrame ? "GLOBAL 9-FBG" : frame?.selected_channel || state.selectedChannel;
-  const surfaceMaximumTrace = frame?.array_frame?.mode === "simulated_array_demo";
-  const traceScopeLabel = trainedStaticModelDisplayReady(frame)
-    ? "MODEL"
-    : globalFrame
-      ? "GLOBAL"
-      : surfaceMaximumTrace
-        ? "MAX"
-        : channel;
+function updateOperatorStreamSummary() {
   const traceChip = document.getElementById("traceChip");
-  const normalizedQa = String(operatorQa || "").toLowerCase();
-  const qaNeedsAttention = ["warning", "review", "invalid", "error"].some((token) => normalizedQa.includes(token));
-  let streamTone = sourceState.tone;
-  let streamLabel = sourceState.short;
-  let summary = sourceState.detail;
-
-  if (state.paused) {
-    streamTone = "paused";
-    streamLabel = "PAUSED";
-    summary = heldMeasurement
-      ? "Display paused · last frame held"
-      : sourceState.tone === "idle"
-        ? "Display paused · acquisition stopped"
-        : `Display paused · ${sourceState.label}`;
-  } else if (heldMeasurement) {
-    streamTone = "hold";
-    streamLabel = "HOLD";
-    summary = "Acquisition stopped · last frame held";
-  } else if (sourceState.tone === "idle") {
-    summary = "Acquisition stopped · ready";
-  } else if (sourceState.tone === "demo") {
-    summary = state.displayMode === "operator"
-      ? "Local response · synchronized"
-      : state.arrayDemoActive
-        ? "Simulated 3×3 · synchronized"
-        : "Simulated P22 · synchronized";
-  }
-
-  if (qaNeedsAttention) summary = `${summary} · QA ${operatorQa}`;
   if (traceChip) {
-    traceChip.textContent = `${traceScopeLabel} · ${streamLabel}`;
-    traceChip.dataset.streamTone = streamTone;
-    traceChip.title = `${trainedModelTrace ? "Trained model visual response" : globalFrame ? "Global maximum candidate |delta lambda|" : surfaceMaximumTrace ? "Surface peak |delta lambda|" : `${channel} delta lambda`} · ${summary}`;
+    traceChip.hidden = !state.paused;
+    traceChip.textContent = state.paused ? "PAUSED" : "";
+    traceChip.dataset.streamTone = state.paused ? "paused" : "idle";
+    traceChip.title = state.paused ? "Display paused" : "";
   }
-  setText("signalQaSummary", summary);
   const signalSummary = document.getElementById("signalQaSummary");
-  if (signalSummary) signalSummary.dataset.streamTone = streamTone;
+  if (signalSummary) {
+    signalSummary.textContent = "";
+    signalSummary.hidden = true;
+    signalSummary.setAttribute("aria-hidden", "true");
+  }
 }
 
 function operatorAlertState({ record, sourceState, operatorQa, measurementAvailable }) {
@@ -3826,6 +3961,10 @@ function refreshFullscreenSurfaceLayout() {
 
 function applySurfaceFullscreenState(active) {
   state.surfaceFullscreenActive = Boolean(active);
+  const forceReadoutTarget = state.surfaceFullscreenActive ? operatorSummaryCardNode : operatorCurrentHud;
+  if (operatorForceReadout && forceReadoutTarget && operatorForceReadout.parentElement !== forceReadoutTarget) {
+    forceReadoutTarget.appendChild(operatorForceReadout);
+  }
   appShell?.classList.toggle("surface-fullscreen-active", state.surfaceFullscreenActive);
   document.documentElement.classList.toggle("surface-fullscreen-document", state.surfaceFullscreenActive);
   document.body.classList.toggle("surface-fullscreen-document", state.surfaceFullscreenActive);
@@ -4436,15 +4575,121 @@ function updateChannelSelectorLabels(channels) {
   });
 }
 
-const DIAGNOSTIC_WORKSPACES = new Set(["signal", "surface", "demo", "acquisition", "reference", "geometry"]);
+const DIAGNOSTIC_WORKSPACES = new Set(["signal", "recording", "surface", "demo", "acquisition", "reference", "geometry"]);
 const DIAGNOSTIC_DEFAULT_CARD = {
   signal: ".diagnostic-channel-card",
+  recording: ".diagnostic-capture-card",
   surface: ".diagnostic-metrics-card",
   demo: ".demo-module",
   acquisition: ".diagnostic-frame-card",
   reference: ".diagnostic-reference-card",
   geometry: ".diagnostic-alignment-card",
 };
+
+function diagnosticsPanelWidthBounds() {
+  const dashboardWidth = dashboard?.getBoundingClientRect().width || window.innerWidth;
+  const leftPanel = dashboard?.querySelector(".left-panel");
+  const leftWidth = leftPanel?.getBoundingClientRect().width || 180;
+  const dashboardStyle = dashboard ? window.getComputedStyle(dashboard) : null;
+  const gap = Number.parseFloat(dashboardStyle?.columnGap || dashboardStyle?.gap || "8") || 8;
+  const available = Math.floor(dashboardWidth - leftWidth - DIAGNOSTICS_CENTER_MIN_WIDTH_PX - (gap * 2));
+  const min = Math.min(DIAGNOSTICS_PANEL_MIN_WIDTH_PX, Math.max(240, available));
+  const max = Math.max(min, Math.min(DIAGNOSTICS_PANEL_MAX_WIDTH_PX, available));
+  return { min, max };
+}
+
+function storedDiagnosticsPanelWidth() {
+  try {
+    const storedValue = window.localStorage.getItem(DIAGNOSTICS_PANEL_WIDTH_STORAGE_KEY);
+    if (storedValue === null || storedValue.trim() === "") {
+      return DIAGNOSTICS_PANEL_DEFAULT_WIDTH_PX;
+    }
+    const value = Number(storedValue);
+    return Number.isFinite(value) ? value : DIAGNOSTICS_PANEL_DEFAULT_WIDTH_PX;
+  } catch (_error) {
+    return DIAGNOSTICS_PANEL_DEFAULT_WIDTH_PX;
+  }
+}
+
+function setDiagnosticsPanelWidth(width, { persist = true } = {}) {
+  if (!dashboard || !diagnosticsPanelResizer) return DIAGNOSTICS_PANEL_DEFAULT_WIDTH_PX;
+  const { min, max } = diagnosticsPanelWidthBounds();
+  const requested = Number(width);
+  const nextWidth = Math.round(Math.max(min, Math.min(max, Number.isFinite(requested) ? requested : DIAGNOSTICS_PANEL_DEFAULT_WIDTH_PX)));
+  dashboard.style.setProperty("--diagnostics-right-width", `${nextWidth}px`);
+  diagnosticsPanelResizer.setAttribute("aria-valuemin", String(min));
+  diagnosticsPanelResizer.setAttribute("aria-valuemax", String(max));
+  diagnosticsPanelResizer.setAttribute("aria-valuenow", String(nextWidth));
+  diagnosticsPanelResizer.setAttribute("aria-valuetext", `${nextWidth} pixels`);
+  if (persist) {
+    try {
+      window.localStorage.setItem(DIAGNOSTICS_PANEL_WIDTH_STORAGE_KEY, String(nextWidth));
+    } catch (_error) {
+      // A blocked localStorage must not disable resizing for this session.
+    }
+  }
+  cancelAnimationFrame(resizeToken);
+  resizeToken = requestAnimationFrame(() => {
+    resizeThree();
+    state.chartsNeedRefresh = true;
+    state.threeNeedsRefresh = true;
+  });
+  return nextWidth;
+}
+
+function initializeDiagnosticsPanelResize() {
+  if (!dashboard || !diagnosticsPanelResizer) return;
+  setDiagnosticsPanelWidth(storedDiagnosticsPanelWidth(), { persist: false });
+
+  let dragState = null;
+  diagnosticsPanelResizer.addEventListener("pointerdown", (event) => {
+    if (state.displayMode !== "diagnostics" || event.button !== 0) return;
+    event.preventDefault();
+    dragState = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: Number(diagnosticsPanelResizer.getAttribute("aria-valuenow")) || DIAGNOSTICS_PANEL_DEFAULT_WIDTH_PX,
+    };
+    diagnosticsPanelResizer.setPointerCapture(event.pointerId);
+    diagnosticsPanelResizer.classList.add("is-resizing");
+    document.body.classList.add("diagnostics-panel-resizing");
+  });
+
+  diagnosticsPanelResizer.addEventListener("pointermove", (event) => {
+    if (!dragState || event.pointerId !== dragState.pointerId) return;
+    setDiagnosticsPanelWidth(dragState.startWidth + dragState.startX - event.clientX, { persist: false });
+  });
+
+  const finishResize = (event) => {
+    if (!dragState || event.pointerId !== dragState.pointerId) return;
+    if (diagnosticsPanelResizer.hasPointerCapture(event.pointerId)) {
+      diagnosticsPanelResizer.releasePointerCapture(event.pointerId);
+    }
+    dragState = null;
+    diagnosticsPanelResizer.classList.remove("is-resizing");
+    document.body.classList.remove("diagnostics-panel-resizing");
+    setDiagnosticsPanelWidth(Number(diagnosticsPanelResizer.getAttribute("aria-valuenow")));
+  };
+  diagnosticsPanelResizer.addEventListener("pointerup", finishResize);
+  diagnosticsPanelResizer.addEventListener("pointercancel", finishResize);
+
+  diagnosticsPanelResizer.addEventListener("keydown", (event) => {
+    const currentWidth = Number(diagnosticsPanelResizer.getAttribute("aria-valuenow")) || DIAGNOSTICS_PANEL_DEFAULT_WIDTH_PX;
+    const { min, max } = diagnosticsPanelWidthBounds();
+    let nextWidth = null;
+    if (event.key === "ArrowLeft") nextWidth = currentWidth + 24;
+    else if (event.key === "ArrowRight") nextWidth = currentWidth - 24;
+    else if (event.key === "Home") nextWidth = min;
+    else if (event.key === "End") nextWidth = max;
+    if (nextWidth === null) return;
+    event.preventDefault();
+    setDiagnosticsPanelWidth(nextWidth);
+  });
+
+  diagnosticsPanelResizer.addEventListener("dblclick", () => {
+    setDiagnosticsPanelWidth(DIAGNOSTICS_PANEL_DEFAULT_WIDTH_PX);
+  });
+}
 
 function updateDiagnosticWorkspace(workspace) {
   const nextWorkspace = DIAGNOSTIC_WORKSPACES.has(workspace) ? workspace : "signal";
@@ -4454,6 +4699,11 @@ function updateDiagnosticWorkspace(workspace) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
     button.tabIndex = active ? 0 : -1;
+    if (active) {
+      requestAnimationFrame(() => {
+        button.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+      });
+    }
   });
   diagnosticGroupedCards.forEach((card) => {
     const visible = card.dataset.diagnosticGroup === nextWorkspace;
@@ -4498,6 +4748,7 @@ function updateDisplayMode(mode) {
     demoMenuButton?.classList.remove("menu-open");
     demoMenuButton?.setAttribute("aria-expanded", "false");
     setSettingsPanelOpen(false);
+    setDiagnosticsPanelWidth(storedDiagnosticsPanelWidth(), { persist: false });
     updateDiagnosticWorkspace(state.diagnosticTab);
   }
   syncCommandAvailability();
@@ -5868,6 +6119,12 @@ function updateUI(frame) {
   if (operatorSummaryCard) operatorSummaryCard.dataset.responseTone = surfaceResponseTone;
   const surfaceResponseLevelElement = document.getElementById("surfaceResponseLevel");
   if (surfaceResponseLevelElement) surfaceResponseLevelElement.dataset.responseTone = surfaceResponseTone;
+  const operatorContactValue = document.getElementById("operatorContactValue");
+  if (operatorContactValue) operatorContactValue.dataset.responseTone = surfaceResponseTone;
+  setText(
+    "operatorContactValue",
+    !measurementAvailable ? "Idle" : !responseAvailable ? "--" : surfaceHasActiveResponse ? "Contact" : "No contact"
+  );
   setText(
     "surfaceText",
     !measurementAvailable
@@ -5898,14 +6155,13 @@ function updateUI(frame) {
         ? String(surfaceMetrics.responding_channel_count ?? surfaceMetrics.active_channel_count ?? "--")
         : surfaceMetrics.active_channel_count ?? "--"
   );
-  setText(
-    "surfaceDominantChannel",
-    surfaceHasActiveResponse
-      ? globalRecognitionFrame
-        ? surfaceMetrics.dominant_channel || "--"
-        : dominantChannel || surfaceMetrics.dominant_channel || "--"
-      : "--"
-  );
+  const operatorPosition = surfaceHasActiveResponse
+    ? globalRecognitionFrame
+      ? surfaceMetrics.dominant_channel || "--"
+      : dominantChannel || surfaceMetrics.dominant_channel || "--"
+    : "--";
+  setText("surfaceDominantChannel", operatorPosition);
+  setText("operatorPositionValue", operatorPosition);
   const dominantChannelRecord = (arrayFrame?.channels || []).find((item) => item.channel_id === (surfaceMetrics.dominant_channel || dominantChannel));
   const surfacePeakShiftPm = Number(
     (globalRecognitionFrame ? globalEventShiftPm : null) ??
@@ -6559,10 +6815,13 @@ async function fetchFrame({ force = false } = {}) {
       return;
     }
     const frame = normalizeGlobalSpectrumFrame(rawFrame);
-    if (commitFrame(frame)) state.lastRenderedSourceFrameKey = renderKey;
+    if (commitFrame(frame)) {
+      state.lastRenderedSourceFrameKey = renderKey;
+      updateCaptureReadiness();
+    }
   } catch (error) {
     if (requestEpoch !== state.frameModeEpoch || requestSequence < state.lastCommittedFrameRequest) return;
-    setText("traceChip", "backend not ready");
+    updateOperatorStreamSummary();
     setText("responseText", String(error));
   } finally {
     state.frameRequestInFlight = false;
@@ -6889,14 +7148,14 @@ resetButton.addEventListener("click", () => {
 demoStepButtons.forEach((button) => {
   button.addEventListener("click", async () => {
     stopDemoAutoplay();
-    setDemoMenuOpen(false);
+    closeOperatorDemoMenuAfterScenarioSelection();
     await injectDemoFrame(button.dataset.demoLevel, { reset: true });
   });
 });
 
 arrayDemoStepButtons.forEach((button) => {
   button.addEventListener("click", async () => {
-    setDemoMenuOpen(false);
+    closeOperatorDemoMenuAfterScenarioSelection();
     await injectArrayDemoFrame(button.dataset.arrayScenario || "center_press", {
       resetTrajectory: true,
       playbackMode: "loop",
@@ -7035,6 +7294,11 @@ function setDemoMenuOpen(open) {
   }
   demoMenuButton?.classList.toggle("menu-open", open);
   demoMenuButton?.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+function closeOperatorDemoMenuAfterScenarioSelection() {
+  if (state.displayMode === "diagnostics") return;
+  setDemoMenuOpen(false);
 }
 
 function setSettingsPanelOpen(open, restoreFocus = true) {
@@ -7340,6 +7604,25 @@ diagnosticPx6dTareButton?.addEventListener("click", performPx6dSoftwareZero);
 
 px6dCaptureOutputRoot?.addEventListener("input", () => {
   px6dCaptureOutputRoot.dataset.userEdited = "true";
+  updateCaptureReadiness();
+});
+
+px6dCapturePositionButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    if (button.disabled || !px6dCapturePosition) return;
+    updateCapturePositionSelection(button.dataset.capturePosition || "");
+    updateCaptureReadiness();
+  });
+});
+
+px6dCaptureNextTrialButton?.addEventListener("click", () => {
+  nextCaptureTrialId();
+  px6dCaptureTrial?.focus();
+  px6dCaptureTrial?.select();
+});
+
+[px6dCaptureSpectrum, px6dCaptureResponse, px6dCaptureForce].forEach((control) => {
+  control?.addEventListener("change", updateCaptureReadiness);
 });
 
 px6dCaptureBrowseButton?.addEventListener("click", async () => {
@@ -7359,6 +7642,7 @@ px6dCaptureBrowseButton?.addEventListener("click", async () => {
     if (result?.ok && result?.path && px6dCaptureOutputRoot) {
       px6dCaptureOutputRoot.value = result.path;
       px6dCaptureOutputRoot.dataset.userEdited = "true";
+      updateCaptureReadiness();
       setCommandFeedback("Capture folder selected.", "success", { autoHideMs: 1800 });
     }
   } catch (error) {
@@ -7368,13 +7652,14 @@ px6dCaptureBrowseButton?.addEventListener("click", async () => {
 
 px6dCaptureStartButton?.addEventListener("click", async () => {
   if (state.px6dCaptureRequestInFlight) return;
-  const selectedOutputs = [
-    [px6dCaptureSpectrum, "spectrum"],
-    [px6dCaptureResponse, "response"],
-    [px6dCaptureForce, "force"],
-  ].filter(([control]) => control?.checked).map(([, value]) => value);
+  const selectedOutputs = selectedCaptureOutputs();
   if (!selectedOutputs.length) {
-    setCommandFeedback("Select at least one data stream to save.", "warning", { autoHideMs: 4000 });
+    setCommandFeedback("Select data to save.", "warning", { autoHideMs: 4000 });
+    return;
+  }
+  const readiness = updateCaptureReadiness();
+  if (!readiness.ready) {
+    setCommandFeedback(`Check ${readiness.missing.join(", ")}.`, "warning", { autoHideMs: 4000 });
     return;
   }
   state.px6dCaptureRequestInFlight = true;
@@ -7387,7 +7672,7 @@ px6dCaptureStartButton?.addEventListener("click", async () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           position_label: px6dCapturePosition?.value || "unlabeled",
-          action_label: px6dCaptureAction?.value || "unlabeled",
+          action_label: "continuous_px6d_fz_reference",
           trial_id: px6dCaptureTrial?.value || "trial_001",
           operator_note: px6dCaptureNote?.value || "",
           output_root: px6dCaptureOutputRoot?.value?.trim() || null,
@@ -7398,12 +7683,12 @@ px6dCaptureStartButton?.addEventListener("click", async () => {
     );
     updatePx6dCapturePanel(payload);
     setCommandFeedback(
-      `Synchronized recording started: ${selectedOutputs.join(" + ")}.`,
+      "Recording started.",
       "success",
       { autoHideMs: 2400 }
     );
   } catch (error) {
-    setCommandFeedback(commandErrorMessage(error, "Unable to start linked recording"), "error", { autoHideMs: 6000 });
+    setCommandFeedback(commandErrorMessage(error, "Unable to start recording"), "error", { autoHideMs: 6000 });
   } finally {
     state.px6dCaptureRequestInFlight = false;
     await fetchPx6dCaptureStatus();
@@ -7421,13 +7706,16 @@ px6dCaptureStopButton?.addEventListener("click", async () => {
       { timeoutMs: 5000 }
     );
     updatePx6dCapturePanel(payload);
+    if (Number(payload.captured_timeline_frames ?? payload.captured_paired_frames ?? 0) > 0) {
+      nextCaptureTrialId();
+    }
     setCommandFeedback(
-      `Recording saved with ${payload.captured_paired_frames || 0} paired frames.`,
-      payload.captured_paired_frames > 0 ? "success" : "warning",
+      `Saved ${payload.captured_timeline_frames ?? payload.captured_paired_frames ?? 0} frames.`,
+      Number(payload.captured_timeline_frames ?? payload.captured_paired_frames ?? 0) > 0 ? "success" : "warning",
       { autoHideMs: 4000 }
     );
   } catch (error) {
-    setCommandFeedback(commandErrorMessage(error, "Unable to stop linked recording"), "error", { autoHideMs: 6000 });
+    setCommandFeedback(commandErrorMessage(error, "Unable to stop recording"), "error", { autoHideMs: 6000 });
   } finally {
     state.px6dCaptureRequestInFlight = false;
     await fetchPx6dCaptureStatus();
@@ -7437,12 +7725,16 @@ px6dCaptureStopButton?.addEventListener("click", async () => {
 window.addEventListener("resize", () => {
   cancelAnimationFrame(resizeToken);
   resizeToken = requestAnimationFrame(() => {
+    if (state.displayMode === "diagnostics") {
+      setDiagnosticsPanelWidth(Number(diagnosticsPanelResizer?.getAttribute("aria-valuenow")), { persist: false });
+    }
     resizeThree();
     updateUI(state.frame);
   });
 });
 
 async function boot() {
+  initializeDiagnosticsPanelResize();
   await loadThumbSceneConfig();
   setDemoPlaybackRate(state.demoPlaybackRate, { persist: false });
   updateRecognitionValidationMode(state.temporalValidationMode, { announce: false });

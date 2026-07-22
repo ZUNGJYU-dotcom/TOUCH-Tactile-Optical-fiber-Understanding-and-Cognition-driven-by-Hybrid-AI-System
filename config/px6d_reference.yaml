@@ -22,9 +22,10 @@ signal:
   auto_zero_drift_enabled: true
   auto_zero_hold_sec: 1.5
   auto_zero_capture_limit_n: 0.060
+  auto_zero_release_reacquire_limit_n: 0.30
   auto_zero_alpha: 0.015
   maximum_drift_offset_n: 0.50
-  note: "Median despiking and low-pass filtering are always applied. Slow zero tracking is allowed only after a stable near-zero hold; raw and software-zeroed values remain unchanged in exports."
+  note: "Median despiking and low-pass filtering are applied to all six axes. Positive compression zero tracking remains limited to the Fz near-zero band; stable release-side Fz drift may reacquire zero up to the configured limit. Raw and software-zeroed values remain unchanged in exports."
 
 mechanical:
   primary_axis: Fz

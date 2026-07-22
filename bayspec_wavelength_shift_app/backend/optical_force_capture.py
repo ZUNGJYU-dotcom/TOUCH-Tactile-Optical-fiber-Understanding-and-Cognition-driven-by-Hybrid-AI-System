@@ -6,6 +6,7 @@ import csv
 from contextlib import ExitStack
 from datetime import datetime
 import json
+import math
 from pathlib import Path
 import re
 import threading
@@ -56,6 +57,12 @@ SUMMARY_FIELDS = [
     "mx_zeroed_nm",
     "my_zeroed_nm",
     "mz_zeroed_nm",
+    "fx_filtered_n",
+    "fy_filtered_n",
+    "fz_filtered_n",
+    "mx_filtered_nm",
+    "my_filtered_nm",
+    "mz_filtered_nm",
     "reference_fz_n",
     "reference_fz_display_n",
     "median_reference_fz_n",
@@ -63,6 +70,7 @@ SUMMARY_FIELDS = [
     "drift_offset_n",
     "drift_corrected_reference_fz_n",
     "conditioned_reference_fz_n",
+    "force_fz_n",
     "stationary_detected",
     "auto_zero_drift_active",
     "force_filter_status",
@@ -71,6 +79,9 @@ SUMMARY_FIELDS = [
     "moment_resultant_nm",
     "force_utilization_percent",
     "moment_utilization_percent",
+    "filtered_force_resultant_n",
+    "filtered_shear_resultant_n",
+    "filtered_moment_resultant_nm",
     "model_source",
     "model_status",
     "model_ready",
@@ -147,6 +158,12 @@ FORCE_FIELDS = [
     "mx_zeroed_nm",
     "my_zeroed_nm",
     "mz_zeroed_nm",
+    "fx_filtered_n",
+    "fy_filtered_n",
+    "fz_filtered_n",
+    "mx_filtered_nm",
+    "my_filtered_nm",
+    "mz_filtered_nm",
     "reference_fz_n",
     "reference_fz_display_n",
     "median_reference_fz_n",
@@ -154,6 +171,7 @@ FORCE_FIELDS = [
     "drift_offset_n",
     "drift_corrected_reference_fz_n",
     "conditioned_reference_fz_n",
+    "force_fz_n",
     "stationary_detected",
     "auto_zero_drift_active",
     "force_filter_status",
@@ -162,6 +180,9 @@ FORCE_FIELDS = [
     "moment_resultant_nm",
     "force_utilization_percent",
     "moment_utilization_percent",
+    "filtered_force_resultant_n",
+    "filtered_shear_resultant_n",
+    "filtered_moment_resultant_nm",
     "position_label",
     "action_label",
     "trial_id",
@@ -172,6 +193,23 @@ def _safe_token(value: Any, fallback: str) -> str:
     text = str(value or "").strip()
     text = re.sub(r"[^0-9A-Za-z_-]+", "_", text).strip("_")
     return text[:48] or fallback
+
+
+def _continuous_force_fz_n(force: dict[str, Any]) -> float | None:
+    """Return the continuous non-negative compression Fz used as force truth."""
+    for key in (
+        "conditioned_reference_fz_n",
+        "reference_fz_display_n",
+        "drift_corrected_reference_fz_n",
+        "reference_fz_n",
+    ):
+        try:
+            value = float(force.get(key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            return max(0.0, value)
+    return None
 
 
 def _json_default(value: Any) -> Any:
@@ -401,6 +439,9 @@ class OpticalForceCaptureManager:
         paired = int(payload.get("captured_timeline_frames") or 0)
         payload["paired_frame_ratio"] = paired / denominator if denominator else None
         payload["force_semantics"] = "PX6D_reference_Fz_not_optical_force_prediction"
+        payload["force_target_mode"] = "continuous_fz_regression"
+        payload["force_target_field"] = "force_fz_n"
+        payload["force_class_bins_enabled"] = False
         selected = set(payload.get("selected_outputs") or [])
         payload["output_format"] = "selectable_aligned_csv_streams_plus_audit_sidecars"
         payload["timeline_basis"] = (
@@ -604,6 +645,7 @@ class OpticalForceCaptureManager:
                         record["tactile_response"] = model
                     if "force" in selected:
                         record["px6d_reference"] = force
+                        record["force_fz_n"] = _continuous_force_fz_n(force)
                     jsonl_handle.write(
                         json.dumps(record, ensure_ascii=False, separators=(",", ":"), default=_json_default)
                         + "\n"
@@ -740,7 +782,9 @@ class OpticalForceCaptureManager:
         force = record["px6d_reference"]
         raw = force.get("raw") or {}
         zeroed = force.get("zeroed") or {}
+        filtered = force.get("filtered_zeroed") or zeroed
         mechanical = force.get("mechanical") or {}
+        filtered_mechanical = force.get("filtered_mechanical") or mechanical
         return {
             "capture_index": record["capture_index"],
             "timeline_timestamp_epoch_sec": record["timeline_timestamp_epoch_sec"],
@@ -764,6 +808,12 @@ class OpticalForceCaptureManager:
             "mx_zeroed_nm": zeroed.get("mx_nm"),
             "my_zeroed_nm": zeroed.get("my_nm"),
             "mz_zeroed_nm": zeroed.get("mz_nm"),
+            "fx_filtered_n": filtered.get("fx_n"),
+            "fy_filtered_n": filtered.get("fy_n"),
+            "fz_filtered_n": filtered.get("fz_n"),
+            "mx_filtered_nm": filtered.get("mx_nm"),
+            "my_filtered_nm": filtered.get("my_nm"),
+            "mz_filtered_nm": filtered.get("mz_nm"),
             "reference_fz_n": force.get("reference_fz_n"),
             "reference_fz_display_n": force.get("reference_fz_display_n"),
             "median_reference_fz_n": force.get("median_reference_fz_n"),
@@ -775,6 +825,9 @@ class OpticalForceCaptureManager:
             "conditioned_reference_fz_n": force.get(
                 "conditioned_reference_fz_n"
             ),
+            "force_fz_n": record.get(
+                "force_fz_n", _continuous_force_fz_n(force)
+            ),
             "stationary_detected": force.get("stationary_detected"),
             "auto_zero_drift_active": force.get("auto_zero_drift_active"),
             "force_filter_status": force.get("force_filter_status"),
@@ -783,6 +836,15 @@ class OpticalForceCaptureManager:
             "moment_resultant_nm": mechanical.get("moment_resultant_nm"),
             "force_utilization_percent": mechanical.get("force_utilization_percent"),
             "moment_utilization_percent": mechanical.get("moment_utilization_percent"),
+            "filtered_force_resultant_n": filtered_mechanical.get(
+                "force_resultant_n"
+            ),
+            "filtered_shear_resultant_n": filtered_mechanical.get(
+                "shear_resultant_n"
+            ),
+            "filtered_moment_resultant_nm": filtered_mechanical.get(
+                "moment_resultant_nm"
+            ),
             "position_label": record["position_label"],
             "action_label": record["action_label"],
             "trial_id": record["trial_id"],
@@ -802,7 +864,9 @@ class OpticalForceCaptureManager:
         force = record.get("px6d_reference") or {}
         raw = force.get("raw") or {}
         zeroed = force.get("zeroed") or {}
+        filtered = force.get("filtered_zeroed") or zeroed
         mechanical = force.get("mechanical") or {}
+        filtered_mechanical = force.get("filtered_mechanical") or mechanical
         return {
             "capture_index": record["capture_index"],
             "timeline_timestamp_epoch_sec": record["timeline_timestamp_epoch_sec"],
@@ -832,6 +896,12 @@ class OpticalForceCaptureManager:
             "mx_zeroed_nm": zeroed.get("mx_nm"),
             "my_zeroed_nm": zeroed.get("my_nm"),
             "mz_zeroed_nm": zeroed.get("mz_nm"),
+            "fx_filtered_n": filtered.get("fx_n"),
+            "fy_filtered_n": filtered.get("fy_n"),
+            "fz_filtered_n": filtered.get("fz_n"),
+            "mx_filtered_nm": filtered.get("mx_nm"),
+            "my_filtered_nm": filtered.get("my_nm"),
+            "mz_filtered_nm": filtered.get("mz_nm"),
             "reference_fz_n": force.get("reference_fz_n"),
             "reference_fz_display_n": force.get("reference_fz_display_n"),
             "median_reference_fz_n": force.get("median_reference_fz_n"),
@@ -843,6 +913,9 @@ class OpticalForceCaptureManager:
             "conditioned_reference_fz_n": force.get(
                 "conditioned_reference_fz_n"
             ),
+            "force_fz_n": record.get(
+                "force_fz_n", _continuous_force_fz_n(force)
+            ),
             "stationary_detected": force.get("stationary_detected"),
             "auto_zero_drift_active": force.get("auto_zero_drift_active"),
             "force_filter_status": force.get("force_filter_status"),
@@ -851,6 +924,15 @@ class OpticalForceCaptureManager:
             "moment_resultant_nm": mechanical.get("moment_resultant_nm"),
             "force_utilization_percent": mechanical.get("force_utilization_percent"),
             "moment_utilization_percent": mechanical.get("moment_utilization_percent"),
+            "filtered_force_resultant_n": filtered_mechanical.get(
+                "force_resultant_n"
+            ),
+            "filtered_shear_resultant_n": filtered_mechanical.get(
+                "shear_resultant_n"
+            ),
+            "filtered_moment_resultant_nm": filtered_mechanical.get(
+                "moment_resultant_nm"
+            ),
             "model_source": model.get("model_source"),
             "model_status": model.get("model_status") or model.get("status"),
             "model_ready": model.get("model_ready", model.get("ready")),
@@ -962,7 +1044,14 @@ class OpticalForceCaptureManager:
         )
         payload.update(
             {
-                "schema_version": "touch_synchronized_capture_v2",
+                "schema_version": "touch_synchronized_capture_v3",
+                "force_target": {
+                    "mode": "continuous_fz_regression",
+                    "field": "force_fz_n",
+                    "unit": "N",
+                    "source": "PX6D conditioned compression Fz",
+                    "categorical_bins_enabled": False,
+                },
                 "selection_semantics": (
                     "Only user-selected data streams are written to their dedicated CSV files. "
                     "The JSONL manifest contains those same selected payloads plus common labels."

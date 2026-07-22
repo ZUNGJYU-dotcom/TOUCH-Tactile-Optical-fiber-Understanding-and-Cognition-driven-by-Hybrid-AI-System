@@ -98,6 +98,15 @@ class ConditionedFzSample:
     filter_status: str
 
 
+@dataclass(frozen=True)
+class FilteredAxesSample:
+    """Median-despiked and low-pass software-zeroed six-axis values."""
+
+    sequence_id: int
+    median_zeroed_values: tuple[float, ...]
+    filtered_zeroed_values: tuple[float, ...]
+
+
 class Px6dReader:
     """Background polling reader with software tare and timestamp alignment."""
 
@@ -141,6 +150,10 @@ class Px6dReader:
             self.force_deadband_n,
             float(payload.get("auto_zero_capture_limit_n") or 0.060),
         )
+        self.auto_zero_release_reacquire_limit_n = max(
+            self.auto_zero_capture_limit_n,
+            float(payload.get("auto_zero_release_reacquire_limit_n") or 0.30),
+        )
         self.auto_zero_alpha = min(
             0.25, max(0.0001, float(payload.get("auto_zero_alpha") or 0.015))
         )
@@ -181,6 +194,13 @@ class Px6dReader:
         history_limit = max(500, int(self.poll_hz * self.history_seconds))
         self._samples: deque[Px6dSample] = deque(maxlen=history_limit)
         self._conditioned_samples: dict[int, ConditionedFzSample] = {}
+        self._filtered_axis_samples: dict[int, FilteredAxesSample] = {}
+        self._axis_median_windows: dict[str, deque[float]] = {
+            axis: deque(maxlen=self.median_window_samples) for axis in AXIS_NAMES
+        }
+        self._filtered_zeroed_axes: dict[str, float | None] = {
+            axis: None for axis in AXIS_NAMES
+        }
         self._median_reference_window: deque[float] = deque(
             maxlen=self.median_window_samples
         )
@@ -373,10 +393,38 @@ class Px6dReader:
             self._samples.append(sample)
             if evicted_sequence is not None:
                 self._conditioned_samples.pop(evicted_sequence, None)
+                self._filtered_axis_samples.pop(evicted_sequence, None)
             self._valid_frames += 1
+            filtered_axes = self._filter_zeroed_axes_locked(sample)
+            self._filtered_axis_samples[sample.sequence_id] = filtered_axes
             reference = self._reference_fz_from_sample_locked(sample)
             conditioned = self._condition_reference_fz_locked(sample, reference)
             self._conditioned_samples[sample.sequence_id] = conditioned
+
+    def _filter_zeroed_axes_locked(self, sample: Px6dSample) -> FilteredAxesSample:
+        raw = sample.raw_values()
+        tare = self._tare_values or (0.0,) * len(AXIS_NAMES)
+        zeroed = tuple(value - offset for value, offset in zip(raw, tare))
+        median_values: list[float] = []
+        filtered_values: list[float] = []
+        for axis, value in zip(AXIS_NAMES, zeroed):
+            window = self._axis_median_windows[axis]
+            window.append(float(value))
+            median_value = float(statistics.median(window))
+            previous = self._filtered_zeroed_axes[axis]
+            filtered_value = (
+                median_value
+                if previous is None
+                else float(previous) + self.filter_alpha * (median_value - float(previous))
+            )
+            self._filtered_zeroed_axes[axis] = filtered_value
+            median_values.append(median_value)
+            filtered_values.append(filtered_value)
+        return FilteredAxesSample(
+            sequence_id=sample.sequence_id,
+            median_zeroed_values=tuple(median_values),
+            filtered_zeroed_values=tuple(filtered_values),
+        )
 
     def _condition_reference_fz_locked(
         self,
@@ -419,6 +467,15 @@ class Px6dReader:
 
         before_drift_correction = low_pass_reference - self._drift_offset_n
         near_zero = abs(before_drift_correction) <= self.auto_zero_capture_limit_n
+        # This reference channel is intentionally compression-only. A stable
+        # negative residual is therefore release-side zero drift, not a valid
+        # press. Let the baseline reacquire that direction without widening
+        # the positive capture band, which would erase a real light load.
+        release_side_drift = (
+            before_drift_correction < -self.auto_zero_capture_limit_n
+            and abs(before_drift_correction)
+            <= self.auto_zero_release_reacquire_limit_n
+        )
         auto_zero_active = False
         if self._tare_values is None:
             self._stationary_since_epoch_sec = None
@@ -426,7 +483,7 @@ class Px6dReader:
         elif not self.auto_zero_drift_enabled:
             self._stationary_since_epoch_sec = None
             filter_status = "filtered"
-        elif stationary and near_zero:
+        elif stationary and (near_zero or release_side_drift):
             if self._stationary_since_epoch_sec is None:
                 self._stationary_since_epoch_sec = timestamp
             held_for = max(0.0, timestamp - self._stationary_since_epoch_sec)
@@ -439,7 +496,11 @@ class Px6dReader:
                     min(self.maximum_drift_offset_n, proposed_offset),
                 )
                 auto_zero_active = True
-                filter_status = "stationary_drift_tracking"
+                filter_status = (
+                    "stationary_release_drift_tracking"
+                    if release_side_drift
+                    else "stationary_drift_tracking"
+                )
             else:
                 filter_status = "stationary_hold"
         else:
@@ -467,6 +528,11 @@ class Px6dReader:
 
     def _reset_conditioner_locked(self) -> None:
         self._conditioned_samples.clear()
+        self._filtered_axis_samples.clear()
+        for window in self._axis_median_windows.values():
+            window.clear()
+        for axis in AXIS_NAMES:
+            self._filtered_zeroed_axes[axis] = None
         self._median_reference_window.clear()
         self._stationary_window.clear()
         self._filtered_reference_fz_n = None
@@ -623,6 +689,13 @@ class Px6dReader:
         zeroed = tuple(value - offset for value, offset in zip(raw, tare))
         reference_fz = self.compression_sign * zeroed[2]
         conditioned = self._conditioned_samples.get(sample.sequence_id)
+        filtered_axes = self._filtered_axis_samples.get(sample.sequence_id)
+        if filtered_axes is None:
+            filtered_axes = FilteredAxesSample(
+                sequence_id=sample.sequence_id,
+                median_zeroed_values=tuple(float(value) for value in zeroed),
+                filtered_zeroed_values=tuple(float(value) for value in zeroed),
+            )
         if conditioned is None:
             conditioned = ConditionedFzSample(
                 sequence_id=sample.sequence_id,
@@ -646,10 +719,17 @@ class Px6dReader:
             "timestamp_monotonic_sec": sample.timestamp_monotonic_sec,
             "raw": dict(zip(AXIS_NAMES, raw)),
             "zeroed": dict(zip(AXIS_NAMES, zeroed)),
+            "median_zeroed": dict(
+                zip(AXIS_NAMES, filtered_axes.median_zeroed_values)
+            ),
+            "filtered_zeroed": dict(
+                zip(AXIS_NAMES, filtered_axes.filtered_zeroed_values)
+            ),
             "reference_fz_n": reference_fz,
             "reference_fz_display_n": max(
                 0.0, conditioned.conditioned_reference_fz_n
             ),
+            "force_fz_n": max(0.0, conditioned.conditioned_reference_fz_n),
             "median_reference_fz_n": conditioned.median_reference_fz_n,
             "filtered_reference_fz_n": conditioned.low_pass_reference_fz_n,
             "drift_offset_n": conditioned.drift_offset_n,
@@ -667,6 +747,9 @@ class Px6dReader:
             "tare_fz_std_n": self._tare_fz_std_n,
             "tare_sample_count": self._tare_sample_count,
             "mechanical": mechanical,
+            "filtered_mechanical": self._mechanical_metrics(
+                filtered_axes.filtered_zeroed_values
+            ),
         }
 
     def latest(self) -> dict[str, Any]:
@@ -696,6 +779,7 @@ class Px6dReader:
             samples = list(self._samples)
             tare = self._tare_values or (0.0,) * 6
             conditioned_by_sequence = dict(self._conditioned_samples)
+            filtered_axes_by_sequence = dict(self._filtered_axis_samples)
         if not samples:
             return {"ok": False, "status": "px6d_sample_missing"}
         selected = [
@@ -719,6 +803,23 @@ class Px6dReader:
         )
         zeroed = tuple(value - offset for value, offset in zip(raw_medians, tare))
         reference_fz = self.compression_sign * zeroed[2]
+        selected_filtered_axes = [
+            filtered_axes_by_sequence[sample.sequence_id]
+            for sample in selected
+            if sample.sequence_id in filtered_axes_by_sequence
+        ]
+        if selected_filtered_axes:
+            median_zeroed = tuple(
+                statistics.median(item.median_zeroed_values[index] for item in selected_filtered_axes)
+                for index in range(len(AXIS_NAMES))
+            )
+            filtered_zeroed = tuple(
+                statistics.median(item.filtered_zeroed_values[index] for item in selected_filtered_axes)
+                for index in range(len(AXIS_NAMES))
+            )
+        else:
+            median_zeroed = tuple(float(value) for value in zeroed)
+            filtered_zeroed = tuple(float(value) for value in zeroed)
         selected_conditioned = [
             conditioned_by_sequence[sample.sequence_id]
             for sample in selected
@@ -770,8 +871,11 @@ class Px6dReader:
             "window_half_width_sec": half_window,
             "raw": dict(zip(AXIS_NAMES, raw_medians)),
             "zeroed": dict(zip(AXIS_NAMES, zeroed)),
+            "median_zeroed": dict(zip(AXIS_NAMES, median_zeroed)),
+            "filtered_zeroed": dict(zip(AXIS_NAMES, filtered_zeroed)),
             "reference_fz_n": reference_fz,
             "reference_fz_display_n": max(0.0, conditioned_reference_fz),
+            "force_fz_n": max(0.0, conditioned_reference_fz),
             "median_reference_fz_n": median_reference_fz,
             "filtered_reference_fz_n": filtered_reference_fz,
             "drift_offset_n": drift_offset,
@@ -794,6 +898,7 @@ class Px6dReader:
             "tare_fz_std_n": self._tare_fz_std_n,
             "tare_sample_count": self._tare_sample_count,
             "mechanical": self._mechanical_metrics(zeroed),
+            "filtered_mechanical": self._mechanical_metrics(filtered_zeroed),
             "semantics": "PX6D_reference_Fz_not_optical_force_prediction",
         }
 
@@ -848,6 +953,9 @@ class Px6dReader:
                     "auto_zero_drift_enabled": self.auto_zero_drift_enabled,
                     "auto_zero_hold_sec": self.auto_zero_hold_sec,
                     "auto_zero_capture_limit_n": self.auto_zero_capture_limit_n,
+                    "auto_zero_release_reacquire_limit_n": (
+                        self.auto_zero_release_reacquire_limit_n
+                    ),
                     "auto_zero_alpha": self.auto_zero_alpha,
                     "maximum_drift_offset_n": self.maximum_drift_offset_n,
                     "current_drift_offset_n": self._drift_offset_n,
@@ -855,6 +963,8 @@ class Px6dReader:
                     "auto_zero_drift_active": self._auto_zero_drift_active,
                     "filter_status": self._filter_status,
                     "raw_values_retained": True,
+                    "all_six_axes_filtered": True,
+                    "filtered_axis_names": list(AXIS_NAMES),
                 },
                 "sync_quality_thresholds_ms": {
                     "excellent": self.sync_excellent_max_offset_ms,

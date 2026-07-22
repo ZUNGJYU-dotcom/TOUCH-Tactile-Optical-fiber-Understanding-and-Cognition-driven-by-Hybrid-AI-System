@@ -144,6 +144,7 @@ def _load_px6d_reference_config() -> dict[str, Any]:
         "auto_zero_drift_enabled": True,
         "auto_zero_hold_sec": 1.5,
         "auto_zero_capture_limit_n": 0.060,
+        "auto_zero_release_reacquire_limit_n": 0.30,
         "auto_zero_alpha": 0.015,
         "maximum_drift_offset_n": 0.50,
         "auto_tare_on_start": True,
@@ -226,6 +227,10 @@ def _load_px6d_reference_config() -> dict[str, Any]:
             "auto_zero_capture_limit_n": signal_config.get(
                 "auto_zero_capture_limit_n",
                 defaults["auto_zero_capture_limit_n"],
+            ),
+            "auto_zero_release_reacquire_limit_n": signal_config.get(
+                "auto_zero_release_reacquire_limit_n",
+                defaults["auto_zero_release_reacquire_limit_n"],
             ),
             "auto_zero_alpha": signal_config.get(
                 "auto_zero_alpha", defaults["auto_zero_alpha"]

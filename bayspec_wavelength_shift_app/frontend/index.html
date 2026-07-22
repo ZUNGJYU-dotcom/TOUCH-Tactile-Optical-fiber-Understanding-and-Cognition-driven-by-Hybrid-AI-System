@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TOUCH System - Temporal Spectral Validation</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/styles.css?v=touch-runtime-audit-v11b" />
+    <link rel="stylesheet" href="/static/styles.css?v=recording-workspace-v23" />
     <script type="importmap">
       {
         "imports": {
@@ -15,7 +15,7 @@
       }
     </script>
   </head>
-  <body>
+  <body class="minimal-copy">
     <div class="app-shell operator-mode">
       <header class="topbar">
         <div class="title-zone">
@@ -184,7 +184,7 @@
         <div class="settings-header">
           <div>
             <strong id="settingsPanelTitle">View</strong>
-            <span>Surface presentation</span>
+            <span class="explanatory-copy">Surface presentation</span>
           </div>
           <button id="settingsCloseButton" class="ui-icon-button icon-only-button" type="button" aria-label="Close settings" data-tooltip="Close" title="Close settings">
             <i data-lucide="x" aria-hidden="true"></i>
@@ -207,9 +207,9 @@
             <div class="hud-title-row">
               <div>
                 <h2>Response Trace</h2>
-                <p id="signalQaSummary">waiting for wavelength data</p>
+              <p id="signalQaSummary" class="explanatory-copy" hidden aria-hidden="true"></p>
               </div>
-              <span id="traceChip" class="chip">GLOBAL · IDLE</span>
+              <span id="traceChip" class="chip" aria-live="polite" hidden>PAUSED</span>
             </div>
             <div class="trace-kpi-strip" aria-label="Response trace summary">
               <span><small id="traceCurrentLabel">Now · pm</small><strong id="traceCurrentValue">--</strong></span>
@@ -250,13 +250,37 @@
               <div><span>Peaks</span><strong id="numChangedPeaks">--</strong></div>
             </div>
           </div>
+
+          <div class="hud-card operator-current-hud" aria-label="Current tactile state">
+            <div class="hud-title-row">
+              <h2>Current</h2>
+            </div>
+            <div class="operator-current-grid">
+              <div>
+                <span>Contact</span>
+                <strong id="operatorContactValue">Idle</strong>
+              </div>
+              <div>
+                <span>Position</span>
+                <strong id="operatorPositionValue">--</strong>
+              </div>
+            </div>
+            <div class="px6d-reference-row operator-force-readout" aria-label="Force sensor">
+              <div>
+                <span>Force Sensor</span>
+                <strong id="px6dReferenceFz">-- N</strong>
+              </div>
+              <span id="px6dReferenceStatus" class="px6d-reference-status">connecting</span>
+              <button id="px6dTareButton" type="button" title="Zero Fz">Zero</button>
+            </div>
+          </div>
         </section>
 
         <section class="twin-stage">
           <div class="stage-header">
             <div>
               <h2 id="tactileSurfaceTitle">Thumb Tactile Surface</h2>
-              <span id="surfaceProxyCaption">Sensor slot response surface</span>
+              <span id="surfaceProxyCaption" class="explanatory-copy">Sensor slot response surface</span>
             </div>
             <div class="stage-actions">
               <button id="thumbHolderModeButton" class="active" type="button">Thumb holder mode</button>
@@ -280,7 +304,7 @@
             <div id="threeMount" class="three-mount">
               <div class="scene-caption">
                 <strong id="scenePrimaryCaption">no_contact</strong>
-                <span id="surfaceModeNote">Optical response level</span>
+                <span id="surfaceModeNote" class="explanatory-copy">Optical response level</span>
               </div>
               <div class="surface-orientation-cue" aria-label="Surface channel orientation">
                 <span class="surface-orientation-title">ARRAY ORIENTATION</span>
@@ -295,11 +319,11 @@
             </div>
             <div class="heatmap-panel diagnostics-only">
               <div class="panel-heading compact">
-                <h2>2D Response Map</h2>
-                <span id="heatmapChip" class="chip">spatial mapping pending</span>
+                <h2 class="heatmap-title">2D Response Map</h2>
+                <span id="heatmapChip" class="chip explanatory-copy">spatial mapping pending</span>
               </div>
               <canvas id="heatmapCanvas" class="heatmap-canvas"></canvas>
-              <div class="axis-note" id="heatmapAxisNote">Global FBG01-FBG09 spectrum only. Physical P11-P33 mapping is pending.</div>
+              <div class="axis-note explanatory-copy" id="heatmapAxisNote">Global FBG01-FBG09 spectrum only. Physical P11-P33 mapping is pending.</div>
             </div>
           </div>
 
@@ -317,9 +341,24 @@
             <span>λ0: <strong id="demoBaseline">--</strong></span>
             <span>λB: <strong id="demoCurrentIntensity">--</strong></span>
             <span>Δλ: <strong id="demoCurrentAttenuation">--</strong></span>
-            <span id="demoReadoutNote">Synthetic wavelength-shift frames only; not live data and not physical calibration.</span>
+            <span id="demoReadoutNote" class="explanatory-copy">Synthetic wavelength-shift frames only; not live data and not physical calibration.</span>
           </div>
         </section>
+
+        <div
+          id="diagnosticsPanelResizer"
+          class="diagnostics-panel-resizer diagnostics-only"
+          role="separator"
+          aria-label="Resize diagnostics panel"
+          aria-orientation="vertical"
+          aria-valuemin="280"
+          aria-valuemax="680"
+          aria-valuenow="420"
+          tabindex="0"
+          title="Drag left or right to resize Diagnostics; double-click to reset"
+        >
+          <i data-lucide="grip-vertical" aria-hidden="true"></i>
+        </div>
 
         <section class="right-panel panel">
           <div class="operator-summary-card">
@@ -332,14 +371,6 @@
               <div><span>Dominant channel</span><strong id="surfaceDominantChannel">--</strong></div>
               <div><span>Coupling status</span><strong id="surfaceRuleSource">coupled</strong></div>
               <div class="fullscreen-hidden-summary-field"><span>Frame state</span><strong id="surfaceFrameState">IDLE</strong></div>
-            </div>
-            <div class="px6d-reference-row" aria-label="PX6D Z-axis reference force">
-              <div>
-                <span>PX6D Reference Fz</span>
-                <strong id="px6dReferenceFz">-- N</strong>
-              </div>
-              <span id="px6dReferenceStatus" class="px6d-reference-status">connecting</span>
-              <button id="px6dTareButton" type="button" title="Set a software-only PX6D zero from a stable no-load interval">Zero Fz</button>
             </div>
           </div>
 
@@ -356,7 +387,7 @@
               <div id="footprintP23" class="mini-pixel"><strong>FBG08</strong><span>--</span></div>
               <div id="footprintP33" class="mini-pixel"><strong>FBG09</strong><span>--</span></div>
             </div>
-            <p id="footprintNote">Wavelength-order candidates; physical P11-P33 mapping pending</p>
+            <p id="footprintNote" class="explanatory-copy">Wavelength-order candidates; physical P11-P33 mapping pending</p>
           </div>
 
           <div class="operator-band-card">
@@ -377,16 +408,19 @@
             <button class="active" data-diagnostic-tab="signal" data-tooltip="Signal diagnostics" type="button" role="tab" aria-label="Signal diagnostics" aria-selected="true">
               <i data-lucide="activity" aria-hidden="true"></i><span>Signal</span>
             </button>
+            <button data-diagnostic-tab="recording" data-tooltip="Data recording" type="button" role="tab" aria-label="Data recording" aria-selected="false">
+              <i data-lucide="circle-dot" aria-hidden="true"></i><span>Record</span>
+            </button>
             <button data-diagnostic-tab="surface" data-tooltip="Surface diagnostics" type="button" role="tab" aria-label="Surface diagnostics" aria-selected="false">
               <i data-lucide="grid-3x3" aria-hidden="true"></i><span>Surface</span>
             </button>
             <button data-diagnostic-tab="demo" data-tooltip="Demo controls" type="button" role="tab" aria-label="Demo controls" aria-selected="false">
               <i data-lucide="play" aria-hidden="true"></i><span>Demo</span>
             </button>
-            <button data-diagnostic-tab="acquisition" data-tooltip="Acquisition diagnostics" type="button" role="tab" aria-label="Acquisition diagnostics" aria-selected="false">
+            <button data-diagnostic-tab="acquisition" data-tooltip="Input diagnostics" type="button" role="tab" aria-label="Input diagnostics" aria-selected="false">
               <i data-lucide="radio" aria-hidden="true"></i><span>Input</span>
             </button>
-            <button data-diagnostic-tab="reference" data-tooltip="Mechanical reference and synchronized recording" type="button" role="tab" aria-label="Mechanical reference and synchronized recording" aria-selected="false">
+            <button data-diagnostic-tab="reference" data-tooltip="Mechanical reference" type="button" role="tab" aria-label="Mechanical reference" aria-selected="false">
               <i data-lucide="gauge" aria-hidden="true"></i><span>Force</span>
             </button>
             <button data-diagnostic-tab="geometry" data-tooltip="Geometry diagnostics" type="button" role="tab" aria-label="Geometry diagnostics" aria-selected="false">
@@ -441,8 +475,8 @@
                 <div><span>Trajectory</span><strong id="trajectoryNote">--</strong></div>
                 <div class="diagnostic-wide"><span>Raw coupling status</span><strong id="couplingStatus">--</strong></div>
               </div>
-              <p id="surfaceText" class="small-note diagnostics-only">Global nine-FBG spectrum pending. Physical P11-P33 mapping is not approved.</p>
-              <p id="responseText" class="small-note diagnostics-only">Waiting for decoded BaySpec Bragg wavelength input.</p>
+              <p id="surfaceText" class="small-note diagnostics-only explanatory-copy">Global nine-FBG spectrum pending. Physical P11-P33 mapping is not approved.</p>
+              <p id="responseText" class="small-note diagnostics-only explanatory-copy">Waiting for decoded BaySpec Bragg wavelength input.</p>
             </details>
             <details class="diagnostic-subsection diagnostic-array-status">
               <summary>Array status</summary>
@@ -456,7 +490,7 @@
                 <div><span>L/R asymmetry</span><strong id="surfaceLRAsymmetry">--</strong></div>
                 <div><span>T/B asymmetry</span><strong id="surfaceTBAsymmetry">--</strong></div>
               </div>
-              <p id="surfaceQualityNote" class="small-note">single-point fallback surface</p>
+              <p id="surfaceQualityNote" class="small-note explanatory-copy">single-point fallback surface</p>
             </details>
             <details class="diagnostic-subsection diagnostic-coupling-raw">
               <summary>Coupling and raw frame</summary>
@@ -466,8 +500,8 @@
                 <button id="idealIndependentViewButton" type="button">Ideal decoupled simulation</button>
                 <button id="couplingCompensatedViewButton" type="button" disabled>Coupling-compensated response</button>
               </div>
-              <p id="couplingDiagnosticNote" class="small-note">Calibration matrix missing. Showing raw mechanically coupled wavelength-shift response.</p>
-              <p id="denseCouplingExplanation" class="small-note">
+              <p id="couplingDiagnosticNote" class="small-note explanatory-copy">Calibration matrix missing. Showing raw mechanically coupled wavelength-shift response.</p>
+              <p id="denseCouplingExplanation" class="small-note explanatory-copy">
                 One fingertip patch can shift several FBG peaks through shared-elastomer mechanical coupling. The optical-intensity edition's directional bend-loss cascade is not reused here. A measured coupling matrix is required before local-response inversion.
               </p>
               <details class="diagnostic-raw-block">
@@ -577,6 +611,76 @@
             </details>
           </details>
 
+          <details class="prediction-card diagnostics-only diagnostic-card diagnostic-capture-card" data-diagnostic-group="recording" open>
+              <summary><span>Data recording</span><strong id="px6dCaptureSummaryStatus" class="capture-summary-status">Check setup</strong></summary>
+              <div class="diagnostic-capture-readiness" aria-label="Recording readiness">
+                <div><span>Spectrum</span><strong id="px6dCaptureSpectrumReady" data-state="waiting">Waiting</strong></div>
+                <div><span>Force</span><strong id="px6dCaptureForceReady" data-state="waiting">Waiting</strong></div>
+                <div><span>Position</span><strong id="px6dCapturePositionReady" data-state="waiting">Select</strong></div>
+                <div><span>Folder</span><strong id="px6dCaptureFolderReady" data-state="waiting">Select</strong></div>
+              </div>
+              <div class="diagnostic-capture-form">
+                <fieldset class="diagnostic-capture-position-field">
+                  <legend>Position</legend>
+                  <select id="px6dCapturePosition" class="diagnostic-capture-position-select" aria-hidden="true" tabindex="-1">
+                    <option value="" selected>Select</option>
+                    <option value="unlabeled">Unlabeled</option>
+                    <option>P11</option><option>P21</option><option>P31</option>
+                    <option>P12</option><option>P22</option><option>P32</option>
+                    <option>P13</option><option>P23</option><option>P33</option>
+                  </select>
+                  <div class="diagnostic-capture-position-grid" role="group" aria-label="Recording position">
+                    <button type="button" data-capture-position="P11" aria-pressed="false">P11</button>
+                    <button type="button" data-capture-position="P21" aria-pressed="false">P21</button>
+                    <button type="button" data-capture-position="P31" aria-pressed="false">P31</button>
+                    <button type="button" data-capture-position="P12" aria-pressed="false">P12</button>
+                    <button type="button" data-capture-position="P22" aria-pressed="false">P22</button>
+                    <button type="button" data-capture-position="P32" aria-pressed="false">P32</button>
+                    <button type="button" data-capture-position="P13" aria-pressed="false">P13</button>
+                    <button type="button" data-capture-position="P23" aria-pressed="false">P23</button>
+                    <button type="button" data-capture-position="P33" aria-pressed="false">P33</button>
+                  </div>
+                  <button class="diagnostic-capture-unlabeled" type="button" data-capture-position="unlabeled" aria-pressed="false">Unlabeled</button>
+                </fieldset>
+                <div class="diagnostic-capture-force-readout" role="status" aria-live="polite">
+                  <span>Force Sensor</span>
+                  <strong id="px6dCaptureForceValue">--</strong>
+                </div>
+                <label>Trial ID
+                  <span class="diagnostic-capture-trial-row">
+                    <input id="px6dCaptureTrial" type="text" value="trial_001" maxlength="48" />
+                    <button id="px6dCaptureNextTrialButton" type="button" title="Next trial">Next</button>
+                  </span>
+                </label>
+                <label class="diagnostic-capture-note-field">Note
+                  <input id="px6dCaptureNote" type="text" placeholder="optional" maxlength="120" />
+                </label>
+                <fieldset class="diagnostic-capture-stream-field">
+                  <legend>Save</legend>
+                  <label title="Full wavelength and intensity spectrum"><input id="px6dCaptureSpectrum" type="checkbox" value="spectrum" checked /> Spectrum</label>
+                  <label title="Contact and position recognition results"><input id="px6dCaptureResponse" type="checkbox" value="response" checked /> Recognition</label>
+                  <label title="PX6D six-axis force data"><input id="px6dCaptureForce" type="checkbox" value="force" checked /> Force</label>
+                </fieldset>
+                <label class="diagnostic-capture-output-field">Folder
+                  <span class="diagnostic-capture-path-row">
+                    <input id="px6dCaptureOutputRoot" type="text" placeholder="Choose or enter a folder" />
+                    <button id="px6dCaptureBrowseButton" type="button" title="Choose output folder"><i data-lucide="folder-open" aria-hidden="true"></i><span>Browse</span></button>
+                  </span>
+                </label>
+              </div>
+              <div class="diagnostic-capture-actions">
+                <button id="px6dCaptureStartButton" type="button"><i data-lucide="circle-dot" aria-hidden="true"></i><span>Start</span></button>
+                <button id="px6dCaptureStopButton" type="button" disabled><i data-lucide="square" aria-hidden="true"></i><span>Stop</span></button>
+              </div>
+              <div class="diagnostic-capture-progress">
+                <div><span>Status</span><strong id="px6dCaptureStatus">idle</strong></div>
+                <div><span>Time</span><strong id="px6dCaptureDuration">00:00</strong></div>
+                <div><span>Frames</span><strong id="px6dCaptureFrames">0</strong></div>
+                <div><span>Sync</span><strong id="px6dCaptureRatio">--</strong></div>
+              </div>
+              <p id="px6dCaptureOutput" class="diagnostic-capture-output" title="">Ready.</p>
+            </details>
+
           <details class="prediction-card diagnostics-only diagnostic-card diagnostic-reference-card" data-diagnostic-group="reference" open>
             <summary class="section-label">MECHANICAL REFERENCE</summary>
             <div class="diagnostic-reference-headline">
@@ -585,14 +689,14 @@
                 <h3 id="diagnosticPx6dConnection">COM3 · offline</h3>
               </div>
               <div class="diagnostic-reference-primary">
-                <span>Compression Fz</span>
+                <span>Conditioned compression Fz</span>
                 <strong id="diagnosticPx6dReferenceFz">-- N</strong>
               </div>
             </div>
-            <div class="diagnostic-mechanical-axis-grid" aria-label="Software-zeroed PX6D six-axis values">
+            <div class="diagnostic-mechanical-axis-grid" aria-label="Filtered software-zeroed PX6D six-axis values">
               <div><span>Fx · N</span><strong id="diagnosticPx6dFx">--</strong></div>
               <div><span>Fy · N</span><strong id="diagnosticPx6dFy">--</strong></div>
-              <div><span>Fz · N</span><strong id="diagnosticPx6dFz">--</strong></div>
+              <div><span>Compression Fz · N</span><strong id="diagnosticPx6dFz">--</strong></div>
               <div><span>Mx · N·m</span><strong id="diagnosticPx6dMx">--</strong></div>
               <div><span>My · N·m</span><strong id="diagnosticPx6dMy">--</strong></div>
               <div><span>Mz · N·m</span><strong id="diagnosticPx6dMz">--</strong></div>
@@ -606,7 +710,7 @@
             <div class="diagnostic-reference-status-grid">
               <div><span>Software zero</span><strong id="diagnosticPx6dTareStatus">required</strong></div>
               <div><span>Zero noise</span><strong id="diagnosticPx6dTareNoise">--</strong></div>
-              <div><span>Low-pass Fz</span><strong id="diagnosticPx6dFilteredFz">--</strong></div>
+              <div><span>Low-pass compression Fz</span><strong id="diagnosticPx6dFilteredFz">--</strong></div>
               <div><span>Drift offset</span><strong id="diagnosticPx6dDriftOffset">--</strong></div>
               <div><span>Filter state</span><strong id="diagnosticPx6dFilterStatus">--</strong></div>
               <div><span>Sample rate</span><strong id="diagnosticPx6dSampleRate">--</strong></div>
@@ -619,7 +723,7 @@
             <details class="diagnostic-subsection diagnostic-mechanical-provenance">
               <summary>Reference provenance</summary>
               <div class="status-grid">
-                <div><span>Raw Fz</span><strong id="diagnosticPx6dRawFz">--</strong></div>
+                <div><span>Sensor raw Fz (signed)</span><strong id="diagnosticPx6dRawFz">--</strong></div>
                 <div><span>Compression sign</span><strong id="diagnosticPx6dCompressionSign">--</strong></div>
                 <div><span>Force axis range</span><strong id="diagnosticPx6dForceRange">--</strong></div>
                 <div><span>Moment axis range</span><strong id="diagnosticPx6dMomentRange">--</strong></div>
@@ -640,60 +744,7 @@
               <div><span>Pairing method</span><strong id="diagnosticPx6dSyncMethod">--</strong></div>
               <div><span>Force samples</span><strong id="diagnosticPx6dSyncSamples">--</strong></div>
             </div>
-            <p id="diagnosticPx6dSync" class="diagnostic-sync-note">Waiting for an optical spectrum frame. PX6D can continue independently.</p>
-          </details>
-
-          <details class="prediction-card diagnostics-only diagnostic-card diagnostic-capture-card" data-diagnostic-group="reference">
-            <summary class="section-label">SYNCHRONIZED DATA RECORDING</summary>
-            <div class="diagnostic-capture-form">
-              <label>Position
-                <select id="px6dCapturePosition">
-                  <option value="unlabeled">Unlabeled</option>
-                  <option>P11</option><option>P21</option><option>P31</option>
-                  <option>P12</option><option>P22</option><option>P32</option>
-                  <option>P13</option><option>P23</option><option>P33</option>
-                </select>
-              </label>
-              <label>Action
-                <select id="px6dCaptureAction">
-                  <option value="no_contact">No contact</option>
-                  <option value="light_press">Light press</option>
-                  <option value="normal_press">Normal press</option>
-                  <option value="hard_press">Hard press</option>
-                  <option value="tap">Tap</option>
-                  <option value="release">Release</option>
-                </select>
-              </label>
-              <label>Trial ID
-                <input id="px6dCaptureTrial" type="text" value="trial_001" maxlength="48" />
-              </label>
-              <label class="diagnostic-capture-note-field">Note
-                <input id="px6dCaptureNote" type="text" placeholder="optional" maxlength="120" />
-              </label>
-              <fieldset class="diagnostic-capture-stream-field">
-                <legend>Data to save</legend>
-                <label><input id="px6dCaptureSpectrum" type="checkbox" value="spectrum" checked /> Full spectrum</label>
-                <label><input id="px6dCaptureResponse" type="checkbox" value="response" checked /> Tactile time series</label>
-                <label><input id="px6dCaptureForce" type="checkbox" value="force" checked /> PX6D force</label>
-              </fieldset>
-              <label class="diagnostic-capture-output-field">Save location
-                <span class="diagnostic-capture-path-row">
-                  <input id="px6dCaptureOutputRoot" type="text" placeholder="Choose or enter a folder" />
-                  <button id="px6dCaptureBrowseButton" type="button" title="Choose output folder"><i data-lucide="folder-open" aria-hidden="true"></i><span>Browse</span></button>
-                </span>
-              </label>
-            </div>
-            <div class="diagnostic-capture-actions">
-              <button id="px6dCaptureStartButton" type="button"><i data-lucide="circle-dot" aria-hidden="true"></i><span>Start linked recording</span></button>
-              <button id="px6dCaptureStopButton" type="button" disabled><i data-lucide="square" aria-hidden="true"></i><span>Stop &amp; save</span></button>
-            </div>
-            <div class="diagnostic-capture-progress">
-              <div><span>Status</span><strong id="px6dCaptureStatus">idle</strong></div>
-              <div><span>Timeline frames</span><strong id="px6dCaptureFrames">0</strong></div>
-              <div><span>Pair ratio</span><strong id="px6dCaptureRatio">--</strong></div>
-              <div><span>Last sync</span><strong id="px6dCaptureLastSync">--</strong></div>
-            </div>
-            <p id="px6dCaptureOutput" class="diagnostic-capture-output">Output appears here after recording starts.</p>
+            <p id="diagnosticPx6dSync" class="diagnostic-sync-note explanatory-copy">Waiting for an optical spectrum frame. PX6D can continue independently.</p>
           </details>
 
           <section class="prediction-card diagnostics-only diagnostic-card diagnostic-alignment-card" data-diagnostic-group="geometry">
@@ -713,8 +764,8 @@
                   <span>P12</span><span>P22</span><span>P32</span>
                   <span>P13</span><span>P23</span><span>P33</span>
                 </div>
-                <p>P11 to P12 to P13 is vertical downward.</p>
-                <p>P11 to P21 to P31 is horizontal rightward.</p>
+                <p class="explanatory-copy">P11 to P12 to P13 is vertical downward.</p>
+                <p class="explanatory-copy">P11 to P21 to P31 is horizontal rightward.</p>
               </div>
             </div>
 
@@ -772,7 +823,7 @@
                 <button id="thumbAlignmentSaveButton" type="button">Save Alignment</button>
                 <button id="thumbAlignmentResetButton" type="button">Reset Alignment</button>
               </div>
-              <p id="thumbAlignmentSaveStatus" class="small-note">alignment config writes to config/thumb_holder_scene.yaml</p>
+              <p id="thumbAlignmentSaveStatus" class="small-note"></p>
             </div>
           </section>
 
@@ -813,6 +864,6 @@
 
     </div>
     <script src="/static/vendor/lucide/lucide.min.js"></script>
-    <script type="module" src="/static/app.js?v=touch-runtime-audit-v11b"></script>
+    <script type="module" src="/static/app.js?v=recording-workspace-v23"></script>
   </body>
 </html>

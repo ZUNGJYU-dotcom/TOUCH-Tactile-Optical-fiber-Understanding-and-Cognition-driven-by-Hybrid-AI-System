@@ -13,31 +13,43 @@ class DiagnosticsWorkspaceSimplificationContractTests(unittest.TestCase):
         cls.css = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
         cls.js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
 
-    def test_six_workspaces_use_one_stable_navigation_row(self) -> None:
-        self.assertEqual(self.html.count("data-diagnostic-tab="), 6)
+    def test_seven_workspaces_use_a_scrollable_navigation_row(self) -> None:
+        self.assertEqual(self.html.count("data-diagnostic-tab="), 7)
         self.assertRegex(
             self.css,
             re.compile(
                 r"\.diagnostics-mode \.diagnostic-tabs\s*\{[^}]*"
-                r"grid-template-columns:\s*repeat\(6, minmax\(0, 1fr\)\)",
+                r"display:\s*flex\s*!important[^}]*"
+                r"overflow-x:\s*auto",
                 re.S,
             ),
         )
+        self.assertIn("flex: 1 0 56px", self.css)
+        self.assertIn('button.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" })', self.js)
 
     def test_workspace_tabs_use_compact_labels_with_accessible_full_names(self) -> None:
-        for visible_label in ("Signal", "Surface", "Demo", "Input", "Force", "Geometry"):
+        for visible_label in ("Signal", "Record", "Surface", "Demo", "Input", "Force", "Geometry"):
             self.assertIn(f"<span>{visible_label}</span>", self.html)
         for accessible_name in (
             "Signal diagnostics",
+            "Data recording",
             "Surface diagnostics",
             "Demo controls",
-            "Acquisition diagnostics",
-            "Mechanical reference and synchronized recording",
+            "Input diagnostics",
+            "Mechanical reference",
             "Geometry diagnostics",
         ):
             self.assertIn(f'aria-label="{accessible_name}"', self.html)
-        for icon_name in ("activity", "grid-3x3", "play", "radio", "gauge", "boxes"):
+        for icon_name in ("activity", "circle-dot", "grid-3x3", "play", "radio", "gauge", "boxes"):
             self.assertIn(f'data-lucide="{icon_name}"', self.html)
+
+    def test_recording_is_not_nested_inside_input(self) -> None:
+        self.assertIn('recording: ".diagnostic-capture-card"', self.js)
+        acquisition_start = self.html.index('data-diagnostic-group="acquisition"')
+        recording_start = self.html.index('data-diagnostic-group="recording"')
+        acquisition_close = self.html.index("</details>", self.html.index('class="diagnostic-subsection diagnostic-source-adapter"', acquisition_start))
+        acquisition_close = self.html.index("</details>", acquisition_close + 1)
+        self.assertLess(acquisition_close, recording_start)
 
     def test_demo_workspace_collapses_the_otherwise_empty_card_stack(self) -> None:
         self.assertIn(

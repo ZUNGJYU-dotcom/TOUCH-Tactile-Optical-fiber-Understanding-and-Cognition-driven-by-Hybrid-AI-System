@@ -1,6 +1,6 @@
 # TOUCH System - Trained Static Spectrum Twin
 
-Private research software for ordinary-FBG tactile recognition from a complete
+Research software for ordinary-FBG tactile recognition from a complete
 512-point BaySpec/Sense spectrum. This edition uses a trained full-spectrum
 fingerprint to estimate:
 
@@ -10,6 +10,21 @@ fingerprint to estimate:
 
 It is a separate application. It does not replace or modify the retained PD
 voltage, optical-intensity, or provisional wavelength-shift editions.
+
+## Latest Update - v0.14.0
+
+The Diagnostics workspace now provides a dedicated **Record** page directly
+after **Signal**. Recording is no longer nested inside **Input**: Input is
+reserved for acquisition health and source adapters, while Record contains the
+position selector, live force reference, trial metadata, output selection,
+folder, and start/stop controls. The seven diagnostic tabs use a horizontally
+scrollable navigation strip and automatically bring the selected tab into view
+when the evidence rail is narrow.
+
+This release also includes the current PX6D reconnect, conditioned six-axis
+display, synchronized optical-force recording, compact Operator UI, and the
+trained static-spectrum runtime. See [CHANGELOG.md](CHANGELOG.md) for the
+release summary.
 
 ## Recognition Contract
 
@@ -141,14 +156,14 @@ D:\anaconda\miniconda3\python.exe -m unittest discover -s tests -p "test_*.py" -
 
 The TOUCH backend can read the PX6D six-axis sensor directly on `COM3` at
 921600 baud while BaySpec supplies full-spectrum frames. The Operator summary
-shows the software-zeroed `PX6D Reference Fz`. The Diagnostics **Force**
-workspace exposes zeroed `Fx/Fy/Fz/Mx/My/Mz`, force and moment resultants,
+shows the conditioned `PX6D Compression Fz`. The Diagnostics **Force**
+workspace exposes filtered software-zeroed `Fx/Fy/Fz/Mx/My/Mz`, force and moment resultants,
 configured range utilization, tare quality, sample freshness, and explicit
 optical-to-mechanical timestamp alignment quality. `Zero Fz` changes only the
 software offset and never sends a hardware calibration command.
 
-The displayed Fz passes through a short median despiker, an exponential
-low-pass stage, and a configurable deadband. A slow zero-drift tracker is
+All six axes pass through a short median despiker and an exponential low-pass
+stage. The displayed compression Fz additionally uses a configurable deadband. A slow Fz-only zero-drift tracker is
 allowed to move only after the signal has remained stable and close to zero;
 it freezes immediately during contact or motion. This conditioning is intended
 to suppress unloaded drift without absorbing an applied load. Raw,
@@ -177,12 +192,17 @@ timestamp window. Every selected CSV shares `capture_index`,
 capture uses the PX6D host timestamp and does not wait for BaySpec. The three
 primary files are `spectrum_timeseries.csv`, `tactile_response_timeseries.csv`,
 and `force_timeseries.csv`; unselected files are not created.
-`force_timeseries.csv` preserves both the original PX6D measurements and the
-conditioned Fz stages, so filtering never destroys the calibration source data.
+`force_timeseries.csv` preserves the original, software-zeroed, and filtered
+six-axis PX6D measurements together with the conditioned Fz stages, so
+filtering never destroys the calibration source data.
 
 The same workflow is available directly in Diagnostics: select **Force**, set
-the labels, tick the desired streams, and choose a save folder with **Browse**.
-**Start linked recording** and **Stop & save** create one session subfolder.
+the position and trial ID, tick the desired streams, and choose a folder with
+**Browse**. The UI uses the live continuous `PX6D Fz (N)` reference instead of
+a coarse light/normal/hard action label. **Start** and **Stop** create one
+session subfolder.
+Each synchronized force row stores `force_fz_n` as a continuous regression
+target in N; no force-level bins are applied.
 `session_metadata.json` includes an automatic cross-file timeline audit.
 PX6D remains an independent ground-truth reference; the optical model is not
 presented as calibrated force. If no custom folder is chosen, portable desktop

@@ -15,6 +15,7 @@ for path in (APP_ROOT, PROJECT_ROOT):
         sys.path.insert(0, str(path))
 
 from backend.px6d_reader import (
+    AXIS_NAMES,
     Px6dReader,
     Px6dSample,
     command_packet,
@@ -24,17 +25,27 @@ from backend.px6d_reader import (
 from backend import main as backend_main
 
 
-def make_sample(sequence_id: int, timestamp: float, *, fz_n: float) -> Px6dSample:
+def make_sample(
+    sequence_id: int,
+    timestamp: float,
+    *,
+    fz_n: float,
+    fx_n: float = 0.01,
+    fy_n: float = -0.02,
+    mx_nm: float = 0.001,
+    my_nm: float = -0.002,
+    mz_nm: float = 0.003,
+) -> Px6dSample:
     return Px6dSample(
         sequence_id=sequence_id,
         timestamp_epoch_sec=timestamp,
         timestamp_monotonic_sec=timestamp,
-        fx_n=0.01,
-        fy_n=-0.02,
+        fx_n=fx_n,
+        fy_n=fy_n,
         fz_n=fz_n,
-        mx_nm=0.001,
-        my_nm=-0.002,
-        mz_nm=0.003,
+        mx_nm=mx_nm,
+        my_nm=my_nm,
+        mz_nm=mz_nm,
         roundtrip_ms=20.0,
     )
 
@@ -83,6 +94,7 @@ class Px6dReferenceForceTests(unittest.TestCase):
         self.assertAlmostEqual(latest["zeroed"]["fz_n"], -0.50, places=6)
         self.assertAlmostEqual(latest["reference_fz_n"], 0.50, places=6)
         self.assertAlmostEqual(latest["reference_fz_display_n"], 0.50, places=6)
+        self.assertAlmostEqual(latest["force_fz_n"], 0.50, places=6)
         self.assertTrue(latest["tare_ready"])
         self.assertAlmostEqual(latest["mechanical"]["force_resultant_n"], 0.50, delta=0.03)
         self.assertIn("shear_resultant_n", latest["mechanical"])
@@ -141,6 +153,11 @@ class Px6dReferenceForceTests(unittest.TestCase):
         self.assertEqual(aligned["sample_count"], 3)
         self.assertAlmostEqual(aligned["raw"]["fz_n"], 0.20, places=6)
         self.assertAlmostEqual(aligned["reference_fz_n"], 0.60, places=6)
+        self.assertAlmostEqual(
+            aligned["force_fz_n"],
+            max(0.0, aligned["conditioned_reference_fz_n"]),
+            places=6,
+        )
         self.assertEqual(aligned["sync_quality"], "excellent")
         self.assertTrue(aligned["sync_within_target"])
         self.assertEqual(aligned["force_sequence_start"], 1)
@@ -149,6 +166,8 @@ class Px6dReferenceForceTests(unittest.TestCase):
             aligned["semantics"], "PX6D_reference_Fz_not_optical_force_prediction"
         )
         self.assertIn("filtered_reference_fz_n", aligned)
+        self.assertEqual(set(aligned["filtered_zeroed"]), set(AXIS_NAMES))
+        self.assertIn("filtered_mechanical", aligned)
         self.assertIn("drift_corrected_reference_fz_n", aligned)
         self.assertIn("conditioned_reference_fz_n", aligned)
         self.assertIn("force_filter_status", aligned)
@@ -232,6 +251,106 @@ class Px6dReferenceForceTests(unittest.TestCase):
         self.assertAlmostEqual(latest["filtered_reference_fz_n"], 0.0, places=6)
         self.assertAlmostEqual(latest["conditioned_reference_fz_n"], 0.0, places=6)
 
+    def test_all_six_axes_are_median_despiked_and_low_pass_filtered(self) -> None:
+        reader = Px6dReader(
+            {
+                "median_window_samples": 5,
+                "filter_alpha": 0.25,
+                "auto_zero_drift_enabled": False,
+            }
+        )
+        reader._tare_values = (0.0,) * 6
+        reader._tare_status = "ready"
+        started = time.time()
+        for index in range(8):
+            reader._append_sample(
+                make_sample(
+                    index + 1,
+                    started + index * 0.02,
+                    fx_n=0.0,
+                    fy_n=0.0,
+                    fz_n=0.0,
+                    mx_nm=0.0,
+                    my_nm=0.0,
+                    mz_nm=0.0,
+                )
+            )
+        reader._append_sample(
+            make_sample(
+                9,
+                started + 0.18,
+                fx_n=5.0,
+                fy_n=-6.0,
+                fz_n=7.0,
+                mx_nm=0.5,
+                my_nm=-0.6,
+                mz_nm=0.7,
+            )
+        )
+
+        latest = reader.latest()["sample"]
+        self.assertEqual(latest["zeroed"]["fx_n"], 5.0)
+        self.assertEqual(latest["zeroed"]["mz_nm"], 0.7)
+        for axis in ("fx_n", "fy_n", "fz_n", "mx_nm", "my_nm", "mz_nm"):
+            self.assertAlmostEqual(latest["median_zeroed"][axis], 0.0, places=9)
+            self.assertAlmostEqual(latest["filtered_zeroed"][axis], 0.0, places=9)
+        self.assertAlmostEqual(
+            latest["filtered_mechanical"]["force_resultant_n"], 0.0, places=9
+        )
+        conditioning = reader.status()["force_conditioning"]
+        self.assertTrue(conditioning["all_six_axes_filtered"])
+        self.assertEqual(conditioning["filtered_axis_names"], list(AXIS_NAMES))
+
+    def test_release_side_drift_reacquires_zero_without_erasing_positive_contact(self) -> None:
+        reader = Px6dReader(
+            {
+                "poll_hz": 20.0,
+                "compression_sign": -1,
+                "median_window_samples": 5,
+                "filter_alpha": 0.35,
+                "force_deadband_n": 0.010,
+                "stationary_window_sec": 0.50,
+                "stationary_std_max_n": 0.020,
+                "stationary_range_max_n": 0.060,
+                "stationary_slope_max_n_per_sec": 0.20,
+                "auto_zero_hold_sec": 0.40,
+                "auto_zero_capture_limit_n": 0.060,
+                "auto_zero_release_reacquire_limit_n": 0.30,
+                "auto_zero_alpha": 0.15,
+            }
+        )
+        reader._tare_values = (0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+        reader._tare_status = "ready"
+        started = time.time()
+
+        # A higher raw Fz maps to a negative, release-side compression residual.
+        release_tracking_seen = False
+        for index in range(80):
+            reader._append_sample(
+                make_sample(index + 1, started + index * 0.05, fz_n=1.15)
+            )
+            release_tracking_seen = release_tracking_seen or (
+                reader.latest()["sample"]["force_filter_status"]
+                == "stationary_release_drift_tracking"
+            )
+        released = reader.latest()["sample"]
+        self.assertLess(released["reference_fz_n"], -0.10)
+        self.assertLess(abs(released["conditioned_reference_fz_n"]), 0.025)
+        self.assertTrue(release_tracking_seen)
+        release_offset = released["drift_offset_n"]
+
+        # A positive compression above the near-zero capture band is preserved.
+        for index in range(30):
+            reader._append_sample(
+                make_sample(81 + index, started + (80 + index) * 0.05, fz_n=0.80)
+            )
+        contact = reader.latest()["sample"]
+        self.assertGreater(contact["conditioned_reference_fz_n"], 0.25)
+        self.assertLess(abs(contact["drift_offset_n"] - release_offset), 0.006)
+        self.assertEqual(
+            contact["force_filter_status"], "contact_or_motion_filter_frozen"
+        )
+
     def test_stale_force_is_not_attached_to_spectrum(self) -> None:
         reader = Px6dReader({"sync_window_sec": 0.01, "sync_max_age_sec": 0.10})
         now = time.time()
@@ -267,12 +386,17 @@ class Px6dIntegrationContractTests(unittest.TestCase):
         backend = (APP_ROOT / "backend" / "main.py").read_text(encoding="utf-8")
 
         self.assertIn("PX6D Reference Fz", config_text)
+        self.assertIn("Force Sensor", html)
+        self.assertIn("Conditioned compression Fz", html)
+        self.assertIn("Sensor raw Fz (signed)", html)
+        self.assertIn("filtered_zeroed", javascript)
+        self.assertIn("filtered_mechanical", javascript)
         self.assertIn("synchronized_ground_truth_reference", config_text)
         self.assertIn("px6dReferenceFz", html)
         self.assertIn("Zero Fz", html)
         self.assertIn("MECHANICAL REFERENCE", html)
         self.assertIn("OPTICAL–MECHANICAL SYNC", html)
-        self.assertIn("SYNCHRONIZED DATA RECORDING", html)
+        self.assertIn("Data recording", html)
         self.assertIn("diagnosticPx6dFx", html)
         self.assertIn("px6dCaptureStartButton", html)
         self.assertIn("px6dCaptureSpectrum", html)

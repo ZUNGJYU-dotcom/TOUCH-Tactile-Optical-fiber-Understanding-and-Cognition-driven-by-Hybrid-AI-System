@@ -53,6 +53,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="TOUCH System - Trained Static Spectrum Twin",
+    icon=str(app_dir / "assets" / "touch_system_icon.ico"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

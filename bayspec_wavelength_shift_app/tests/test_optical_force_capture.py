@@ -12,7 +12,10 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
-from backend.optical_force_capture import OpticalForceCaptureManager
+from backend.optical_force_capture import (
+    OpticalForceCaptureManager,
+    _continuous_force_fz_n,
+)
 
 
 class FakeSpectrumSource:
@@ -62,6 +65,14 @@ def aligned_force(record: dict | None) -> dict:
             "my_nm": 0.010,
             "mz_nm": 0.015,
         },
+        "filtered_zeroed": {
+            "fx_n": 0.04,
+            "fy_n": 0.08,
+            "fz_n": -0.79,
+            "mx_nm": 0.004,
+            "my_nm": 0.008,
+            "mz_nm": 0.012,
+        },
         "reference_fz_n": 0.80,
         "reference_fz_display_n": 0.80,
         "median_reference_fz_n": 0.82,
@@ -78,6 +89,13 @@ def aligned_force(record: dict | None) -> dict:
             "moment_resultant_nm": 0.019,
             "force_utilization_percent": 1.6,
             "moment_utilization_percent": 0.75,
+        },
+        "filtered_mechanical": {
+            "force_resultant_n": 0.795,
+            "shear_resultant_n": 0.089,
+            "moment_resultant_nm": 0.015,
+            "force_utilization_percent": 1.58,
+            "moment_utilization_percent": 0.60,
         },
     }
 
@@ -119,6 +137,20 @@ def unique_timeline(path: Path) -> dict[int, tuple[float, float]]:
 
 
 class OpticalForceCaptureTests(unittest.TestCase):
+    def test_force_target_preserves_continuous_fz_without_class_binning(self) -> None:
+        self.assertAlmostEqual(
+            _continuous_force_fz_n({"conditioned_reference_fz_n": 0.347}),
+            0.347,
+        )
+        self.assertAlmostEqual(
+            _continuous_force_fz_n({"conditioned_reference_fz_n": 1.284}),
+            1.284,
+        )
+        self.assertEqual(
+            _continuous_force_fz_n({"conditioned_reference_fz_n": -0.015}),
+            0.0,
+        )
+
     def test_capture_rejects_missing_software_tare(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             manager = OpticalForceCaptureManager(
@@ -143,7 +175,7 @@ class OpticalForceCaptureTests(unittest.TestCase):
             )
             started = manager.start(
                 position_label="P22",
-                action_label="normal_press",
+                action_label="continuous_px6d_fz_reference",
                 trial_id="trial_007",
             )
             self.assertTrue(started["ok"])
@@ -155,9 +187,10 @@ class OpticalForceCaptureTests(unittest.TestCase):
             with (output_dir / "synchronized_frames.jsonl").open(encoding="utf-8") as handle:
                 first = json.loads(handle.readline())
             self.assertEqual(first["position_label"], "P22")
-            self.assertEqual(first["action_label"], "normal_press")
+            self.assertEqual(first["action_label"], "continuous_px6d_fz_reference")
             self.assertEqual(len(first["spectrum"]["wavelength_nm"]), 3)
             self.assertEqual(first["px6d_reference"]["zeroed"]["fz_n"], -0.80)
+            self.assertEqual(first["force_fz_n"], 0.80)
 
             with (output_dir / "frame_summary.csv").open(
                 encoding="utf-8-sig", newline=""
@@ -169,8 +202,11 @@ class OpticalForceCaptureTests(unittest.TestCase):
             self.assertEqual(float(row["filtered_reference_fz_n"]), 0.81)
             self.assertEqual(float(row["drift_offset_n"]), 0.01)
             self.assertEqual(float(row["conditioned_reference_fz_n"]), 0.80)
+            self.assertEqual(float(row["force_fz_n"]), 0.80)
             self.assertEqual(row["force_filter_status"], "contact_or_motion_filter_frozen")
             self.assertEqual(float(row["fx_zeroed_n"]), 0.05)
+            self.assertEqual(float(row["fx_filtered_n"]), 0.04)
+            self.assertEqual(float(row["filtered_force_resultant_n"]), 0.795)
             self.assertEqual(row["predicted_position_label"], "P22")
             self.assertEqual(row["predicted_response_level"], "normal")
 
@@ -191,10 +227,17 @@ class OpticalForceCaptureTests(unittest.TestCase):
             self.assertEqual(response_row["response_level"], "normal")
             self.assertAlmostEqual(float(response_row["normal_probability"]), 0.75)
 
+            with force_path.open(encoding="utf-8-sig", newline="") as handle:
+                force_row = next(csv.DictReader(handle))
+            self.assertEqual(float(force_row["force_fz_n"]), 0.80)
+
             metadata = json.loads(
                 (output_dir / "session_metadata.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(metadata["schema_version"], "touch_synchronized_capture_v2")
+            self.assertEqual(metadata["schema_version"], "touch_synchronized_capture_v3")
+            self.assertEqual(metadata["force_target"]["field"], "force_fz_n")
+            self.assertEqual(metadata["force_target"]["unit"], "N")
+            self.assertFalse(metadata["force_target"]["categorical_bins_enabled"])
             self.assertEqual(metadata["capture_status"], "complete")
             self.assertTrue(metadata["alignment_audit"]["all_selected_streams_aligned"])
 
