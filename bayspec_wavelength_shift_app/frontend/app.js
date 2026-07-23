@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { loadThumbHolderModel } from "./model_loader.js";
+import { loadRobotNanoHandModel, loadThumbHolderModel } from "./model_loader.js?v=robot-nano-hand-v5";
 
 const channelSelect = document.getElementById("channelSelect");
 const inputSourceSelect = document.getElementById("inputSourceSelect");
@@ -30,6 +30,7 @@ const operatorModeButton = document.getElementById("operatorModeButton");
 const diagnosticsModeButton = document.getElementById("diagnosticsModeButton");
 const physicalProxyModeButton = document.getElementById("physicalProxyModeButton");
 const responseTerrainModeButton = document.getElementById("responseTerrainModeButton");
+const wholeHandModeButton = document.getElementById("wholeHandModeButton");
 const thumbHolderModeButton = document.getElementById("thumbHolderModeButton");
 const surfaceOnlyModeButton = document.getElementById("surfaceOnlyModeButton");
 const surfaceFullscreenButton = document.getElementById("surfaceFullscreenButton");
@@ -55,6 +56,7 @@ const spectrumDrawer = document.getElementById("spectrumDrawer");
 const settingsButton = document.getElementById("settingsButton");
 const settingsPanel = document.getElementById("settingsPanel");
 const settingsCloseButton = document.getElementById("settingsCloseButton");
+const settingsWholeHandButton = document.getElementById("settingsWholeHandButton");
 const settingsThumbHolderButton = document.getElementById("settingsThumbHolderButton");
 const settingsSurfaceOnlyButton = document.getElementById("settingsSurfaceOnlyButton");
 const settingsResetCameraButton = document.getElementById("settingsResetCameraButton");
@@ -1005,6 +1007,9 @@ const state = {
   thumbModelStatus: "not_loaded",
   thumbModelMessage: "--",
   thumbModelAssetUrl: "/static/assets/models/thumb_holder.stl",
+  wholeHandModelStatus: "not_loaded",
+  wholeHandModelMessage: "--",
+  wholeHandModelAssetUrl: "/static/assets/models/robot_nano_hand_body.glb",
   couplingView: "raw_coupled_response",
   layoutCheckVisible: false,
   commandPending: null,
@@ -1042,6 +1047,7 @@ let renderer;
 let controls;
 let sceneAmbientLight;
 let sceneKeyLight;
+let sceneFillLight;
 let surfaceGeometry;
 let surfaceBasePositions;
 let surfaceMesh;
@@ -1055,6 +1061,8 @@ let bottomGridMesh;
 let bottomGridBasePositions;
 let thumbModelRoot;
 let thumbHolderObject;
+let wholeHandRoot;
+let wholeHandBodyObject;
 let sensorSurfaceGroup;
 let slotOutlineHelper;
 let grooveReferenceHelper;
@@ -3631,6 +3639,16 @@ function setObjectTransform(object, transform = {}, fallback = {}) {
   object.visible = transform.visible !== false;
 }
 
+function setObjectMatrixFromRowMajor(object, values) {
+  if (!object || !Array.isArray(values) || values.length !== 16) return false;
+  const numeric = values.map(Number);
+  if (!numeric.every(Number.isFinite)) return false;
+  object.matrixAutoUpdate = false;
+  object.matrix.set(...numeric);
+  object.matrixWorldNeedsUpdate = true;
+  return true;
+}
+
 async function loadThumbSceneConfig() {
   const fallback = {
     thumb_holder_scene: {
@@ -3638,6 +3656,29 @@ async function loadThumbSceneConfig() {
       model_asset_url: "",
       fallback_asset_url: "/static/assets/models/thumb_holder.stl",
       fallback_placeholder_enabled: true,
+    },
+    whole_hand_scene: {
+      enabled: true,
+      asset_url: "/static/assets/models/robot_nano_hand_body.glb",
+      source_repository_url: "https://github.com/TheRobotStudio/robot-nano-hand",
+      source_license: "MIT",
+      body_opacity: 0.42,
+      body_transform: {
+        scale: [0.034, 0.034, 0.034],
+        rotation_deg: [0, 0, 0],
+        position: [-1.182552, -0.106274, 1.721579],
+      },
+      modified_thumb_root_matrix_row_major: [
+        0.39546837, -0.18512019, -7.85824822, 8.78642365,
+        4.55237826, 6.41969769, 0.07786798, 5.78247301,
+        6.40797836, -4.54927926, 0.42965253, -107.2841714,
+        0, 0, 0, 1,
+      ],
+      sensor_local_lift: [0.22, 0, 0],
+      camera: {
+        position: [4.7, 2.2, -8.8],
+        target: [0, 0, 0],
+      },
     },
     thumb_model_transform: {
       scale: [1, 1, 1],
@@ -3672,10 +3713,32 @@ async function loadThumbSceneConfig() {
     },
     visual_style: {},
   };
-  state.thumbSceneConfig = fallback;
+  let resolved = fallback;
+  try {
+    const payload = await requestJSON(
+      "/api/thumb_scene_config",
+      { cache: "no-store" },
+      { timeoutMs: 5000 }
+    );
+    if (payload?.ok && payload?.config) {
+      resolved = { ...fallback };
+      Object.entries(payload.config).forEach(([key, value]) => {
+        resolved[key] = value && typeof value === "object" && !Array.isArray(value)
+          ? { ...(fallback[key] || {}), ...value }
+          : value;
+      });
+    }
+  } catch {
+    // The embedded fallback keeps the scene available while the backend starts.
+  }
+  state.thumbSceneConfig = resolved;
   state.thumbModelAssetUrl = fallback.thumb_holder_scene.fallback_asset_url;
+  state.wholeHandModelAssetUrl = resolved.whole_hand_scene?.asset_url || fallback.whole_hand_scene.asset_url;
   state.thumbModelMessage = "using local STL thumb holder fallback";
-  state.geometryDisplayMode = state.thumbSceneConfig?.thumb_holder_scene?.default_geometry_mode === "surface_only" ? "surface_only" : "thumb_holder";
+  const configuredMode = state.thumbSceneConfig?.thumb_holder_scene?.default_geometry_mode;
+  state.geometryDisplayMode = ["whole_hand", "thumb_holder", "surface_only"].includes(configuredMode)
+    ? configuredMode
+    : "thumb_holder";
   populateThumbAlignmentPanel();
 }
 
@@ -3827,11 +3890,13 @@ function resetThumbAlignmentConfig() {
   updateGeometryDisplayMode("thumb_holder");
 }
 
-function placeSceneGridBelowModel(thumbMode) {
+function placeSceneGridBelowModel() {
   if (!sceneGrid) return;
-  const referenceObject = thumbMode ? thumbModelRoot : sensorSurfaceGroup;
-  const clearance = thumbMode ? 0.52 : 0.38;
-  let boundsMinY = thumbMode ? -1.62 : -0.66;
+  const wholeHandMode = state.geometryDisplayMode === "whole_hand";
+  const thumbMode = state.geometryDisplayMode === "thumb_holder";
+  const referenceObject = wholeHandMode ? wholeHandRoot : thumbMode ? thumbModelRoot : sensorSurfaceGroup;
+  const clearance = wholeHandMode ? 0.30 : thumbMode ? 0.52 : 0.38;
+  let boundsMinY = wholeHandMode ? -3.9 : thumbMode ? -1.62 : -0.66;
 
   if (referenceObject) {
     referenceObject.updateMatrixWorld(true);
@@ -3850,14 +3915,49 @@ function applyThumbSceneLayout() {
   const config = state.thumbSceneConfig || {};
   const modelTransform = config.thumb_model_transform || {};
   const slotTransform = config.sensor_slot_transform || {};
+  const wholeHandConfig = config.whole_hand_scene || {};
+  const wholeHandMode = state.geometryDisplayMode === "whole_hand";
   const thumbMode = state.geometryDisplayMode === "thumb_holder";
-  if (thumbModelRoot) {
-    setObjectTransform(thumbModelRoot, modelTransform, {
-      position: [0, -0.55, 0],
-      rotation_deg: [0, 0, 90],
-      scale: [1, 1, 1],
+  const physicalMode = wholeHandMode || thumbMode;
+
+  if (wholeHandRoot) {
+    wholeHandRoot.matrixAutoUpdate = true;
+    setObjectTransform(wholeHandRoot, wholeHandConfig.body_transform || {}, {
+      position: [-1.182552, -0.106274, 1.721579],
+      rotation_deg: [0, 0, 0],
+      scale: [0.034, 0.034, 0.034],
     });
-    thumbModelRoot.visible = thumbMode && modelTransform.visible !== false;
+    wholeHandRoot.visible = wholeHandMode && wholeHandConfig.enabled !== false;
+  }
+  if (wholeHandBodyObject) {
+    wholeHandBodyObject.visible = wholeHandMode && wholeHandConfig.enabled !== false;
+  }
+  if (thumbModelRoot) {
+    if (wholeHandMode && wholeHandRoot) {
+      if (thumbModelRoot.parent !== wholeHandRoot) wholeHandRoot.add(thumbModelRoot);
+      const matrixApplied = setObjectMatrixFromRowMajor(
+        thumbModelRoot,
+        wholeHandConfig.modified_thumb_root_matrix_row_major
+      );
+      if (!matrixApplied) {
+        thumbModelRoot.matrixAutoUpdate = true;
+        setObjectTransform(thumbModelRoot, {}, {
+          position: [8.786424, 5.782473, -107.284171],
+          rotation_deg: [0, 0, 0],
+          scale: [7.87037, 7.87037, 7.87037],
+        });
+      }
+    } else {
+      if (thumbModelRoot.parent !== scene) scene.add(thumbModelRoot);
+      thumbModelRoot.matrixAutoUpdate = true;
+      setObjectTransform(thumbModelRoot, modelTransform, {
+        position: [0, -0.55, 0],
+        rotation_deg: [0, 0, 90],
+        scale: [1, 1, 1],
+      });
+      thumbModelRoot.updateMatrix();
+    }
+    thumbModelRoot.visible = physicalMode && modelTransform.visible !== false;
   }
   if (thumbHolderObject) {
     setObjectTransform(
@@ -3874,10 +3974,10 @@ function applyThumbSceneLayout() {
         scale: [1, 1, 1],
       }
     );
-    thumbHolderObject.visible = thumbMode && modelTransform.visible !== false;
+    thumbHolderObject.visible = physicalMode && modelTransform.visible !== false;
   }
   if (sensorSurfaceGroup) {
-    if (thumbMode) {
+    if (physicalMode) {
       const localToThumb = slotTransform.coordinate_space === "thumb_model_local" && thumbModelRoot;
       const desiredParent = localToThumb ? thumbModelRoot : scene;
       if (sensorSurfaceGroup.parent !== desiredParent) desiredParent.add(sensorSurfaceGroup);
@@ -3886,12 +3986,17 @@ function applyThumbSceneLayout() {
       const scale = vectorFromConfig(slotTransform.surface_scene_scale, localToThumb ? [0.482, 0.268, 0.460] : [0.34, 0.34, 0.24]);
       sensorSurfaceGroup.position.set(position[0], position[1], position[2]);
       if (localToThumb) {
-        const lift = Number(slotTransform.vertical_lift ?? 0.22);
-        if (Number.isFinite(lift) && Math.abs(lift) > 1e-6) {
-          thumbModelRoot.updateMatrixWorld(true);
-          const parentWorldQuaternion = thumbModelRoot.getWorldQuaternion(new THREE.Quaternion());
-          const localLift = new THREE.Vector3(0, lift, 0).applyQuaternion(parentWorldQuaternion.invert());
-          sensorSurfaceGroup.position.add(localLift);
+        if (wholeHandMode) {
+          const localLift = vectorFromConfig(wholeHandConfig.sensor_local_lift, [0.22, 0, 0]);
+          sensorSurfaceGroup.position.add(new THREE.Vector3(localLift[0], localLift[1], localLift[2]));
+        } else {
+          const lift = Number(slotTransform.vertical_lift ?? 0.22);
+          if (Number.isFinite(lift) && Math.abs(lift) > 1e-6) {
+            thumbModelRoot.updateMatrixWorld(true);
+            const parentWorldQuaternion = thumbModelRoot.getWorldQuaternion(new THREE.Quaternion());
+            const localLift = new THREE.Vector3(0, lift, 0).applyQuaternion(parentWorldQuaternion.invert());
+            sensorSurfaceGroup.position.add(localLift);
+          }
         }
       }
       sensorSurfaceGroup.rotation.set(rotation[0], rotation[1], rotation[2]);
@@ -3908,7 +4013,7 @@ function applyThumbSceneLayout() {
     }
   }
   if (grooveReferenceHelper) {
-    const localToThumb = thumbMode && slotTransform.coordinate_space === "thumb_model_local" && thumbModelRoot;
+    const localToThumb = physicalMode && slotTransform.coordinate_space === "thumb_model_local" && thumbModelRoot;
     const desiredParent = localToThumb ? thumbModelRoot : scene;
     if (grooveReferenceHelper.parent !== desiredParent) desiredParent.add(grooveReferenceHelper);
     grooveReferenceHelper.geometry?.dispose?.();
@@ -3916,43 +4021,62 @@ function applyThumbSceneLayout() {
     grooveReferenceHelper.position.set(0, 0, 0);
     grooveReferenceHelper.rotation.set(0, 0, 0);
     grooveReferenceHelper.scale.set(1, 1, 1);
-    grooveReferenceHelper.visible = thumbMode && slotTransform.visible !== false;
+    grooveReferenceHelper.visible = physicalMode && slotTransform.visible !== false;
   }
   if (slotOutlineHelper) {
-    slotOutlineHelper.visible = thumbMode;
+    slotOutlineHelper.visible = physicalMode;
   }
-  placeSceneGridBelowModel(thumbMode);
+  placeSceneGridBelowModel();
   state.threeNeedsRefresh = true;
 }
 
 function applyThumbCameraConfig() {
   if (!camera || !controls) return;
+  const wholeHandMode = state.geometryDisplayMode === "whole_hand";
   const thumbMode = state.geometryDisplayMode === "thumb_holder";
   const cameraConfig = state.thumbSceneConfig?.scene_camera || {};
-  const position = thumbMode
-    ? vectorFromConfig(cameraConfig.position, [5.2, 2.7, 4.8])
-    : [0, 9.3, 5.8];
-  const target = thumbMode
-    ? vectorFromConfig(cameraConfig.target, [0, -1.0, 0])
-    : [0, -0.18, 0];
-  camera.up.set(thumbMode ? 0 : -1, thumbMode ? 1 : 0, 0);
-  camera.fov = thumbMode ? 43 : 39;
+  const wholeHandCamera = state.thumbSceneConfig?.whole_hand_scene?.camera || {};
+  const position = wholeHandMode
+    ? vectorFromConfig(wholeHandCamera.position, [4.7, 2.2, -8.8])
+    : thumbMode
+      ? vectorFromConfig(cameraConfig.position, [5.2, 2.7, 4.8])
+      : [0, 9.3, 5.8];
+  const target = wholeHandMode
+    ? vectorFromConfig(wholeHandCamera.target, [0, 0, 0])
+    : thumbMode
+      ? vectorFromConfig(cameraConfig.target, [0, -1.0, 0])
+      : [0, -0.18, 0];
+  camera.up.set(thumbMode || wholeHandMode ? 0 : -1, thumbMode || wholeHandMode ? 1 : 0, 0);
+  camera.fov = wholeHandMode ? 40 : thumbMode ? 43 : 39;
   camera.updateProjectionMatrix();
-  controls.minDistance = thumbMode ? 4.0 : 7.2;
-  controls.maxDistance = thumbMode ? 13.0 : 14.0;
+  controls.minDistance = wholeHandMode ? 5.0 : thumbMode ? 4.0 : 7.2;
+  controls.maxDistance = wholeHandMode ? 18.0 : thumbMode ? 13.0 : 14.0;
   camera.position.set(position[0], position[1], position[2]);
   controls.target.set(target[0], target[1], target[2]);
   camera.lookAt(controls.target);
   controls.update();
 }
 
-function applySceneLighting(thumbMode) {
+function applySceneLighting(physicalMode) {
+  const wholeHandMode = state.geometryDisplayMode === "whole_hand";
   if (sceneAmbientLight) {
-    sceneAmbientLight.intensity = thumbMode ? 2.2 : 0.85;
+    sceneAmbientLight.intensity = wholeHandMode ? 0.72 : physicalMode ? 2.2 : 0.85;
   }
   if (sceneKeyLight) {
-    sceneKeyLight.intensity = thumbMode ? 2.8 : 3.4;
-    sceneKeyLight.position.set(thumbMode ? 3 : 4.5, thumbMode ? 6 : 7.5, thumbMode ? 4 : 5.8);
+    sceneKeyLight.intensity = wholeHandMode ? 5.4 : physicalMode ? 2.8 : 3.4;
+    sceneKeyLight.position.set(
+      wholeHandMode ? 4.5 : physicalMode ? 3 : 4.5,
+      wholeHandMode ? 6.5 : physicalMode ? 6 : 7.5,
+      wholeHandMode ? -6.0 : physicalMode ? 4 : 5.8
+    );
+  }
+  if (sceneFillLight) {
+    sceneFillLight.intensity = wholeHandMode ? 1.8 : physicalMode ? 0.9 : 1.2;
+    sceneFillLight.position.set(
+      wholeHandMode ? -4.8 : -3.5,
+      wholeHandMode ? 2.4 : 2.0,
+      wholeHandMode ? 5.5 : -4.0
+    );
   }
 }
 
@@ -4003,6 +4127,29 @@ function exposeThreeDebugHandle() {
         clearance: sceneGrid?.userData?.clearance ?? null,
       };
     },
+    getModelStatus() {
+      const wholeBounds =
+        wholeHandRoot && wholeHandRoot.visible
+          ? new THREE.Box3().setFromObject(wholeHandRoot)
+          : null;
+      return {
+        geometryDisplayMode: state.geometryDisplayMode,
+        thumbModelStatus: state.thumbModelStatus,
+        thumbModelMessage: state.thumbModelMessage,
+        wholeHandModelStatus: state.wholeHandModelStatus,
+        wholeHandModelMessage: state.wholeHandModelMessage,
+        wholeHandRootVisible: wholeHandRoot?.visible ?? false,
+        wholeHandBodyPresent: Boolean(wholeHandBodyObject),
+        wholeHandBodyVisible: wholeHandBodyObject?.visible ?? false,
+        wholeHandBounds:
+          wholeBounds && !wholeBounds.isEmpty()
+            ? {
+                min: wholeBounds.min.toArray(),
+                max: wholeBounds.max.toArray(),
+              }
+            : null,
+      };
+    },
   };
 }
 
@@ -4024,37 +4171,88 @@ async function setupThumbHolderModel() {
   applyThumbSceneLayout();
 }
 
+async function setupWholeHandModel() {
+  if (!scene || !wholeHandRoot) return;
+  const result = await loadRobotNanoHandModel(state.thumbSceneConfig || {});
+  if (wholeHandBodyObject) {
+    wholeHandRoot.remove(wholeHandBodyObject);
+  }
+  wholeHandBodyObject = result.object;
+  if (wholeHandBodyObject) {
+    wholeHandRoot.add(wholeHandBodyObject);
+  }
+  state.wholeHandModelStatus = result.status;
+  state.wholeHandModelMessage = result.message;
+  state.wholeHandModelAssetUrl = result.assetUrl || state.wholeHandModelAssetUrl;
+  if (threeMount) {
+    threeMount.dataset.wholeHandStatus = result.status;
+    threeMount.dataset.wholeHandAsset = state.wholeHandModelAssetUrl;
+  }
+  if (!wholeHandBodyObject) {
+    console.warn(`[whole-hand] ${result.message || "model unavailable"}`);
+  }
+  applyThumbSceneLayout();
+}
+
 function updateGeometryDisplayMode(mode) {
-  state.geometryDisplayMode = mode === "surface_only" ? "surface_only" : "thumb_holder";
+  state.geometryDisplayMode = ["whole_hand", "thumb_holder", "surface_only"].includes(mode)
+    ? mode
+    : "thumb_holder";
+  const wholeHandMode = state.geometryDisplayMode === "whole_hand";
   const thumbMode = state.geometryDisplayMode === "thumb_holder";
-  appShell?.classList.toggle("surface-only-view", !thumbMode);
+  const surfaceOnlyMode = state.geometryDisplayMode === "surface_only";
+  const physicalMode = wholeHandMode || thumbMode;
+  if (threeMount) threeMount.dataset.geometryMode = state.geometryDisplayMode;
+  appShell?.classList.toggle("surface-only-view", surfaceOnlyMode);
   appShell?.classList.toggle("thumb-holder-view", thumbMode);
+  appShell?.classList.toggle("whole-hand-view", wholeHandMode);
+  wholeHandModeButton?.classList.toggle("active", wholeHandMode);
   thumbHolderModeButton?.classList.toggle("active", state.geometryDisplayMode === "thumb_holder");
-  surfaceOnlyModeButton?.classList.toggle("active", state.geometryDisplayMode === "surface_only");
+  surfaceOnlyModeButton?.classList.toggle("active", surfaceOnlyMode);
+  settingsWholeHandButton?.classList.toggle("active", wholeHandMode);
   settingsThumbHolderButton?.classList.toggle("active", state.geometryDisplayMode === "thumb_holder");
-  settingsSurfaceOnlyButton?.classList.toggle("active", state.geometryDisplayMode === "surface_only");
+  settingsSurfaceOnlyButton?.classList.toggle("active", surfaceOnlyMode);
+  wholeHandModeButton?.setAttribute("aria-pressed", String(wholeHandMode));
   thumbHolderModeButton?.setAttribute("aria-pressed", String(thumbMode));
-  surfaceOnlyModeButton?.setAttribute("aria-pressed", String(!thumbMode));
+  surfaceOnlyModeButton?.setAttribute("aria-pressed", String(surfaceOnlyMode));
+  settingsWholeHandButton?.setAttribute("aria-pressed", String(wholeHandMode));
   settingsThumbHolderButton?.setAttribute("aria-pressed", String(thumbMode));
-  settingsSurfaceOnlyButton?.setAttribute("aria-pressed", String(!thumbMode));
-  setText("geometryModeStatus", thumbMode ? "Thumb holder mode" : "Planar surface mode");
-  setText("tactileSurfaceTitle", thumbMode ? "Thumb Tactile Surface" : "Planar Tactile Surface");
-  setText("surfaceProxyCaption", thumbMode ? "Sensor slot wavelength response" : "Footprint-aligned wavelength response");
+  settingsSurfaceOnlyButton?.setAttribute("aria-pressed", String(surfaceOnlyMode));
+  setText(
+    "geometryModeStatus",
+    wholeHandMode ? "Whole hand mode" : thumbMode ? "Thumb holder mode" : "Planar surface mode"
+  );
+  setText(
+    "tactileSurfaceTitle",
+    wholeHandMode ? "Robot Hand Tactile Surface" : thumbMode ? "Thumb Tactile Surface" : "Planar Tactile Surface"
+  );
+  setText(
+    "surfaceProxyCaption",
+    wholeHandMode
+      ? "Modified thumb sensor response"
+      : thumbMode
+        ? "Sensor slot wavelength response"
+        : "Footprint-aligned wavelength response"
+  );
   if (surfaceMesh?.material) {
-    surfaceMesh.material.roughness = thumbMode ? 0.36 : 0.50;
-    surfaceMesh.material.emissiveIntensity = thumbMode ? 0.08 : 0.015;
+    surfaceMesh.material.roughness = physicalMode ? 0.36 : 0.50;
+    surfaceMesh.material.emissiveIntensity = physicalMode ? 0.08 : 0.015;
     surfaceMesh.material.needsUpdate = true;
   }
   if (bodyMesh?.material) {
-    bodyMesh.material.opacity = thumbMode ? 0.58 : 0.70;
+    bodyMesh.material.opacity = physicalMode ? 0.58 : 0.70;
     bodyMesh.material.needsUpdate = true;
   }
   if (settingsResetCameraButton) {
-    settingsResetCameraButton.textContent = thumbMode ? "Reset thumb view" : "Reset aligned surface view";
+    settingsResetCameraButton.textContent = wholeHandMode
+      ? "Reset whole hand view"
+      : thumbMode
+        ? "Reset thumb view"
+        : "Reset aligned surface view";
   }
   applyThumbSceneLayout();
   applyThumbCameraConfig();
-  applySceneLighting(thumbMode);
+  applySceneLighting(physicalMode);
   updateSurfaceRenderMode(state.surfaceRenderMode);
   // Geometry mode changes also change the stage layout. Resize after the new
   // CSS geometry has settled so the WebGL canvas never keeps the old column width.
@@ -4190,13 +4388,21 @@ function initThree() {
   sceneKeyLight = new THREE.DirectionalLight("#ffffff", 2.8);
   sceneKeyLight.position.set(3, 6, 4);
   scene.add(sceneKeyLight);
-  applySceneLighting(state.geometryDisplayMode === "thumb_holder");
+  sceneFillLight = new THREE.DirectionalLight("#dcefff", 0.9);
+  sceneFillLight.position.set(-3.5, 2, -4);
+  scene.add(sceneFillLight);
+  applySceneLighting(state.geometryDisplayMode !== "surface_only");
 
   sceneGrid = new THREE.GridHelper(11.5, 36, "#73a9c5", "#bdd6e4");
   sceneGrid.position.y = -1.04;
   sceneGrid.material.transparent = true;
   sceneGrid.material.opacity = 0.48;
   scene.add(sceneGrid);
+
+  wholeHandRoot = new THREE.Group();
+  wholeHandRoot.name = "robot_nano_hand_root";
+  wholeHandRoot.visible = false;
+  scene.add(wholeHandRoot);
 
   thumbModelRoot = new THREE.Group();
   thumbModelRoot.name = "thumb_model_root";
@@ -4318,6 +4524,7 @@ function initThree() {
   sensorSurfaceGroup.add(bottomGridMesh);
 
   setupThumbHolderModel();
+  setupWholeHandModel();
   applyThumbSceneLayout();
   resizeThree();
   animate();
@@ -4903,9 +5110,11 @@ function updateSurfaceRenderMode(mode) {
   } else {
     setText(
       "surfaceProxyCaption",
-      state.geometryDisplayMode === "thumb_holder"
-        ? "Sensor slot response surface"
-        : "Footprint-aligned wavelength response"
+      state.geometryDisplayMode === "whole_hand"
+        ? "Modified thumb sensor response"
+        : state.geometryDisplayMode === "thumb_holder"
+          ? "Sensor slot response surface"
+          : "Footprint-aligned wavelength response"
     );
   }
   state.threeNeedsRefresh = true;
@@ -7541,6 +7750,11 @@ settingsCloseButton?.addEventListener("click", () => {
   setSettingsPanelOpen(false);
 });
 
+settingsWholeHandButton?.addEventListener("click", () => {
+  updateGeometryDisplayMode("whole_hand");
+  setSettingsPanelOpen(false);
+});
+
 settingsThumbHolderButton?.addEventListener("click", () => {
   updateGeometryDisplayMode("thumb_holder");
   setSettingsPanelOpen(false);
@@ -7594,6 +7808,10 @@ physicalProxyModeButton?.addEventListener("click", () => {
 
 responseTerrainModeButton?.addEventListener("click", () => {
   updateSurfaceRenderMode("response_terrain");
+});
+
+wholeHandModeButton?.addEventListener("click", () => {
+  updateGeometryDisplayMode("whole_hand");
 });
 
 thumbHolderModeButton?.addEventListener("click", () => {

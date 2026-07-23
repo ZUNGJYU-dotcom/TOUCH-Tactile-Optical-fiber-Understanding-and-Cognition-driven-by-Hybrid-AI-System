@@ -214,7 +214,8 @@
 
         <section class="settings-section">
           <div class="section-label">SENSOR PRESENTATION</div>
-          <div class="settings-button-grid">
+          <div class="settings-button-grid geometry-mode-settings">
+            <button id="settingsWholeHandButton" type="button">Whole hand</button>
             <button id="settingsThumbHolderButton" type="button">Thumb holder</button>
             <button id="settingsSurfaceOnlyButton" type="button">Surface only</button>
           </div>
@@ -304,6 +305,7 @@
               <span id="surfaceProxyCaption" class="explanatory-copy">Sensor slot response surface</span>
             </div>
             <div class="stage-actions">
+              <button id="wholeHandModeButton" type="button">Whole hand</button>
               <button id="thumbHolderModeButton" class="active" type="button">Thumb holder mode</button>
               <button id="surfaceOnlyModeButton" type="button">Surface Only</button>
               <button id="surfaceFullscreenButton" class="ui-icon-button icon-only-button" type="button" aria-label="Enter tactile surface fullscreen" aria-pressed="false" data-tooltip="Fullscreen" title="Show only the interactive thumb tactile surface; press Esc to exit">
@@ -888,6 +890,6 @@
 
     </div>
     <script src="/static/vendor/lucide/lucide.min.js"></script>
-    <script type="module" src="/static/app.js?v=continuous-response-v34"></script>
+    <script type="module" src="/static/app.js?v=robot-nano-hand-v9"></script>
   </body>
 </html>

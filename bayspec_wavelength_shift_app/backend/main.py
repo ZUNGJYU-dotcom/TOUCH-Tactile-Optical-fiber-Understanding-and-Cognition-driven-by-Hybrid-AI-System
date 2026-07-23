@@ -1224,6 +1224,49 @@ def _default_thumb_scene_config() -> dict:
                 "Bragg wavelength displacement with no calibrated-force output."
             ),
         },
+        "whole_hand_scene": {
+            "enabled": True,
+            "asset_url": "/static/assets/models/robot_nano_hand_body.glb",
+            "source_name": "Robot Nano Hand",
+            "source_repository_url": "https://github.com/TheRobotStudio/robot-nano-hand",
+            "source_step_file": "STEP/Complete_Hand_06_Final_Print_03e.STEP",
+            "source_license": "MIT",
+            "body_excludes_original_thumb_tip": True,
+            "modified_thumb_tip_asset": "/static/assets/models/thumb_holder.stl",
+            "body_opacity": 0.42,
+            "body_transform": {
+                "position": [-1.182552, -0.106274, 1.721579],
+                "rotation_deg": [0.0, 0.0, 0.0],
+                "scale": [0.034, 0.034, 0.034],
+            },
+            "modified_thumb_root_matrix_row_major": [
+                0.3954683696,
+                -0.1851201911,
+                -7.8582482177,
+                8.7864236452,
+                4.5523782645,
+                6.4196976939,
+                0.0778679840,
+                5.7824730088,
+                6.4079783608,
+                -4.5492792617,
+                0.4296525265,
+                -107.2841714018,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            ],
+            "sensor_local_lift": [0.22, 0.0, 0.0],
+            "camera": {
+                "position": [4.7, 2.2, -8.8],
+                "target": [0.0, 0.0, 0.0],
+            },
+            "note": (
+                "Official MIT-licensed hand assembly with the original thumb tip removed "
+                "and the existing calibrated TOUCH thumb sensor fitted in its place."
+            ),
+        },
         "thumb_model_transform": {
             "scale": [1.0, 1.0, 1.0],
             "rotation_deg": [0.0, 0.0, 90.0],
@@ -1322,6 +1365,7 @@ def _default_thumb_scene_config() -> dict:
         },
         "visual_style": {
             "thumb_material_color": "#d9e1e7",
+            "whole_hand_material_color": "#d6e0e6",
             "thumb_slot_color": "#8fd0dc",
             "slot_outline_color": "#37a8c7",
             "response_surface_label": "Sensor slot surface",
@@ -1349,7 +1393,13 @@ def _write_thumb_scene_config(payload: dict) -> dict:
     if yaml is None:
         return {"ok": False, "reason": "pyyaml not available"}
     current = _thumb_scene_config()
-    allowed_sections = {"thumb_holder_scene", "thumb_model_transform", "sensor_slot_transform", "visual_style"}
+    allowed_sections = {
+        "thumb_holder_scene",
+        "whole_hand_scene",
+        "thumb_model_transform",
+        "sensor_slot_transform",
+        "visual_style",
+    }
     for key, value in payload.items():
         if key in allowed_sections and isinstance(value, dict):
             current.setdefault(key, {}).update(value)
@@ -4248,12 +4298,16 @@ def thumb_scene_config() -> dict:
     config = _thumb_scene_config()
     asset_url = str(config.get("thumb_holder_scene", {}).get("model_asset_url") or "")
     fallback_asset_url = str(config.get("thumb_holder_scene", {}).get("fallback_asset_url") or "")
+    whole_hand_asset_url = str(config.get("whole_hand_scene", {}).get("asset_url") or "")
     asset_path = None
     if asset_url.startswith("/static/"):
         asset_path = FRONTEND_ROOT / asset_url.removeprefix("/static/")
     fallback_asset_path = None
     if fallback_asset_url.startswith("/static/"):
         fallback_asset_path = FRONTEND_ROOT / fallback_asset_url.removeprefix("/static/")
+    whole_hand_asset_path = None
+    if whole_hand_asset_url.startswith("/static/"):
+        whole_hand_asset_path = FRONTEND_ROOT / whole_hand_asset_url.removeprefix("/static/")
     return {
         "ok": True,
         "mode": "thumb_holder_scene_config",
@@ -4265,6 +4319,9 @@ def thumb_scene_config() -> dict:
         "fallback_asset_url": fallback_asset_url,
         "fallback_asset_exists": bool(fallback_asset_path and fallback_asset_path.exists()),
         "fallback_asset_path": str(fallback_asset_path) if fallback_asset_path else None,
+        "whole_hand_asset_url": whole_hand_asset_url,
+        "whole_hand_asset_exists": bool(whole_hand_asset_path and whole_hand_asset_path.exists()),
+        "whole_hand_asset_path": str(whole_hand_asset_path) if whole_hand_asset_path else None,
         "real_3x3_enabled": False,
         "force_N_output": False,
         "calibrated_physical_output": False,

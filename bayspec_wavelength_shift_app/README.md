@@ -12,6 +12,16 @@ workspace keeps the complete synchronized capture workflow in one place, and
 the seven-item diagnostic navigation scrolls horizontally when the panel is
 narrow. The selected workspace is automatically scrolled into view.
 
+## Robot Hand Scene
+
+The 3D presentation supports three geometry modes: the complete Robot Nano
+Hand, the modified thumb holder, and the isolated sensor surface. The complete
+hand body is derived from The Robot Studio's MIT-licensed
+[Robot Nano Hand](https://github.com/TheRobotStudio/robot-nano-hand) assembly.
+Its original thumb tip is omitted and replaced by this project's existing
+modified thumb sensor, preserving the calibrated slot and response-surface
+alignment. Geometry mode can be changed in Settings or Diagnostics.
+
 ## Input and Output
 
 Input is one synchronized 512-point full spectrum plus a stable current-session

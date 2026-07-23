@@ -8,16 +8,24 @@ function applyMaterialStyle(object, options = {}) {
   const opacity = Number(options.opacity ?? 0.34);
   const color = options.color || DEFAULT_THUMB_COLOR;
   const wireframe = Boolean(options.wireframe);
+  const depthWrite = options.depthWrite ?? opacity > 0.8;
+  const roughness = Number(options.roughness ?? 0.86);
+  const metalness = Number(options.metalness ?? 0);
+  const side = options.side || THREE.FrontSide;
   object.traverse((child) => {
     if (!child.isMesh) return;
+    if (child.geometry && !child.geometry.getAttribute("normal")) {
+      child.geometry.computeVertexNormals();
+    }
     child.material = new THREE.MeshStandardMaterial({
       color,
       transparent: true,
       opacity,
-      roughness: 0.86,
-      metalness: 0,
+      roughness,
+      metalness,
       wireframe,
-      depthWrite: opacity > 0.8,
+      depthWrite,
+      side,
     });
     child.castShadow = false;
     child.receiveShadow = true;
@@ -215,6 +223,53 @@ export async function loadThumbHolderModel(config = {}) {
       assetUrl,
       fallback: true,
       message: error?.message || "GLB not available; using fallback placeholder",
+    };
+  }
+}
+
+export async function loadRobotNanoHandModel(config = {}) {
+  const sceneConfig = config.whole_hand_scene || {};
+  const visual = config.visual_style || {};
+  const assetUrl = sceneConfig.asset_url || "/static/assets/models/robot_nano_hand_body.glb";
+
+  try {
+    const assetProbe = await fetch(assetUrl, { method: "HEAD", cache: "no-store" });
+    if (!assetProbe.ok) {
+      throw new Error("Robot Nano Hand body asset not found");
+    }
+    const { GLTFLoader } = await import("three/addons/loaders/GLTFLoader.js");
+    const loader = new GLTFLoader();
+    const gltf = await new Promise((resolve, reject) => {
+      loader.load(assetUrl, resolve, undefined, reject);
+    });
+    const object = gltf.scene || gltf.scenes?.[0];
+    if (!object) throw new Error("Robot Nano Hand GLB loaded without a scene");
+    object.name = "robot_nano_hand_body";
+    applyMaterialStyle(object, {
+      color: visual.whole_hand_material_color || "#d6e0e6",
+      opacity: Number(sceneConfig.body_opacity ?? 0.42),
+      wireframe: false,
+      depthWrite: false,
+      roughness: 0.52,
+      metalness: 0.12,
+      side: THREE.DoubleSide,
+    });
+    object.userData.modelLoadStatus = "glb_loaded";
+    object.userData.assetUrl = assetUrl;
+    object.userData.sourceRepository = sceneConfig.source_repository_url || "";
+    object.userData.sourceLicense = sceneConfig.source_license || "MIT";
+    return {
+      object,
+      status: "glb_loaded",
+      assetUrl,
+      message: "Robot Nano Hand body loaded",
+    };
+  } catch (error) {
+    return {
+      object: null,
+      status: "whole_hand_asset_unavailable",
+      assetUrl,
+      message: error?.message || String(error),
     };
   }
 }
