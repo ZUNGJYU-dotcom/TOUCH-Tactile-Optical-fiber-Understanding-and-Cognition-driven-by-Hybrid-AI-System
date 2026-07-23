@@ -14,6 +14,146 @@
   --amber: #d29119;
   --red: #bf4f49;
   --shadow: 0 14px 36px rgba(57, 94, 122, 0.14);
+  --desktop-titlebar-height: 38px;
+}
+
+/* Native desktop shell: replace the black Windows frame with a quiet,
+   draggable lab-style bar. The bar intentionally carries no product name. */
+.desktop-titlebar {
+  display: none;
+}
+
+body.pywebview-desktop .desktop-titlebar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 20000;
+  display: flex;
+  align-items: stretch;
+  height: var(--desktop-titlebar-height);
+  overflow: hidden;
+  border-bottom: 1px solid #d6e2eb;
+  background:
+    linear-gradient(90deg, rgba(41, 191, 209, 0.08), transparent 18%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(245, 249, 252, 0.98));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    0 5px 16px rgba(57, 94, 122, 0.08);
+  user-select: none;
+}
+
+body.pywebview-desktop .desktop-titlebar-drag {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+  padding-left: 12px;
+  cursor: default;
+}
+
+body.pywebview-desktop .desktop-titlebar-mark {
+  display: block;
+  width: 23px;
+  height: 23px;
+  flex: 0 0 23px;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 4px rgba(10, 142, 197, 0.12));
+  pointer-events: none;
+}
+
+body.pywebview-desktop .desktop-window-controls {
+  display: flex;
+  flex: 0 0 auto;
+  height: 100%;
+}
+
+body.pywebview-desktop .desktop-window-controls button {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid rgba(200, 219, 233, 0.5);
+  border-radius: 0;
+  background: transparent;
+  color: #3e566b;
+  cursor: default;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+body.pywebview-desktop .desktop-window-controls button:hover {
+  background: rgba(195, 222, 239, 0.45);
+  color: #0a6f9f;
+}
+
+body.pywebview-desktop .desktop-window-controls button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid #159bca;
+  outline-offset: -3px;
+}
+
+body.pywebview-desktop .desktop-window-controls .desktop-close-button:hover {
+  background: #d95c59;
+  color: #ffffff;
+}
+
+body.pywebview-desktop .desktop-window-controls svg {
+  width: 17px;
+  height: 17px;
+  pointer-events: none;
+}
+
+body.pywebview-desktop .desktop-window-controls .window-restore-icon,
+body.pywebview-desktop .desktop-window-controls .is-maximized .window-maximize-icon {
+  display: none;
+}
+
+body.pywebview-desktop .desktop-window-controls .is-maximized .window-restore-icon {
+  display: block;
+}
+
+body.pywebview-desktop .desktop-window-controls .window-glyph {
+  position: relative;
+  width: 13px;
+  height: 13px;
+  border: 1.6px solid currentColor;
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+body.pywebview-desktop .desktop-window-controls .window-restore-icon {
+  width: 12px;
+  height: 11px;
+  margin: 3px 0 0 -3px;
+}
+
+body.pywebview-desktop .desktop-window-controls .window-restore-icon::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 3px;
+  width: 10px;
+  height: 9px;
+  border: 1.6px solid currentColor;
+  border-radius: 2px;
+  background: #f7fafc;
+}
+
+body.pywebview-desktop .app-shell {
+  height: calc(100vh - var(--desktop-titlebar-height));
+  margin-top: var(--desktop-titlebar-height);
+}
+
+body.pywebview-desktop.surface-fullscreen-document .desktop-titlebar {
+  display: none;
+}
+
+body.pywebview-desktop.surface-fullscreen-document .app-shell {
+  height: 100vh;
+  margin-top: 0;
 }
 
 /* Immersive thumb tactile surface: model canvas only, with Esc as the exit. */
@@ -3216,7 +3356,9 @@ button.active-watch,
 }
 
 .diagnostics-mode .heatmap-panel {
+  display: grid !important;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  align-content: stretch;
 }
 
 .diagnostics-mode .heatmap-canvas {
@@ -7374,7 +7516,7 @@ body {
 
 .diagnostics-mode .dashboard {
   --diagnostics-right-width: 420px;
-  grid-template-columns: 180px minmax(400px, 1fr) var(--diagnostics-right-width) !important;
+  grid-template-columns: 180px minmax(520px, 1fr) var(--diagnostics-right-width) !important;
 }
 
 .diagnostics-mode .right-panel {
@@ -7560,6 +7702,31 @@ body.diagnostics-panel-resizing * {
 }
 
 /* Keep the map title readable when the compact diagnostics surface narrows. */
+.diagnostics-mode .twin-stage {
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.diagnostics-mode .surface-cockpit-grid,
+.diagnostics-mode .three-mount,
+.diagnostics-mode .heatmap-panel,
+.diagnostics-mode .heatmap-canvas {
+  min-height: 0 !important;
+}
+
+.diagnostics-mode .surface-cockpit-grid {
+  overflow: hidden;
+}
+
+.diagnostics-mode .stage-metrics,
+.diagnostics-mode .demo-readout {
+  position: relative;
+  z-index: 3;
+  background: #ffffff;
+}
+
 .diagnostics-mode .heatmap-panel .panel-heading {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -7761,5 +7928,155 @@ body.diagnostics-panel-resizing * {
     max-height: calc(100vh - 24px) !important;
     padding: 10px !important;
     gap: 6px !important;
+  }
+}
+
+/* Diagnostics center collision guard. Resizing the evidence rail may reduce
+   the center width, but it must never let the WebGL surface paint over the
+   metrics below it. A real minimum visualization row keeps the scene useful;
+   the stage scrolls when the available window height is smaller. */
+.diagnostics-mode .twin-stage {
+  container: diagnostics-stage / inline-size;
+  isolation: isolate;
+  grid-template-rows: auto minmax(260px, 1fr) auto auto !important;
+}
+
+.diagnostics-mode .surface-cockpit-grid {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  min-height: 260px !important;
+  overflow: hidden !important;
+  contain: layout paint;
+}
+
+.diagnostics-mode .surface-cockpit-grid > *,
+.diagnostics-mode .three-mount,
+.diagnostics-mode .heatmap-panel {
+  min-width: 0;
+  min-height: 0 !important;
+  height: 100% !important;
+  max-width: 100%;
+  max-height: 100%;
+  align-self: stretch;
+  overflow: hidden;
+}
+
+.diagnostics-mode .stage-metrics,
+.diagnostics-mode .demo-readout {
+  position: relative;
+  z-index: 4;
+  margin: 0;
+  background: #ffffff;
+  isolation: isolate;
+}
+
+/* When the diagnostics rail grows, give the title and controls separate rows.
+   This keeps the stage identity readable without reducing either visual panel
+   or allowing the header to push content through the metrics boundary. */
+@container diagnostics-stage (max-width: 700px) {
+  .diagnostics-mode .stage-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .diagnostics-mode .stage-header > div:first-child {
+    min-width: 0;
+  }
+
+  .diagnostics-mode #tactileSurfaceTitle {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .diagnostics-mode .stage-actions {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-start;
+  }
+
+  .diagnostics-mode .stage-actions > * {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 1100px) {
+  .diagnostics-mode .dashboard {
+    grid-template-columns: 164px minmax(420px, 1fr) var(--diagnostics-right-width) !important;
+  }
+
+  .diagnostics-mode .twin-stage {
+    grid-template-rows: auto 506px auto auto !important;
+  }
+}
+
+/* Scale the 3D twin and 2D response map as one visualization pair. The old
+   210 px heatmap floor made the map stop shrinking while the twin continued
+   to compress whenever the diagnostics rail was widened. */
+.diagnostics-mode .surface-cockpit-grid {
+  grid-template-columns: minmax(0, 1.43fr) minmax(0, 1fr) !important;
+}
+
+.diagnostics-mode .heatmap-panel {
+  display: grid !important;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-content: stretch;
+}
+
+.diagnostics-mode .heatmap-canvas-viewport {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 9px;
+}
+
+.diagnostics-mode .heatmap-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0;
+  min-height: 0 !important;
+  aspect-ratio: auto;
+}
+
+/* At the narrowest supported center width, preserve both visualizations by
+   stacking them in the stage scroll area instead of squeezing or overlaying
+   either panel. */
+@container diagnostics-stage (max-width: 419px) {
+  .diagnostics-mode .surface-cockpit-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: minmax(260px, 42vh) minmax(238px, auto);
+    min-height: 506px !important;
+    height: 506px;
+    overflow: hidden !important;
+    contain: layout paint;
+  }
+
+  .diagnostics-mode .three-mount {
+    min-height: 260px !important;
+    height: clamp(260px, 42vh, 360px) !important;
+  }
+
+  .diagnostics-mode .heatmap-panel {
+    min-height: 238px !important;
+    height: 238px !important;
+    overflow: hidden;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .diagnostics-mode .heatmap-canvas {
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 0 !important;
+    aspect-ratio: auto;
+  }
+
+  .diagnostics-mode .stage-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   }
 }

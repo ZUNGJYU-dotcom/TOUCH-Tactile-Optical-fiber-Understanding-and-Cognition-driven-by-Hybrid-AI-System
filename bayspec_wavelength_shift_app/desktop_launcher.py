@@ -10,13 +10,14 @@ import sys
 import threading
 import time
 import traceback
+from typing import Any
 import urllib.request
 
 import uvicorn
 import webview
 
 
-APP_TITLE = "TOUCH System - Temporal Spectral Validation"
+APP_TITLE = "TOUCH"
 DEFAULT_PORT = 8640
 EXPECTED_BACKEND_APP = "TOUCH System Trained Static Spectrum Twin"
 EXPECTED_BACKEND_MODE = "standalone_bayspec_trained_static_spectrum_twin"
@@ -89,7 +90,7 @@ def require_fixed_port(port: int) -> None:
         return
     message = (
         f"Port {port} is already in use.\n\n"
-        "Another TOUCH System trained static-spectrum backend is already running. "
+        "Another TOUCH backend is already running. "
         "Close the old trained-spectrum app instance or stop its Python/uvicorn process, "
         "then start this app again. The wavelength-shift and optical-intensity editions use different ports."
     )
@@ -159,7 +160,13 @@ def backend_is_ready(url: str, timeout_s: float = 0.8) -> bool:
     return False
 
 
-def wait_until_ready(url: str, timeout_s: float = 20.0) -> None:
+def wait_until_ready(
+    url: str,
+    timeout_s: float = 20.0,
+    *,
+    backend_thread: threading.Thread | None = None,
+    server_holder: dict[str, Any] | None = None,
+) -> None:
     deadline = time.time() + timeout_s
     last_error: Exception | None = None
     while time.time() < deadline:
@@ -168,11 +175,15 @@ def wait_until_ready(url: str, timeout_s: float = 20.0) -> None:
                 return
         except Exception as exc:
             last_error = exc
+        if backend_thread is not None and not backend_thread.is_alive():
+            startup_error = (server_holder or {}).get("startup_error")
+            detail = startup_error or last_error or "backend thread exited"
+            raise RuntimeError(f"Backend exited before becoming ready: {detail}")
         time.sleep(0.15)
     raise RuntimeError(f"Backend did not become ready: {last_error}")
 
 
-def run_backend(port: int, server_holder: dict[str, uvicorn.Server]) -> None:
+def run_backend(port: int, server_holder: dict[str, Any]) -> None:
     try:
         from backend.main import app
 
@@ -180,13 +191,103 @@ def run_backend(port: int, server_holder: dict[str, uvicorn.Server]) -> None:
         server = uvicorn.Server(config)
         server_holder["server"] = server
         server.run()
-    except Exception:
-        write_log(traceback.format_exc())
-        raise
+    except (Exception, SystemExit) as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        server_holder["startup_error"] = error
+        server_holder["startup_traceback"] = traceback.format_exc()
+        write_log(server_holder["startup_traceback"])
+
+
+def request_backend_shutdown(server_holder: dict[str, Any]) -> bool:
+    """Signal the owned Uvicorn server without blocking a webview callback."""
+
+    server = server_holder.get("server")
+    if server is None:
+        return False
+    server.should_exit = True
+    return True
+
+
+def stop_owned_backend(
+    server_holder: dict[str, Any],
+    backend_thread: threading.Thread | None,
+    *,
+    graceful_timeout_s: float = 8.0,
+    force_timeout_s: float = 2.0,
+) -> bool:
+    """Wait for lifespan cleanup before the desktop process is allowed to exit."""
+
+    if backend_thread is None:
+        return True
+    request_backend_shutdown(server_holder)
+    if backend_thread is threading.current_thread():
+        return False
+    backend_thread.join(timeout=max(0.0, float(graceful_timeout_s)))
+    if not backend_thread.is_alive():
+        return True
+    server = server_holder.get("server")
+    if server is not None:
+        server.should_exit = True
+        server.force_exit = True
+    backend_thread.join(timeout=max(0.0, float(force_timeout_s)))
+    return not backend_thread.is_alive()
 
 
 class DesktopApi:
     """Small native-only API exposed to the bundled pywebview frontend."""
+
+    def __init__(self, *, initially_maximized: bool = False) -> None:
+        self._is_maximized = bool(initially_maximized)
+
+    def note_window_maximized(self) -> None:
+        self._is_maximized = True
+
+    def note_window_restored(self) -> None:
+        self._is_maximized = False
+
+    @staticmethod
+    def _desktop_window() -> Any | None:
+        return webview.windows[0] if webview.windows else None
+
+    def minimize_window(self) -> dict[str, object]:
+        window = self._desktop_window()
+        if window is None:
+            return {"ok": False, "status": "desktop_window_not_ready"}
+        write_log("Desktop command: minimize")
+        window.minimize()
+        return {"ok": True, "status": "window_minimized"}
+
+    def toggle_maximize_window(self) -> dict[str, object]:
+        window = self._desktop_window()
+        if window is None:
+            return {"ok": False, "status": "desktop_window_not_ready"}
+        target_maximized = not self._is_maximized
+        write_log(
+            "Desktop command: toggle maximize "
+            f"current={self._is_maximized} target={target_maximized}"
+        )
+        # WinForms can leave a frameless window at its restored bounds when
+        # using the regular maximize operation. The fullscreen transition
+        # explicitly applies the monitor bounds and restores the previous
+        # bounds on the next call.
+        window.toggle_fullscreen()
+
+        # WinForms may emit maximized/restored synchronously. Assign the
+        # intended state instead of inverting again after that callback.
+        self._is_maximized = target_maximized
+        write_log(f"Desktop command complete: maximized={self._is_maximized}")
+        return {
+            "ok": True,
+            "status": "window_maximized" if self._is_maximized else "window_restored",
+            "maximized": self._is_maximized,
+        }
+
+    def close_window(self) -> dict[str, object]:
+        window = self._desktop_window()
+        if window is None:
+            return {"ok": False, "status": "desktop_window_not_ready"}
+        window.destroy()
+        return {"ok": True, "status": "window_closed"}
 
     def choose_output_directory(self, current_path: str = "") -> dict[str, object]:
         try:
@@ -216,42 +317,66 @@ def main() -> int:
     app_root = configure_runtime_paths()
     write_log(f"Starting {APP_TITLE}; app_root={app_root}")
     port = DEFAULT_PORT
-    server_holder: dict[str, uvicorn.Server] = {}
+    server_holder: dict[str, Any] = {}
     health_url = f"http://127.0.0.1:{port}/api/health"
-    app_url = f"http://127.0.0.1:{port}/"
+    app_url = f"http://127.0.0.1:{port}/?desktop=1"
     owns_backend = False
-    if port_is_free(port):
-        thread = threading.Thread(target=run_backend, args=(port, server_holder), daemon=True)
-        thread.start()
-        owns_backend = True
-        wait_until_ready(health_url)
-    elif backend_is_ready(health_url, timeout_s=1.2):
-        write_log(f"Reusing existing trained static-spectrum backend on port {port}")
-    else:
-        require_fixed_port(port)
+    backend_thread: threading.Thread | None = None
+    try:
+        if port_is_free(port):
+            backend_thread = threading.Thread(
+                target=run_backend,
+                args=(port, server_holder),
+                name="touch-uvicorn-backend",
+                daemon=True,
+            )
+            backend_thread.start()
+            owns_backend = True
+            wait_until_ready(
+                health_url,
+                backend_thread=backend_thread,
+                server_holder=server_holder,
+            )
+            if not backend_thread.is_alive():
+                owns_backend = False
+                write_log(
+                    f"Backend start lost the port race; reusing expected backend on port {port}"
+                )
+        elif backend_is_ready(health_url, timeout_s=1.2):
+            write_log(f"Reusing existing trained static-spectrum backend on port {port}")
+        else:
+            require_fixed_port(port)
 
-    window = webview.create_window(
-        APP_TITLE,
-        app_url,
-        width=1180,
-        height=760,
-        min_size=(1024, 680),
-        maximized=True,
-        background_color="#f5f9fc",
-        js_api=DesktopApi(),
-    )
+        desktop_api = DesktopApi(initially_maximized=False)
+        window = webview.create_window(
+            APP_TITLE,
+            app_url,
+            width=1180,
+            height=760,
+            min_size=(1024, 680),
+            maximized=False,
+            background_color="#f5f9fc",
+            js_api=desktop_api,
+            frameless=True,
+            easy_drag=False,
+            shadow=True,
+        )
 
-    def on_closed() -> None:
-        if not owns_backend:
-            return
-        server = server_holder.get("server")
-        if server is not None:
-            server.should_exit = True
+        window.events.maximized += desktop_api.note_window_maximized
+        window.events.restored += desktop_api.note_window_restored
 
-    window.events.closed += on_closed
-    webview.start(debug=False)
-    on_closed()
-    return 0
+        def on_closed() -> None:
+            if owns_backend:
+                request_backend_shutdown(server_holder)
+
+        window.events.closed += on_closed
+        webview.start(debug=False)
+        return 0
+    finally:
+        if owns_backend and not stop_owned_backend(server_holder, backend_thread):
+            write_log(
+                "Owned backend did not exit after graceful and forced shutdown waits"
+            )
 
 
 if __name__ == "__main__":

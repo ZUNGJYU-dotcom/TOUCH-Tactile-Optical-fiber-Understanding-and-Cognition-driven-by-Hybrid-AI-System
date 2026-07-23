@@ -22,8 +22,6 @@ from typing import Any
 
 import numpy as np
 
-from src.hybrid_spectrum.sense_fast_dat import read_sense_fast_dat
-
 try:
     import yaml
 except ImportError:  # pragma: no cover - packaged app normally includes PyYAML.
@@ -36,6 +34,9 @@ APP_ROOT = Path(os.environ.get("BAYSPEC_WAVELENGTH_APP_ROOT", Path(__file__).res
 PROJECT_ROOT = APP_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.hybrid_spectrum.sense_fast_dat import read_sense_fast_dat
+
 ARRAY_MODE = "global_spectrum_unmapped"
 DEFAULT_CHANNEL_ORDER = ["P11", "P21", "P31", "P12", "P22", "P32", "P13", "P23", "P33"]
 EPSILON = 1e-12
@@ -304,21 +305,41 @@ def _safe_float(value: Any, default: float | None = None) -> float | None:
     return result
 
 
-def _safe_float_list(value: Any) -> list[float]:
+class SpectrumInputError(ValueError):
+    """Expected ingest rejection with a stable machine-readable reason."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _safe_float_list(
+    value: Any,
+    *,
+    max_items: int | None = None,
+    reject_invalid: bool = False,
+) -> list[float]:
     if value is None:
         return []
     if isinstance(value, str):
-        parts = value.replace(";", ",").split(",")
+        if max_items is not None and value.count(",") + value.count(";") + 1 > max_items:
+            raise SpectrumInputError("spectrum_point_limit_exceeded")
+        parts: Any = value.replace(";", ",").split(",")
     else:
         try:
-            parts = list(value)
+            parts = iter(value)
         except TypeError:
             parts = [value]
     out: list[float] = []
-    for item in parts:
+    for index, item in enumerate(parts):
+        if max_items is not None and index >= max_items:
+            raise SpectrumInputError("spectrum_point_limit_exceeded")
         number = _safe_float(item)
-        if number is not None:
-            out.append(number)
+        if number is None:
+            if reject_invalid:
+                raise SpectrumInputError("spectrum_contains_nonfinite_or_nonnumeric_value")
+            continue
+        out.append(number)
     return out
 
 
@@ -477,12 +498,39 @@ def _peak_map_status() -> dict[str, Any]:
 class BaySpecWavelengthShiftBridge:
     """In-memory buffer for BaySpec spectra and Bragg wavelength shifts."""
 
-    def __init__(self, max_records_per_channel: int = 10000) -> None:
-        self.max_records_per_channel = max_records_per_channel
-        self.records_by_channel: dict[str, deque[dict[str, Any]]] = defaultdict(
-            lambda: deque(maxlen=max_records_per_channel)
+    def __init__(
+        self,
+        max_records_per_channel: int = 1200,
+        max_spectrum_records_per_channel: int = 128,
+        max_channel_buffers: int = 32,
+        max_channels_per_payload: int = 32,
+        max_spectrum_points: int = 16384,
+        max_channel_id_length: int = 64,
+    ) -> None:
+        self.max_records_per_channel = max(1, int(max_records_per_channel))
+        self.max_spectrum_records_per_channel = max(
+            1,
+            min(
+                int(max_spectrum_records_per_channel),
+                self.max_records_per_channel,
+            ),
         )
-        self.all_records: deque[dict[str, Any]] = deque(maxlen=max_records_per_channel * 12)
+        self.max_channel_buffers = max(1, int(max_channel_buffers))
+        self.max_channels_per_payload = max(
+            1,
+            min(int(max_channels_per_payload), self.max_channel_buffers),
+        )
+        self.max_spectrum_points = max(16, int(max_spectrum_points))
+        self.max_channel_id_length = max(8, int(max_channel_id_length))
+        self.records_by_channel: dict[str, deque[dict[str, Any]]] = defaultdict(
+            lambda: deque(maxlen=self.max_records_per_channel)
+        )
+        # The mixed trace is a UI convenience, not a second long-term archive.
+        # Keeping it at the same bound prevents evicted per-channel records from
+        # remaining alive through this deque for many additional hours.
+        self.all_records: deque[dict[str, Any]] = deque(
+            maxlen=self.max_records_per_channel
+        )
         self.baseline_intensity_by_channel: dict[str, float] = {}
         self.baseline_wavelength_by_channel: dict[str, float] = {}
         self.baseline_wavelength_noise_pm_by_channel: dict[str, float] = {}
@@ -507,7 +555,7 @@ class BaySpecWavelengthShiftBridge:
             lambda: str(BAYSPEC_CHANNEL_CONFIG.get("baseline", {}).get("default_mode") or "rolling_median")
         )
         self.baseline_candidates_by_channel: dict[str, deque[tuple[float, float]]] = defaultdict(
-            lambda: deque(maxlen=max_records_per_channel)
+            lambda: deque(maxlen=self.max_records_per_channel)
         )
         self.global_candidate_baseline_by_id: dict[str, float] = {}
         self.global_candidate_baseline_noise_pm_by_id: dict[str, float] = {}
@@ -518,8 +566,30 @@ class BaySpecWavelengthShiftBridge:
         self.started_at = _now()
         self.first_timestamp_by_channel: dict[str, float] = {}
         self.frame_counter = 0
+        self.ingest_rejection_counts: dict[str, int] = defaultdict(int)
         self._sense_status_cache: dict[str, Any] = {"running": None, "method": "tasklist_cached"}
         self._sense_status_checked_at = 0.0
+        self._status_io_lock = threading.Lock()
+        self._latest_export_status_cache: Path | None = None
+        self._latest_export_status_checked_at = 0.0
+
+    @staticmethod
+    def _evict_heavy_spectral_payload(record: dict[str, Any]) -> None:
+        """Keep scalar history while releasing old full-spectrum payloads."""
+
+        for field in ("wavelength_nm", "intensity", "spectrum_peaks"):
+            record.pop(field, None)
+        record["full_spectrum_retained"] = False
+        record["spectrum_payload_evicted"] = True
+
+    def _prune_channel_spectrum_history(
+        self,
+        records: deque[dict[str, Any]],
+    ) -> None:
+        if len(records) <= self.max_spectrum_records_per_channel:
+            return
+        stale_record = records[-self.max_spectrum_records_per_channel - 1]
+        self._evict_heavy_spectral_payload(stale_record)
 
     def reset(self, keep_baseline: bool = True) -> dict[str, Any]:
         with self.lock:
@@ -584,8 +654,11 @@ class BaySpecWavelengthShiftBridge:
             }
 
     def status(self) -> dict[str, Any]:
+        # Filesystem discovery and process inspection can be slow on a large
+        # Sense export tree. Keep those operations outside the bridge data lock
+        # so health/status requests cannot stall live-frame ingestion.
+        latest_file, sense_process = self._status_external_snapshot()
         with self.lock:
-            latest_file = self.latest_export_file()
             return {
                 "ok": True,
                 "app": "TOUCH System Trained Static Spectrum Twin",
@@ -631,9 +704,31 @@ class BaySpecWavelengthShiftBridge:
                 "device_id_hint": DEFAULT_DEVICE_ID,
                 "sense_root": str(DEFAULT_SENSE_ROOT),
                 "sense_root_exists": DEFAULT_SENSE_ROOT.exists(),
-                "sense_process": self._sense_process_status_cached(),
+                "sense_process": sense_process,
                 "latest_export_file": _format_path(latest_file),
                 "channels_seen": sorted(self.records_by_channel.keys()),
+                "history_policy": {
+                    "scalar_records_per_channel": self.max_records_per_channel,
+                    "mixed_trace_records": self.all_records.maxlen,
+                    "full_spectrum_records_per_channel": (
+                        self.max_spectrum_records_per_channel
+                    ),
+                    "full_spectrum_records_retained_by_channel": {
+                        channel: sum(
+                            1
+                            for record in records
+                            if record.get("full_spectrum_retained")
+                        )
+                        for channel, records in sorted(self.records_by_channel.items())
+                    },
+                },
+                "ingest_limits": {
+                    "max_channel_buffers": self.max_channel_buffers,
+                    "max_channels_per_payload": self.max_channels_per_payload,
+                    "max_spectrum_points": self.max_spectrum_points,
+                    "max_channel_id_length": self.max_channel_id_length,
+                },
+                "ingest_rejection_counts": dict(sorted(self.ingest_rejection_counts.items())),
                 "baseline_intensity_channels": sorted(self.baseline_intensity_by_channel),
                 "baseline_wavelength_channels": sorted(self.baseline_wavelength_by_channel),
                 "baseline_wavelength_noise_pm_by_channel": dict(
@@ -697,22 +792,105 @@ class BaySpecWavelengthShiftBridge:
         channels = payload.get("channels")
         if not isinstance(channels, list):
             channels = [payload]
+        input_channel_count = len(channels)
+        channels_to_process = channels[: self.max_channels_per_payload]
+        rejections: list[dict[str, Any]] = []
+        if input_channel_count > self.max_channels_per_payload:
+            rejections.append(
+                {
+                    "reason": "channel_count_limit_exceeded",
+                    "rejected_count": input_channel_count - self.max_channels_per_payload,
+                }
+            )
 
         records: list[dict[str, Any]] = []
         with self.lock:
-            for index, channel_payload in enumerate(channels):
+            reserved_channel_ids = set(self.records_by_channel)
+            accepted_channel_ids: set[str] = set()
+            for index, channel_payload in enumerate(channels_to_process):
                 if not isinstance(channel_payload, dict):
+                    rejections.append(
+                        {"channel_index": index, "reason": "channel_payload_must_be_object"}
+                    )
                     continue
-                record = self._normalize_channel(
-                    channel_payload,
-                    timestamp=timestamp,
-                    source=source,
-                    device_id=device_id,
-                    default_channel=f"CH{index + 1}",
-                )
+                channel_id = str(
+                    _pick(
+                        channel_payload,
+                        [
+                            "channel_id",
+                            "channel",
+                            "fbg_channel",
+                            "fbng_channel",
+                            "sensor_id",
+                            "name",
+                        ],
+                    )
+                    or f"CH{index + 1}"
+                ).strip()
+                if not channel_id:
+                    channel_id = f"CH{index + 1}"
+                if len(channel_id) > self.max_channel_id_length:
+                    rejections.append(
+                        {
+                            "channel_index": index,
+                            "reason": "channel_id_too_long",
+                        }
+                    )
+                    continue
+                if channel_id in accepted_channel_ids:
+                    rejections.append(
+                        {
+                            "channel_index": index,
+                            "channel_id": channel_id,
+                            "reason": "duplicate_channel_id_in_frame",
+                        }
+                    )
+                    continue
+                if (
+                    channel_id not in reserved_channel_ids
+                    and len(reserved_channel_ids) >= self.max_channel_buffers
+                ):
+                    rejections.append(
+                        {
+                            "channel_index": index,
+                            "channel_id": channel_id,
+                            "reason": "channel_buffer_limit_exceeded",
+                        }
+                    )
+                    continue
+                try:
+                    record = self._normalize_channel(
+                        channel_payload,
+                        timestamp=timestamp,
+                        source=source,
+                        device_id=device_id,
+                        default_channel=channel_id,
+                    )
+                except SpectrumInputError as exc:
+                    rejections.append(
+                        {
+                            "channel_index": index,
+                            "channel_id": channel_id,
+                            "reason": exc.reason,
+                        }
+                    )
+                    continue
                 if record is None:
+                    rejections.append(
+                        {
+                            "channel_index": index,
+                            "channel_id": channel_id,
+                            "reason": "no_valid_spectrum_or_wavelength_data",
+                        }
+                    )
                     continue
                 records.append(record)
+                accepted_channel_ids.add(channel_id)
+                reserved_channel_ids.add(channel_id)
+            for rejection in rejections:
+                reason = str(rejection.get("reason") or "unknown_ingest_rejection")
+                amount = int(rejection.get("rejected_count") or 1)
+                self.ingest_rejection_counts[reason] += amount
             if records:
                 self.frame_counter += 1
                 source_frame_id = payload.get("frame_id")
@@ -720,12 +898,17 @@ class BaySpecWavelengthShiftBridge:
                     record["frame_id"] = self.frame_counter
                     if source_frame_id is not None:
                         record["source_frame_id"] = source_frame_id
-                    self.records_by_channel[record["channel_id"]].append(record)
+                    channel_records = self.records_by_channel[record["channel_id"]]
+                    channel_records.append(record)
+                    self._prune_channel_spectrum_history(channel_records)
                     self.all_records.append(record)
 
         return {
             "ok": bool(records),
             "records_ingested": len(records),
+            "input_channel_count": input_channel_count,
+            "records_rejected": sum(int(item.get("rejected_count") or 1) for item in rejections),
+            "rejections": rejections,
             "demodulation_mode": "fbg_wavelength_shift",
             "records": [_strip_spectrum(record, include_spectrum=False) for record in records],
             "reason": None if records else "no valid spectrum or wavelength data found",
@@ -890,12 +1073,30 @@ class BaySpecWavelengthShiftBridge:
             or default_channel
         ).strip()
 
+        wavelength_input = _pick(
+            channel_payload,
+            ["wavelength_nm", "wavelength", "wavelengths", "lambda_nm"],
+        )
+        intensity_input = _pick(
+            channel_payload,
+            ["intensity", "intensities", "counts", "spectrum_counts", "signal"],
+        )
         wavelength_nm = _safe_float_list(
-            _pick(channel_payload, ["wavelength_nm", "wavelength", "wavelengths", "lambda_nm"])
+            wavelength_input,
+            max_items=self.max_spectrum_points,
+            reject_invalid=True,
         )
         spectrum_intensity = _safe_float_list(
-            _pick(channel_payload, ["intensity", "intensities", "counts", "spectrum_counts", "signal"])
+            intensity_input,
+            max_items=self.max_spectrum_points,
+            reject_invalid=True,
         )
+        if (
+            wavelength_input is not None
+            and intensity_input is not None
+            and len(wavelength_nm) != len(spectrum_intensity)
+        ):
+            raise SpectrumInputError("spectrum_axis_length_mismatch")
         peak_wavelength = _safe_float(
             _pick(channel_payload, ["peak_wavelength_nm", "peak_nm", "lambda_peak_nm", "wavelength_peak"])
         )
@@ -1141,6 +1342,8 @@ class BaySpecWavelengthShiftBridge:
             "spectrum_points": min(len(wavelength_nm), len(spectrum_intensity))
             if wavelength_nm and spectrum_intensity
             else len(spectrum_intensity),
+            "full_spectrum_retained": bool(wavelength_nm and spectrum_intensity),
+            "spectrum_payload_evicted": False,
         }
         candidate_peaks = self._extract_candidate_spectrum_peaks(wavelength_nm, spectrum_intensity)
         if candidate_peaks:
@@ -3239,12 +3442,21 @@ class BaySpecWavelengthShiftBridge:
         search_root = Path(root) if root else DEFAULT_SENSE_ROOT / "Spectrum_Data"
         if not search_root.exists():
             return None
-        files: list[Path] = []
+        latest: Path | None = None
+        latest_mtime = float("-inf")
         for pattern in ("*.csv", "*.txt", "*.tsv", "*.dat"):
-            files.extend(search_root.rglob(pattern))
-        if not files:
-            return None
-        return max(files, key=lambda path: path.stat().st_mtime)
+            for path in search_root.rglob(pattern):
+                try:
+                    modified = path.stat().st_mtime
+                except OSError:
+                    # Sense may finalize an export by renaming it while this
+                    # scan is in progress. Skip the transient path and retry on
+                    # the next watcher/status pass.
+                    continue
+                if modified > latest_mtime:
+                    latest = path
+                    latest_mtime = modified
+        return latest
 
     def ingest_latest_export(self, root: str | Path | None = None, channel_id: str = "P22") -> dict[str, Any]:
         latest = self.latest_export_file(root=root)
@@ -3265,6 +3477,16 @@ class BaySpecWavelengthShiftBridge:
         self._sense_status_cache = self._sense_process_status()
         self._sense_status_checked_at = now
         return dict(self._sense_status_cache)
+
+    def _status_external_snapshot(self) -> tuple[Path | None, dict[str, Any]]:
+        now = _now()
+        with self._status_io_lock:
+            if now - self._latest_export_status_checked_at >= 2.0:
+                self._latest_export_status_cache = self.latest_export_file()
+                self._latest_export_status_checked_at = now
+            latest_file = self._latest_export_status_cache
+            sense_process = self._sense_process_status_cached()
+        return latest_file, sense_process
 
     @staticmethod
     def _sense_process_status() -> dict[str, Any]:

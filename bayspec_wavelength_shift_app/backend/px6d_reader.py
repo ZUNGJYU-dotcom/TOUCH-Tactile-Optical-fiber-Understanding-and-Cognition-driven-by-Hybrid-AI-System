@@ -209,8 +209,10 @@ class Px6dReader:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._serial = None
+        self._connecting_serial = None
         self._running = False
         self._connected = False
+        self._lifecycle_status = "idle"
         self._firmware_version: str | None = None
         self._last_error: str | None = None
         self._sequence = 0
@@ -233,71 +235,158 @@ class Px6dReader:
     def start(self) -> dict[str, Any]:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
-                return self.status()
+                stopping = self._stop_event.is_set()
+                return {
+                    "ok": not stopping,
+                    "operation_status": (
+                        "stop_in_progress" if stopping else "already_running"
+                    ),
+                    **self.status(),
+                }
+            if serial is None:
+                self._thread = None
+                self._running = False
+                self._connected = False
+                self._lifecycle_status = "unavailable"
+                self._last_error = "pyserial_not_installed"
+                return {
+                    "ok": False,
+                    "operation_status": "dependency_unavailable",
+                    **self.status(),
+                }
+            self._close_serial_locked()
+            self._thread = None
             self._stop_event.clear()
             self._running = True
+            self._connected = False
+            self._lifecycle_status = "running"
             self._started_at_epoch_sec = time.time()
-            self._thread = threading.Thread(
+            worker = threading.Thread(
                 target=self._run,
                 name="px6d-com3-reader",
                 daemon=True,
             )
-            self._thread.start()
-        return self.status()
+            self._thread = worker
+            try:
+                worker.start()
+            except Exception as exc:
+                self._thread = None
+                self._running = False
+                self._connected = False
+                self._lifecycle_status = "start_failed"
+                self._last_error = (
+                    f"px6d_reader_start_failed: {type(exc).__name__}: {exc}"
+                )
+                return {
+                    "ok": False,
+                    "operation_status": "start_failed",
+                    **self.status(),
+                }
+        return {"ok": True, "operation_status": "started", **self.status()}
 
     def stop(self) -> dict[str, Any]:
-        self._stop_event.set()
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
         with self._lock:
+            thread = self._thread
+            if thread is None or not thread.is_alive():
+                self._thread = None
+                self._running = False
+                self._connected = False
+                self._lifecycle_status = "stopped"
+                self._close_serial_locked()
+                return {
+                    "ok": True,
+                    "operation_status": "already_stopped",
+                    **self.status(),
+                }
+            self._stop_event.set()
+            self._lifecycle_status = "stop_requested"
+            self._connected = False
+            # Closing the handle first interrupts an in-flight serial read on
+            # drivers that would otherwise outlive the join timeout.
+            self._close_serial_locked()
+        thread.join(timeout=2.0)
+        with self._lock:
+            if thread.is_alive():
+                self._running = True
+                self._connected = False
+                self._lifecycle_status = "stop_timeout"
+                self._last_error = "px6d_reader_stop_timeout"
+                return {
+                    "ok": False,
+                    "operation_status": "stop_timeout",
+                    **self.status(),
+                }
+            if self._thread is thread:
+                self._thread = None
             self._running = False
             self._connected = False
+            self._lifecycle_status = "stopped"
             self._close_serial_locked()
-        return self.status()
+        return {"ok": True, "operation_status": "stopped", **self.status()}
 
     def _run(self) -> None:
-        if serial is None:
-            with self._lock:
-                self._running = False
-                self._last_error = "pyserial_not_installed"
-            return
-
-        auto_tare_pending = self.auto_tare_on_start and self._tare_values is None
-        while not self._stop_event.is_set():
-            try:
-                self._connect()
-                auto_tare_start = time.monotonic()
-                while not self._stop_event.is_set():
-                    loop_started = time.monotonic()
-                    sample = self._request_sample()
-                    self._append_sample(sample)
-                    if (
-                        auto_tare_pending
-                        and time.monotonic() - auto_tare_start >= self.auto_tare_duration_sec
-                    ):
-                        result = self.tare(
-                            duration_sec=self.auto_tare_duration_sec,
-                            max_std_n=self.auto_tare_max_std_n,
-                            wait_for_new_samples=False,
-                        )
-                        if result.get("ok"):
-                            auto_tare_pending = False
-                        else:
-                            auto_tare_start = time.monotonic()
-                    remaining = (1.0 / self.poll_hz) - (time.monotonic() - loop_started)
-                    if remaining > 0:
-                        self._stop_event.wait(remaining)
-            except Exception as exc:  # pragma: no cover - hardware path
+        current_worker = threading.current_thread()
+        try:
+            if serial is None:
                 with self._lock:
-                    self._connected = False
-                    self._last_error = f"{type(exc).__name__}: {exc}"
-                    self._close_serial_locked()
-                self._stop_event.wait(self.reconnect_interval_sec)
-        with self._lock:
-            self._running = False
-            self._connected = False
-            self._close_serial_locked()
+                    self._lifecycle_status = "unavailable"
+                    self._last_error = "pyserial_not_installed"
+                return
+
+            auto_tare_pending = self.auto_tare_on_start and self._tare_values is None
+            while not self._stop_event.is_set():
+                try:
+                    self._connect()
+                    auto_tare_start = time.monotonic()
+                    while not self._stop_event.is_set():
+                        loop_started = time.monotonic()
+                        sample = self._request_sample()
+                        self._append_sample(sample)
+                        if (
+                            auto_tare_pending
+                            and time.monotonic() - auto_tare_start >= self.auto_tare_duration_sec
+                        ):
+                            result = self.tare(
+                                duration_sec=self.auto_tare_duration_sec,
+                                max_std_n=self.auto_tare_max_std_n,
+                                wait_for_new_samples=False,
+                            )
+                            if result.get("ok"):
+                                auto_tare_pending = False
+                            else:
+                                auto_tare_start = time.monotonic()
+                        remaining = (1.0 / self.poll_hz) - (time.monotonic() - loop_started)
+                        if remaining > 0:
+                            self._stop_event.wait(remaining)
+                except Exception as exc:  # pragma: no cover - hardware path
+                    with self._lock:
+                        self._connected = False
+                        if not self._stop_event.is_set():
+                            self._lifecycle_status = "reconnecting"
+                            self._last_error = f"{type(exc).__name__}: {exc}"
+                        self._close_serial_locked()
+                    self._stop_event.wait(self.reconnect_interval_sec)
+        finally:
+            with self._lock:
+                stop_requested = self._stop_event.is_set()
+                previous_lifecycle = self._lifecycle_status
+                self._running = False
+                self._connected = False
+                self._close_serial_locked()
+                if previous_lifecycle == "unavailable":
+                    self._lifecycle_status = "unavailable"
+                elif previous_lifecycle == "stop_timeout":
+                    self._lifecycle_status = "stopped_after_timeout"
+                elif stop_requested:
+                    self._lifecycle_status = "stopped"
+                else:
+                    self._lifecycle_status = "worker_exited"
+                    self._last_error = (
+                        self._last_error
+                        or "PX6D reader worker exited unexpectedly"
+                    )
+                if self._thread is current_worker:
+                    self._thread = None
 
     def _connect(self) -> None:
         with self._lock:
@@ -311,17 +400,40 @@ class Px6dReader:
             timeout=0.01,
             write_timeout=0.25,
         )
+        with self._lock:
+            if self._stop_event.is_set():
+                try:
+                    port.close()
+                finally:
+                    raise InterruptedError("PX6D connection cancelled by stop request")
+            self._connecting_serial = port
         try:
             port.reset_input_buffer()
             port.reset_output_buffer()
             time.sleep(0.10)
             firmware = self._query_version(port)
         except Exception:
-            port.close()
+            with self._lock:
+                if self._connecting_serial is port:
+                    self._connecting_serial = None
+            try:
+                port.close()
+            except Exception:
+                pass
             raise
         with self._lock:
+            if self._stop_event.is_set():
+                if self._connecting_serial is port:
+                    self._connecting_serial = None
+                try:
+                    port.close()
+                finally:
+                    raise InterruptedError("PX6D connection cancelled by stop request")
+            if self._connecting_serial is port:
+                self._connecting_serial = None
             self._serial = port
             self._connected = True
+            self._lifecycle_status = "running"
             self._firmware_version = firmware
             self._last_error = None
 
@@ -543,13 +655,18 @@ class Px6dReader:
         self._filter_status = "warming_up"
 
     def _close_serial_locked(self) -> None:
-        port, self._serial = self._serial, None
-        if port is None:
-            return
-        try:
-            port.close()
-        except Exception:
-            pass
+        ports = (self._serial, self._connecting_serial)
+        self._serial = None
+        self._connecting_serial = None
+        closed_ids: set[int] = set()
+        for port in ports:
+            if port is None or id(port) in closed_ids:
+                continue
+            closed_ids.add(id(port))
+            try:
+                port.close()
+            except Exception:
+                pass
 
     def tare(
         self,
@@ -683,13 +800,22 @@ class Px6dReader:
             return "acceptable"
         return "poor"
 
-    def _sample_payload_locked(self, sample: Px6dSample) -> dict[str, Any]:
+    def _sample_payload(
+        self,
+        sample: Px6dSample,
+        *,
+        tare_values: tuple[float, float, float, float, float, float] | None,
+        conditioned: ConditionedFzSample | None,
+        filtered_axes: FilteredAxesSample | None,
+        drift_offset_n: float,
+        tare_status: str,
+        tare_fz_std_n: float | None,
+        tare_sample_count: int,
+    ) -> dict[str, Any]:
         raw = sample.raw_values()
-        tare = self._tare_values or (0.0,) * 6
+        tare = tare_values or (0.0,) * 6
         zeroed = tuple(value - offset for value, offset in zip(raw, tare))
         reference_fz = self.compression_sign * zeroed[2]
-        conditioned = self._conditioned_samples.get(sample.sequence_id)
-        filtered_axes = self._filtered_axis_samples.get(sample.sequence_id)
         if filtered_axes is None:
             filtered_axes = FilteredAxesSample(
                 sequence_id=sample.sequence_id,
@@ -701,12 +827,12 @@ class Px6dReader:
                 sequence_id=sample.sequence_id,
                 median_reference_fz_n=reference_fz,
                 low_pass_reference_fz_n=reference_fz,
-                drift_offset_n=self._drift_offset_n,
-                drift_corrected_reference_fz_n=reference_fz - self._drift_offset_n,
+                drift_offset_n=drift_offset_n,
+                drift_corrected_reference_fz_n=reference_fz - drift_offset_n,
                 conditioned_reference_fz_n=(
                     0.0
-                    if abs(reference_fz - self._drift_offset_n) <= self.force_deadband_n
-                    else reference_fz - self._drift_offset_n
+                    if abs(reference_fz - drift_offset_n) <= self.force_deadband_n
+                    else reference_fz - drift_offset_n
                 ),
                 stationary_detected=False,
                 auto_zero_drift_active=False,
@@ -742,15 +868,27 @@ class Px6dReader:
             "force_filter_status": conditioned.filter_status,
             "compression_sign": self.compression_sign,
             "roundtrip_ms": sample.roundtrip_ms,
-            "tare_ready": self._tare_values is not None,
-            "tare_status": self._tare_status,
-            "tare_fz_std_n": self._tare_fz_std_n,
-            "tare_sample_count": self._tare_sample_count,
+            "tare_ready": tare_values is not None,
+            "tare_status": tare_status,
+            "tare_fz_std_n": tare_fz_std_n,
+            "tare_sample_count": tare_sample_count,
             "mechanical": mechanical,
             "filtered_mechanical": self._mechanical_metrics(
                 filtered_axes.filtered_zeroed_values
             ),
         }
+
+    def _sample_payload_locked(self, sample: Px6dSample) -> dict[str, Any]:
+        return self._sample_payload(
+            sample,
+            tare_values=self._tare_values,
+            conditioned=self._conditioned_samples.get(sample.sequence_id),
+            filtered_axes=self._filtered_axis_samples.get(sample.sequence_id),
+            drift_offset_n=self._drift_offset_n,
+            tare_status=self._tare_status,
+            tare_fz_std_n=self._tare_fz_std_n,
+            tare_sample_count=self._tare_sample_count,
+        )
 
     def latest(self) -> dict[str, Any]:
         with self._lock:
@@ -762,7 +900,32 @@ class Px6dReader:
         limit = max(1, min(20000, int(limit)))
         with self._lock:
             samples = list(self._samples)[-limit:]
-            rows = [self._sample_payload_locked(sample) for sample in samples]
+            payload_inputs = [
+                (
+                    sample,
+                    self._conditioned_samples.get(sample.sequence_id),
+                    self._filtered_axis_samples.get(sample.sequence_id),
+                )
+                for sample in samples
+            ]
+            tare_values = self._tare_values
+            drift_offset_n = self._drift_offset_n
+            tare_status = self._tare_status
+            tare_fz_std_n = self._tare_fz_std_n
+            tare_sample_count = self._tare_sample_count
+        rows = [
+            self._sample_payload(
+                sample,
+                tare_values=tare_values,
+                conditioned=conditioned,
+                filtered_axes=filtered_axes,
+                drift_offset_n=drift_offset_n,
+                tare_status=tare_status,
+                tare_fz_std_n=tare_fz_std_n,
+                tare_sample_count=tare_sample_count,
+            )
+            for sample, conditioned, filtered_axes in payload_inputs
+        ]
         return {"ok": True, "count": len(rows), "samples": rows, "status": self.status()}
 
     def synchronized_snapshot(
@@ -904,9 +1067,20 @@ class Px6dReader:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            worker_alive = bool(
+                self._thread is not None and self._thread.is_alive()
+            )
             latest = self._samples[-1] if self._samples else None
             now = time.time()
             age = now - latest.timestamp_epoch_sec if latest is not None else None
+            freshness_limit = max(0.5, 3.0 / self.poll_hz)
+            sample_fresh = bool(
+                latest is not None
+                and worker_alive
+                and self._connected
+                and age is not None
+                and 0.0 <= age <= freshness_limit
+            )
             elapsed = (
                 latest.timestamp_epoch_sec - self._samples[0].timestamp_epoch_sec
                 if latest is not None and len(self._samples) > 1
@@ -919,7 +1093,11 @@ class Px6dReader:
             )
             return {
                 "running": self._running,
+                "worker_alive": worker_alive,
                 "connected": self._connected,
+                "connection_in_progress": self._connecting_serial is not None,
+                "lifecycle_status": self._lifecycle_status,
+                "stop_requested": self._stop_event.is_set(),
                 "port": self.port,
                 "baud_rate": self.baud_rate,
                 "firmware_version": self._firmware_version,
@@ -928,6 +1106,8 @@ class Px6dReader:
                 "connection_attempts": self._connection_attempts,
                 "last_error": self._last_error,
                 "last_sample_age_sec": age,
+                "sample_fresh": sample_fresh,
+                "sample_freshness_limit_sec": freshness_limit,
                 "configured_poll_hz": self.poll_hz,
                 "observed_sample_hz": observed_hz,
                 "tare_ready": self._tare_values is not None,

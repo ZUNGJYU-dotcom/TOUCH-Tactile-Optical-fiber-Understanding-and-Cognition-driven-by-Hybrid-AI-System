@@ -80,6 +80,115 @@ class DiagnosticsResizableLayoutContractTests(unittest.TestCase):
         self.assertIn('.diagnostics-mode .heatmap-panel .heatmap-title', self.css)
         self.assertIn('white-space: nowrap', self.css)
 
+    def test_widened_diagnostics_rail_cannot_overlap_surface_metrics(self) -> None:
+        self.assertIn('const DIAGNOSTICS_CENTER_MIN_WIDTH_PX = 520;', self.js)
+        self.assertIn(
+            'const DIAGNOSTICS_CENTER_COMPACT_MIN_WIDTH_PX = 420;',
+            self.js,
+        )
+        self.assertIn(
+            'const DIAGNOSTICS_COMPACT_BREAKPOINT_PX = 1100;',
+            self.js,
+        )
+        self.assertIn(
+            'grid-template-columns: 180px minmax(520px, 1fr) var(--diagnostics-right-width)',
+            self.css,
+        )
+        self.assertIn(
+            '.diagnostics-mode .surface-cockpit-grid,\n'
+            '.diagnostics-mode .three-mount,\n'
+            '.diagnostics-mode .heatmap-panel,\n'
+            '.diagnostics-mode .heatmap-canvas',
+            self.css,
+        )
+        self.assertIn('min-height: 0 !important;', self.css)
+        self.assertIn('overflow-y: auto;', self.css)
+        self.assertIn('.diagnostics-mode .stage-metrics,', self.css)
+        self.assertIn('z-index: 3;', self.css)
+
+    def test_center_stage_has_a_paint_boundary_and_narrow_reflow(self) -> None:
+        collision_guard = self.css.split(
+            '/* Diagnostics center collision guard.',
+            1,
+        )[1]
+        self.assertIn('container: diagnostics-stage / inline-size;', collision_guard)
+        self.assertIn(
+            'grid-template-rows: auto minmax(260px, 1fr) auto auto !important;',
+            collision_guard,
+        )
+        self.assertIn('min-height: 260px !important;', collision_guard)
+        self.assertIn('contain: layout paint;', collision_guard)
+        self.assertIn(
+            'grid-template-rows: auto 506px auto auto !important;',
+            collision_guard,
+        )
+        self.assertIn('height: 100%;', collision_guard)
+        self.assertIn('height: 100% !important;', collision_guard)
+        self.assertIn('align-self: stretch;', collision_guard)
+        self.assertIn('@container diagnostics-stage (max-width: 700px)', collision_guard)
+        self.assertIn('grid-template-columns: minmax(0, 1fr);', collision_guard)
+        self.assertIn('.diagnostics-mode #tactileSurfaceTitle', collision_guard)
+        self.assertIn('white-space: nowrap;', collision_guard)
+        self.assertIn('justify-content: flex-start;', collision_guard)
+        self.assertIn('@container diagnostics-stage (max-width: 419px)', collision_guard)
+        self.assertIn(
+            'grid-template-columns: minmax(0, 1fr) !important;',
+            collision_guard,
+        )
+        self.assertIn(
+            'grid-template-columns: repeat(2, minmax(0, 1fr)) !important;',
+            collision_guard,
+        )
+        self.assertIn('min-height: 506px !important;', collision_guard)
+        self.assertIn('height: 506px;', collision_guard)
+        self.assertIn('aspect-ratio: auto;', collision_guard)
+
+    def test_twin_and_heatmap_use_one_proportional_resize_rule(self) -> None:
+        collision_guard = self.css.split(
+            '/* Diagnostics center collision guard.',
+            1,
+        )[1]
+        self.assertIn(
+            'grid-template-columns: minmax(0, 1.43fr) minmax(0, 1fr) !important;',
+            collision_guard,
+        )
+        self.assertIn('class="heatmap-canvas-viewport"', self.html)
+        self.assertIn(
+            '.diagnostics-mode .heatmap-canvas-viewport {',
+            collision_guard,
+        )
+        self.assertIn('display: grid !important;', collision_guard)
+        self.assertIn('align-content: stretch;', collision_guard)
+        self.assertIn('position: relative;', collision_guard)
+        self.assertIn(
+            '.diagnostics-mode .heatmap-canvas {\n'
+            '  position: absolute;\n'
+            '  inset: 0;\n'
+            '  width: 100% !important;\n'
+            '  height: 100% !important;',
+            collision_guard,
+        )
+        self.assertIn('min-width: 0;', collision_guard)
+        self.assertIn('aspect-ratio: auto;', collision_guard)
+
+    def test_narrow_window_width_bounds_never_force_dashboard_overflow(self) -> None:
+        self.assertIn(
+            'dashboardWidth <= DIAGNOSTICS_COMPACT_BREAKPOINT_PX',
+            self.js,
+        )
+        self.assertIn(
+            '? DIAGNOSTICS_CENTER_COMPACT_MIN_WIDTH_PX',
+            self.js,
+        )
+        self.assertIn(
+            'const available = Math.max(\n    0,',
+            self.js,
+        )
+        self.assertIn(
+            'const min = Math.min(DIAGNOSTICS_PANEL_MIN_WIDTH_PX, available);',
+            self.js,
+        )
+
     def test_explanatory_copy_is_hidden_but_operational_status_remains(self) -> None:
         self.assertIn('<body class="minimal-copy">', self.html)
         self.assertIn('.minimal-copy .explanatory-copy', self.css)

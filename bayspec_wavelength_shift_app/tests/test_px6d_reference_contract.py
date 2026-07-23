@@ -69,6 +69,283 @@ class Px6dProtocolContractTests(unittest.TestCase):
 
 
 class Px6dReferenceForceTests(unittest.TestCase):
+    def test_status_marks_samples_fresh_only_while_connected_and_current(self) -> None:
+        class LiveThread:
+            @staticmethod
+            def is_alive() -> bool:
+                return True
+
+        reader = Px6dReader({"poll_hz": 50.0, "auto_tare_on_start": False})
+        reader._append_sample(make_sample(1, time.time(), fz_n=0.80))
+        with reader._lock:
+            reader._thread = LiveThread()  # type: ignore[assignment]
+            reader._running = True
+            reader._connected = True
+
+        live_status = reader.status()
+        self.assertTrue(live_status["sample_fresh"])
+        self.assertEqual(live_status["sample_freshness_limit_sec"], 0.5)
+
+        with reader._lock:
+            reader._connected = False
+        disconnected_status = reader.status()
+        self.assertFalse(disconnected_status["sample_fresh"])
+
+        with reader._lock:
+            reader._connected = True
+            reader._samples.clear()
+            reader._append_sample(make_sample(2, time.time() - 2.0, fz_n=0.80))
+        stale_status = reader.status()
+        self.assertFalse(stale_status["sample_fresh"])
+
+    def test_missing_pyserial_is_reported_before_worker_launch(self) -> None:
+        reader = Px6dReader({"auto_tare_on_start": False})
+        with patch("backend.px6d_reader.serial", None):
+            result = reader.start()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["operation_status"], "dependency_unavailable")
+        self.assertEqual(result["lifecycle_status"], "unavailable")
+        self.assertEqual(result["last_error"], "pyserial_not_installed")
+        self.assertFalse(result["running"])
+        self.assertFalse(result["worker_alive"])
+
+    def test_start_failure_rolls_back_reader_lifecycle(self) -> None:
+        class FailingThread:
+            def __init__(self, *args, **kwargs) -> None:
+                self.args = args
+                self.kwargs = kwargs
+
+            def start(self) -> None:
+                raise RuntimeError("thread launch failed")
+
+            def is_alive(self) -> bool:
+                return False
+
+        reader = Px6dReader({"auto_tare_on_start": False})
+        with patch("backend.px6d_reader.threading.Thread", FailingThread):
+            result = reader.start()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["operation_status"], "start_failed")
+        self.assertFalse(result["running"])
+        self.assertFalse(result["worker_alive"])
+        self.assertEqual(result["lifecycle_status"], "start_failed")
+        self.assertIn("px6d_reader_start_failed", result["last_error"])
+
+    def test_stop_timeout_preserves_live_worker_and_blocks_restart(self) -> None:
+        class StuckThread:
+            def __init__(self) -> None:
+                self.join_timeout: float | None = None
+
+            def is_alive(self) -> bool:
+                return True
+
+            def join(self, timeout: float | None = None) -> None:
+                self.join_timeout = timeout
+
+        class FakePort:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        reader = Px6dReader({"auto_tare_on_start": False})
+        worker = StuckThread()
+        port = FakePort()
+        with reader._lock:
+            reader._thread = worker  # type: ignore[assignment]
+            reader._serial = port
+            reader._running = True
+            reader._connected = True
+            reader._lifecycle_status = "running"
+
+        stopped = reader.stop()
+
+        self.assertFalse(stopped["ok"])
+        self.assertEqual(stopped["operation_status"], "stop_timeout")
+        self.assertTrue(stopped["running"])
+        self.assertTrue(stopped["worker_alive"])
+        self.assertFalse(stopped["connected"])
+        self.assertEqual(stopped["lifecycle_status"], "stop_timeout")
+        self.assertEqual(stopped["last_error"], "px6d_reader_stop_timeout")
+        self.assertTrue(port.closed)
+        self.assertEqual(worker.join_timeout, 2.0)
+
+        restarted = reader.start()
+        self.assertFalse(restarted["ok"])
+        self.assertEqual(restarted["operation_status"], "stop_in_progress")
+
+    def test_stop_closes_serial_before_waiting_for_worker(self) -> None:
+        class FakePort:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class JoiningThread:
+            def __init__(self, port: FakePort) -> None:
+                self.port = port
+                self.alive = True
+                self.serial_was_closed_before_join = False
+
+            def is_alive(self) -> bool:
+                return self.alive
+
+            def join(self, timeout: float | None = None) -> None:
+                self.serial_was_closed_before_join = self.port.closed
+                self.alive = False
+
+        reader = Px6dReader({"auto_tare_on_start": False})
+        port = FakePort()
+        worker = JoiningThread(port)
+        with reader._lock:
+            reader._thread = worker  # type: ignore[assignment]
+            reader._serial = port
+            reader._running = True
+            reader._connected = True
+            reader._lifecycle_status = "running"
+
+        result = reader.stop()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["operation_status"], "stopped")
+        self.assertTrue(worker.serial_was_closed_before_join)
+        self.assertFalse(result["running"])
+        self.assertFalse(result["worker_alive"])
+        self.assertEqual(result["lifecycle_status"], "stopped")
+
+    def test_stop_interrupts_serial_handle_during_firmware_handshake(self) -> None:
+        class FakePort:
+            def __init__(self) -> None:
+                self.closed = threading.Event()
+
+            def reset_input_buffer(self) -> None:
+                return None
+
+            def reset_output_buffer(self) -> None:
+                return None
+
+            def close(self) -> None:
+                self.closed.set()
+
+        port = FakePort()
+
+        class FakeSerialModule:
+            EIGHTBITS = 8
+            PARITY_NONE = "N"
+            STOPBITS_ONE = 1
+
+            @staticmethod
+            def Serial(*args, **kwargs):
+                return port
+
+        reader = Px6dReader(
+            {
+                "auto_tare_on_start": False,
+                "reconnect_interval_sec": 0.1,
+            }
+        )
+        handshake_started = threading.Event()
+
+        def blocked_handshake(active_port) -> str:
+            handshake_started.set()
+            if not active_port.closed.wait(timeout=2.0):
+                raise TimeoutError("test handshake was not interrupted")
+            raise OSError("serial handle closed during stop")
+
+        reader._query_version = blocked_handshake  # type: ignore[method-assign]
+        with patch("backend.px6d_reader.serial", FakeSerialModule):
+            started = reader.start()
+            self.assertTrue(started["ok"])
+            self.assertTrue(handshake_started.wait(timeout=1.0))
+            in_progress = reader.status()
+            self.assertTrue(in_progress["connection_in_progress"])
+
+            stopped = reader.stop()
+
+        self.assertTrue(stopped["ok"])
+        self.assertEqual(stopped["operation_status"], "stopped")
+        self.assertTrue(port.closed.is_set())
+        self.assertFalse(stopped["connection_in_progress"])
+        self.assertFalse(stopped["connected"])
+        self.assertFalse(stopped["running"])
+        self.assertFalse(stopped["worker_alive"])
+        self.assertEqual(stopped["lifecycle_status"], "stopped")
+        self.assertIsNone(stopped["last_error"])
+
+    def test_expected_serial_close_during_stop_is_not_reported_as_device_error(self) -> None:
+        class FakePort:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        reader = Px6dReader(
+            {
+                "auto_tare_on_start": False,
+                "poll_hz": 100.0,
+                "reconnect_interval_sec": 0.1,
+            }
+        )
+        entered_request = threading.Event()
+        port = FakePort()
+
+        def fake_connect() -> None:
+            with reader._lock:
+                reader._serial = port
+                reader._connected = True
+                reader._lifecycle_status = "running"
+
+        def fake_request_sample() -> Px6dSample:
+            entered_request.set()
+            reader._stop_event.wait(timeout=1.0)
+            raise OSError("serial handle closed by stop")
+
+        reader._connect = fake_connect  # type: ignore[method-assign]
+        reader._request_sample = fake_request_sample  # type: ignore[method-assign]
+
+        started = reader.start()
+        self.assertTrue(started["ok"])
+        self.assertTrue(entered_request.wait(timeout=1.0))
+        stopped = reader.stop()
+
+        self.assertTrue(stopped["ok"])
+        self.assertEqual(stopped["operation_status"], "stopped")
+        self.assertFalse(stopped["running"])
+        self.assertFalse(stopped["worker_alive"])
+        self.assertIsNone(stopped["last_error"])
+        self.assertTrue(port.closed)
+
+    def test_outer_worker_finalizer_clears_state_after_nonstandard_exit(self) -> None:
+        reader = Px6dReader({"auto_tare_on_start": False})
+
+        def terminate_worker() -> None:
+            raise SystemExit("simulated driver-level worker exit")
+
+        reader._connect = terminate_worker  # type: ignore[method-assign]
+        with reader._lock:
+            reader._thread = threading.current_thread()
+            reader._running = True
+            reader._connected = False
+            reader._lifecycle_status = "running"
+        with patch("backend.px6d_reader.serial", object()):
+            with self.assertRaises(SystemExit):
+                reader._run()
+
+        status = reader.status()
+        self.assertFalse(status["running"])
+        self.assertFalse(status["worker_alive"])
+        self.assertFalse(status["connected"])
+        self.assertEqual(status["lifecycle_status"], "worker_exited")
+        self.assertEqual(
+            status["last_error"],
+            "PX6D reader worker exited unexpectedly",
+        )
+
     def test_software_tare_and_compression_sign_produce_positive_reference_fz(self) -> None:
         reader = Px6dReader(
             {
@@ -359,8 +636,169 @@ class Px6dReferenceForceTests(unittest.TestCase):
         self.assertFalse(aligned["ok"])
         self.assertEqual(aligned["status"], "px6d_sample_too_far_from_spectrum")
 
+    def test_trace_serialization_does_not_block_live_sample_append(self) -> None:
+        reader = Px6dReader({"auto_tare_on_start": False})
+        started = time.time()
+        with reader._lock:
+            reader._tare_values = (0.0,) * 6
+            reader._tare_status = "ready"
+        for index in range(40):
+            reader._append_sample(
+                make_sample(index + 1, started + index * 0.02, fz_n=0.25)
+            )
+
+        serialization_started = threading.Event()
+        release_serialization = threading.Event()
+        writer_completed = threading.Event()
+        original_payload = reader._sample_payload
+        trace_result: dict[str, object] = {}
+        trace_error: list[BaseException] = []
+
+        def blocking_payload(sample, **kwargs):
+            if not serialization_started.is_set():
+                serialization_started.set()
+                if not release_serialization.wait(timeout=2.0):
+                    raise TimeoutError("trace serialization test was not released")
+            return original_payload(sample, **kwargs)
+
+        def run_trace() -> None:
+            try:
+                trace_result.update(reader.trace(limit=40))
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                trace_error.append(exc)
+
+        def append_live_sample() -> None:
+            reader._append_sample(
+                make_sample(41, started + 0.82, fz_n=0.30)
+            )
+            writer_completed.set()
+
+        reader._sample_payload = blocking_payload  # type: ignore[method-assign]
+        trace_thread = threading.Thread(target=run_trace)
+        writer_thread = threading.Thread(target=append_live_sample)
+        trace_thread.start()
+        try:
+            self.assertTrue(serialization_started.wait(timeout=1.0))
+            writer_thread.start()
+            self.assertTrue(
+                writer_completed.wait(timeout=0.5),
+                "trace JSON serialization held the acquisition lock",
+            )
+        finally:
+            release_serialization.set()
+            trace_thread.join(timeout=2.0)
+            writer_thread.join(timeout=2.0)
+            reader._sample_payload = original_payload  # type: ignore[method-assign]
+
+        self.assertFalse(trace_thread.is_alive())
+        self.assertFalse(writer_thread.is_alive())
+        self.assertEqual(trace_error, [])
+        self.assertEqual(trace_result["count"], 40)
+        rows = trace_result["samples"]
+        self.assertEqual(rows[-1]["sequence_id"], 40)
+        self.assertEqual(reader.latest_sequence, 41)
+
+    def test_trace_rows_share_one_tare_metadata_snapshot(self) -> None:
+        reader = Px6dReader({"auto_tare_on_start": False})
+        started = time.time()
+        with reader._lock:
+            reader._tare_values = (0.0,) * 6
+            reader._tare_status = "ready"
+            reader._tare_sample_count = 12
+        for index in range(3):
+            reader._append_sample(
+                make_sample(index + 1, started + index * 0.02, fz_n=0.25)
+            )
+
+        serialization_started = threading.Event()
+        release_serialization = threading.Event()
+        original_payload = reader._sample_payload
+        trace_result: dict[str, object] = {}
+
+        def blocking_payload(sample, **kwargs):
+            if not serialization_started.is_set():
+                serialization_started.set()
+                release_serialization.wait(timeout=2.0)
+            return original_payload(sample, **kwargs)
+
+        reader._sample_payload = blocking_payload  # type: ignore[method-assign]
+        trace_thread = threading.Thread(
+            target=lambda: trace_result.update(reader.trace(limit=3))
+        )
+        trace_thread.start()
+        try:
+            self.assertTrue(serialization_started.wait(timeout=1.0))
+            with reader._lock:
+                reader._tare_values = (1.0,) * 6
+                reader._tare_status = "replacement_zero"
+                reader._tare_sample_count = 99
+        finally:
+            release_serialization.set()
+            trace_thread.join(timeout=2.0)
+            reader._sample_payload = original_payload  # type: ignore[method-assign]
+
+        self.assertFalse(trace_thread.is_alive())
+        rows = trace_result["samples"]
+        self.assertTrue(all(row["tare_status"] == "ready" for row in rows))
+        self.assertTrue(all(row["tare_sample_count"] == 12 for row in rows))
+        self.assertTrue(
+            all(abs(row["zeroed"]["fz_n"] - 0.25) < 1e-9 for row in rows)
+        )
+
 
 class Px6dIntegrationContractTests(unittest.TestCase):
+    def test_latest_api_separates_historical_sample_from_live_ready_sample(self) -> None:
+        historical = {
+            "ok": True,
+            "status": {
+                "connected": False,
+                "sample_fresh": False,
+                "last_sample_age_sec": 4.0,
+            },
+            "sample": {"force_fz_n": 0.72},
+        }
+        with patch.object(
+            backend_main.px6d_reader,
+            "latest",
+            return_value=historical,
+        ):
+            result = backend_main.px6d_latest()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["sample_present"])
+        self.assertFalse(result["sample_fresh"])
+        self.assertFalse(result["sample_ready"])
+
+    def test_px6d_api_propagates_start_and_stop_failures(self) -> None:
+        with patch.object(
+            backend_main.px6d_reader,
+            "start",
+            return_value={
+                "ok": False,
+                "operation_status": "dependency_unavailable",
+                "running": False,
+            },
+        ):
+            start_result = backend_main.px6d_start()
+        with patch.object(
+            backend_main.px6d_reader,
+            "stop",
+            return_value={
+                "ok": False,
+                "operation_status": "stop_timeout",
+                "running": True,
+            },
+        ):
+            stop_result = backend_main.px6d_stop()
+
+        self.assertFalse(start_result["ok"])
+        self.assertEqual(
+            start_result["operation_status"], "dependency_unavailable"
+        )
+        self.assertFalse(stop_result["ok"])
+        self.assertEqual(stop_result["operation_status"], "stop_timeout")
+        self.assertTrue(stop_result["running"])
+
     def test_environment_can_disable_px6d_autostart_for_safe_secondary_instance(self) -> None:
         with patch.dict(
             "os.environ",
@@ -414,6 +852,8 @@ class Px6dIntegrationContractTests(unittest.TestCase):
         self.assertIn("drift_offset_n", javascript)
         self.assertIn("function finiteNumberOrNull(value)", javascript)
         self.assertNotIn("const sampleAge = Number(status?.last_sample_age_sec)", javascript)
+        self.assertIn("const currentForceReady = connected && tareReady && fresh", javascript)
+        self.assertIn("const displayedCompressionFz = currentForceReady", javascript)
         self.assertIn('"px6d_reference": _px6d_reference_for_record', backend)
         self.assertIn("OpticalForceCaptureManager", backend)
 

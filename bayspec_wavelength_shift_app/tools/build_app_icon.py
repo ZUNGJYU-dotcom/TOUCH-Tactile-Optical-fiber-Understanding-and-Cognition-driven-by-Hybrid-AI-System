@@ -14,8 +14,10 @@ from PIL import (
 
 
 MASTER_SIZE = 1024
+MASTER_SUBJECT_FRACTION = 0.95
 ICO_SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)
 MICRO_MAX_SIZE = 32
+VISIBLE_ALPHA_THRESHOLD = 16
 APP_ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIR = APP_ROOT / "assets"
 SOURCE_PATH = ASSET_DIR / "touch_system_icon_source.png"
@@ -59,13 +61,23 @@ def load_master_source() -> Image.Image:
         )
 
     source = Image.open(SOURCE_PATH).convert("RGBA")
-    bbox = source.getbbox()
+    visible_alpha = source.getchannel("A").point(
+        lambda value: 255 if value >= VISIBLE_ALPHA_THRESHOLD else 0
+    )
+    bbox = visible_alpha.getbbox()
     if bbox is None:
         raise ValueError("Icon source is fully transparent")
 
     subject = source.crop(bbox)
-    target = round(MASTER_SIZE * 0.88)
-    subject.thumbnail((target, target), Image.Resampling.LANCZOS)
+    target = round(MASTER_SIZE * MASTER_SUBJECT_FRACTION)
+    scale = target / max(subject.size)
+    subject = subject.resize(
+        (
+            max(1, round(subject.width * scale)),
+            max(1, round(subject.height * scale)),
+        ),
+        Image.Resampling.LANCZOS,
+    )
     master = Image.new("RGBA", (MASTER_SIZE, MASTER_SIZE), (0, 0, 0, 0))
     master.alpha_composite(
         subject,
@@ -80,8 +92,9 @@ def build_large_frame(master: Image.Image, size: int) -> Image.Image:
         alpha = frame.getchannel("A")
         rgb = ImageEnhance.Color(frame.convert("RGB")).enhance(1.10)
         rgb = ImageEnhance.Contrast(rgb).enhance(1.05)
+        rgb = rgb.filter(ImageFilter.UnsharpMask(radius=0.55, percent=75, threshold=2))
         rgb.putalpha(alpha)
-        frame = rgb.filter(ImageFilter.UnsharpMask(radius=0.55, percent=75, threshold=2))
+        frame = rgb
     return frame
 
 
@@ -172,14 +185,10 @@ def build_micro_frame(size: int) -> Image.Image:
 
 
 def build_frames(master: Image.Image) -> dict[int, Image.Image]:
-    return {
-        size: (
-            build_micro_frame(size)
-            if size <= MICRO_MAX_SIZE
-            else build_large_frame(master, size)
-        )
-        for size in ICO_SIZES
-    }
+    # Preserve one visual identity at every Windows icon size. The former
+    # 16-32 px redraw changed the approved 3D contact-fold artwork into a flat
+    # cyan tile with a small dot, so the taskbar no longer matched the app.
+    return {size: build_large_frame(master, size) for size in ICO_SIZES}
 
 
 def save_icon_files(master: Image.Image, frames: dict[int, Image.Image]) -> None:
@@ -268,8 +277,10 @@ def validate_assets(master: Image.Image) -> None:
     if master.getpixel((0, 0))[3] != 0:
         raise ValueError("Master icon corners must remain transparent")
 
-    bbox = master.getbbox()
-    if bbox is None or min(bbox[0], bbox[1], MASTER_SIZE - bbox[2], MASTER_SIZE - bbox[3]) < 35:
+    bbox = master.getchannel("A").point(
+        lambda value: 255 if value >= VISIBLE_ALPHA_THRESHOLD else 0
+    ).getbbox()
+    if bbox is None or min(bbox[0], bbox[1], MASTER_SIZE - bbox[2], MASTER_SIZE - bbox[3]) < 24:
         raise ValueError(f"Master icon has insufficient safe margin: {bbox}")
 
     icon = Image.open(ICO_PATH)

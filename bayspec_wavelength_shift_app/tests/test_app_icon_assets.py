@@ -26,9 +26,9 @@ def test_master_icon_has_transparency_safe_margin_and_three_color_signature() ->
     assert image.size == (1024, 1024)
     assert image.getpixel((0, 0))[3] == 0
 
-    bbox = image.getbbox()
+    bbox = image.getchannel("A").point(lambda value: 255 if value >= 16 else 0).getbbox()
     assert bbox is not None
-    assert min(bbox[0], bbox[1], 1024 - bbox[2], 1024 - bbox[3]) >= 35
+    assert min(bbox[0], bbox[1], 1024 - bbox[2], 1024 - bbox[3]) >= 24
 
     pixels = np.asarray(image)
     alpha = pixels[:, :, 3] > 32
@@ -40,7 +40,7 @@ def test_master_icon_has_transparency_safe_margin_and_three_color_signature() ->
     assert coral.sum() > 10_000
 
 
-def test_ico_contains_optically_corrected_micro_frames() -> None:
+def test_ico_contains_consistent_approved_artwork_at_every_size() -> None:
     icon = Image.open(ASSET_DIR / "touch_system_icon.ico")
     expected_sizes = {16, 20, 24, 32, 40, 48, 64, 96, 128, 256}
     actual_sizes = {width for width, height in icon.ico.sizes() if width == height}
@@ -55,6 +55,21 @@ def test_ico_contains_optically_corrected_micro_frames() -> None:
     assert cyan.sum() >= 20
     assert teal.sum() >= 3
     assert coral.sum() >= 3
+
+    master = Image.open(ASSET_DIR / "touch_system_icon.png").convert("RGBA")
+    expected_micro = np.asarray(master.resize((32, 32), Image.Resampling.LANCZOS))
+    actual_micro = np.asarray(icon.ico.getimage((32, 32)).convert("RGBA"))
+    expected_mask = expected_micro[:, :, 3] > 32
+    actual_mask = actual_micro[:, :, 3] > 32
+    mask_agreement = np.mean(expected_mask == actual_mask)
+    assert mask_agreement >= 0.90
+
+    for size in (40, 48, 64):
+        frame = icon.ico.getimage((size, size)).convert("RGBA")
+        bbox = frame.getchannel("A").point(lambda value: 255 if value >= 16 else 0).getbbox()
+        assert bbox is not None
+        assert (bbox[2] - bbox[0]) / size >= 0.90
+        assert (bbox[3] - bbox[1]) / size >= 0.90
 
 
 def test_desktop_build_uses_the_contact_fold_ico() -> None:

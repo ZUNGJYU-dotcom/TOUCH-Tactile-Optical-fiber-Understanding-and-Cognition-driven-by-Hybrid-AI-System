@@ -113,6 +113,98 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
         self.ingest_spectrum(bridge, 1544.359792, 0.1)
         self.assertGreater(bridge.frame()["frame_id"], second["frame_id"])
 
+    def test_oversized_spectrum_is_rejected_before_allocating_channel_history(self) -> None:
+        bridge = BaySpecWavelengthShiftBridge(max_spectrum_points=32)
+        result = bridge.ingest(
+            {
+                "channels": [
+                    {
+                        "channel_id": "P22",
+                        "wavelength_nm": [1540.0 + index * 0.01 for index in range(33)],
+                        "intensity": [1000.0] * 33,
+                    }
+                ]
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["records_ingested"], 0)
+        self.assertEqual(result["records_rejected"], 1)
+        self.assertEqual(result["rejections"][0]["reason"], "spectrum_point_limit_exceeded")
+        self.assertEqual(dict(bridge.records_by_channel), {})
+        self.assertEqual(
+            bridge.status()["ingest_rejection_counts"]["spectrum_point_limit_exceeded"],
+            1,
+        )
+
+    def test_channel_flood_is_bounded_across_single_and_repeated_payloads(self) -> None:
+        bridge = BaySpecWavelengthShiftBridge(
+            max_channel_buffers=4,
+            max_channels_per_payload=4,
+        )
+        first = bridge.ingest(
+            {
+                "channels": [
+                    {"channel_id": f"C{index}", "intensity_counts": 1000.0 + index}
+                    for index in range(10)
+                ]
+            }
+        )
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["records_ingested"], 4)
+        self.assertEqual(first["records_rejected"], 6)
+        self.assertEqual(len(bridge.records_by_channel), 4)
+
+        second = bridge.ingest(
+            {"channels": [{"channel_id": "C_new", "intensity_counts": 2000.0}]}
+        )
+        self.assertFalse(second["ok"])
+        self.assertEqual(second["rejections"][0]["reason"], "channel_buffer_limit_exceeded")
+        self.assertEqual(len(bridge.records_by_channel), 4)
+
+    def test_invalid_or_misaligned_spectrum_arrays_are_rejected_not_silently_compacted(self) -> None:
+        bridge = BaySpecWavelengthShiftBridge()
+        nonfinite = bridge.ingest(
+            {
+                "channel_id": "P22",
+                "wavelength_nm": [1546.8, float("nan"), 1547.0],
+                "intensity": [100.0, 140.0, 105.0],
+            }
+        )
+        mismatch = bridge.ingest(
+            {
+                "channel_id": "P22",
+                "wavelength_nm": [1546.8, 1546.9],
+                "intensity": [100.0],
+            }
+        )
+
+        self.assertFalse(nonfinite["ok"])
+        self.assertEqual(
+            nonfinite["rejections"][0]["reason"],
+            "spectrum_contains_nonfinite_or_nonnumeric_value",
+        )
+        self.assertFalse(mismatch["ok"])
+        self.assertEqual(mismatch["rejections"][0]["reason"], "spectrum_axis_length_mismatch")
+        self.assertEqual(dict(bridge.records_by_channel), {})
+
+    def test_duplicate_channel_in_one_frame_is_explicitly_rejected(self) -> None:
+        bridge = BaySpecWavelengthShiftBridge()
+        result = bridge.ingest(
+            {
+                "channels": [
+                    {"channel_id": "P22", "intensity_counts": 1000.0},
+                    {"channel_id": "P22", "intensity_counts": 1001.0},
+                ]
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["records_ingested"], 1)
+        self.assertEqual(result["records_rejected"], 1)
+        self.assertEqual(result["rejections"][0]["reason"], "duplicate_channel_id_in_frame")
+        self.assertEqual(len(bridge.records_by_channel["P22"]), 1)
+
     def test_full_spectrum_exposes_nine_real_fbg_candidates_without_enabling_array(self) -> None:
         bridge = BaySpecWavelengthShiftBridge()
         wavelengths = [1523.1596 + index * (1607.0144 - 1523.1596) / 511 for index in range(512)]
