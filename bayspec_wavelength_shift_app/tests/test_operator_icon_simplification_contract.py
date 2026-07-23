@@ -62,7 +62,7 @@ class OperatorIconSimplificationContractTests(unittest.TestCase):
         self.assertNotIn("background: #0071e3", structural_pass)
         self.assertIn("Surface Summary", self.html)
         self.assertIn("Global FBG Fingerprint", self.html)
-        self.assertIn("Response Band", self.html)
+        self.assertIn("Optical Response", self.html)
 
 
 if __name__ == "__main__":

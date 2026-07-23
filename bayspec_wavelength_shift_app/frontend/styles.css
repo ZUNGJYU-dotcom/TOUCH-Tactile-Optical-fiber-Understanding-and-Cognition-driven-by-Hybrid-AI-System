@@ -3126,10 +3126,10 @@ button.active-watch,
   border-radius: 999px;
   background: linear-gradient(
     90deg,
-    #dfeef4 0 var(--response-no-contact-end, 25%),
-    #63b7b7 var(--response-no-contact-end, 25%) var(--response-small-end, 80%),
-    #f0d57a var(--response-small-end, 80%) var(--response-moderate-end, 90%),
-    #c8665f var(--response-moderate-end, 90%) 100%
+    #dfeef4 0%,
+    #63b7b7 34%,
+    #f0d57a 67%,
+    #c8665f 100%
   );
   overflow: visible;
 }
@@ -3151,11 +3151,23 @@ button.active-watch,
 
 .operator-mode .response-band-labels {
   display: grid;
-  grid-template-columns: 0.7fr 1fr 1fr 1fr;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 4px;
   margin-top: 7px;
   color: #61778c;
   font-size: 9.5px;
+}
+
+.operator-mode .response-band-labels span {
+  text-align: center;
+}
+
+.operator-mode .response-band-labels span:first-child {
+  text-align: left;
+}
+
+.operator-mode .response-band-labels span:last-child {
+  text-align: right;
 }
 
 .operator-mode .operator-band-card > strong {

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TOUCH</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/styles.css?v=desktop-chrome-v33" />
+    <link rel="stylesheet" href="/static/styles.css?v=continuous-response-v34" />
     <script type="importmap">
       {
         "imports": {
@@ -414,15 +414,16 @@
           </div>
 
           <div class="operator-band-card">
-            <div class="section-label">Response Band</div>
-            <div class="response-band-track" aria-label="Normalized Bragg wavelength-shift response band">
+            <div class="section-label">Optical Response</div>
+            <div class="response-band-track" aria-label="Continuous normalized optical response from 0 to 100 percent">
               <span id="responseBandMarker"></span>
             </div>
             <div class="response-band-labels">
-              <span>none</span>
-              <span>light</span>
-              <span>normal</span>
-              <span>hard</span>
+              <span>0%</span>
+              <span>25%</span>
+              <span>50%</span>
+              <span>75%</span>
+              <span>100%</span>
             </div>
             <strong id="responseBandValue">--</strong>
           </div>
@@ -887,6 +888,6 @@
 
     </div>
     <script src="/static/vendor/lucide/lucide.min.js"></script>
-    <script type="module" src="/static/app.js?v=desktop-chrome-v33"></script>
+    <script type="module" src="/static/app.js?v=continuous-response-v34"></script>
   </body>
 </html>

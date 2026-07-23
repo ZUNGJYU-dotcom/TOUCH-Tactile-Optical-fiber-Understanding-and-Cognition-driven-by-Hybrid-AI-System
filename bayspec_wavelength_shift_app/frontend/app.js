@@ -1,4 +1,4 @@
-﻿import * as THREE from "three";
+import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { loadThumbHolderModel } from "./model_loader.js";
 
@@ -793,10 +793,9 @@ function surfaceContactPresentation({
         secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
       };
     }
-    const level = prediction?.force_level?.label || "uncertain";
     return {
       active: true,
-      primary: levelLabel(level),
+      primary: "contact",
       secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
     };
   }
@@ -808,7 +807,7 @@ function surfaceContactPresentation({
     const active = complete && Number.isFinite(peak) && peak >= 0.02 && responding > 0;
     return {
       active,
-      primary: !complete ? "uncertain" : active ? levelLabel(responseLevelFromSurfaceValue(peak)) : "no_contact",
+      primary: !complete ? "uncertain" : active ? "contact" : "no_contact",
       secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
     };
   }
@@ -828,14 +827,14 @@ function surfaceContactPresentation({
   if (fallbackLike) {
     return {
       active: true,
-      primary: levelLabel(responseLevelFromSurfaceValue(peak)),
+      primary: "contact",
       secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
     };
   }
 
   return {
     active: true,
-    primary: scenarioState,
+    primary: scenarioState === "no_contact" ? "no_contact" : "contact",
     secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
   };
 }
@@ -5136,12 +5135,9 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
   if (marker) {
     const track = marker.parentElement;
     if (track) {
-      track.style.setProperty("--response-no-contact-end", `${RESPONSE_BAND_THRESHOLDS.noContactMax * 100}%`);
-      track.style.setProperty("--response-small-end", `${RESPONSE_BAND_THRESHOLDS.smallMax * 100}%`);
-      track.style.setProperty("--response-moderate-end", `${RESPONSE_BAND_THRESHOLDS.moderateMax * 100}%`);
       track.setAttribute(
         "aria-label",
-        `Normalized visual response: no contact below ${RESPONSE_BAND_THRESHOLDS.noContactMax * 100}%, light ${RESPONSE_BAND_THRESHOLDS.noContactMax * 100}-${RESPONSE_BAND_THRESHOLDS.smallMax * 100}%, normal ${RESPONSE_BAND_THRESHOLDS.smallMax * 100}-${RESPONSE_BAND_THRESHOLDS.moderateMax * 100}%, hard ${RESPONSE_BAND_THRESHOLDS.moderateMax * 100}-100%`
+        "Continuous normalized optical response from 0% to 100%; visual proxy only"
       );
     }
     marker.classList.toggle("unavailable", !measurementAvailable);
@@ -5150,15 +5146,9 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
   const trainedPrediction = trainedStaticView
     ? activeModelPrediction(record, arrayFrame)
     : null;
-  const trainedForce = String(trainedPrediction?.force_level?.label || "");
-  const responseBandLevel = trainedPrediction
-    ? trainedPrediction?.digital_twin?.active
-      ? `${trainedForce}_press`
-      : "no_contact"
-    : responseLevelFromSurfaceValue(peak);
   const responseBandValue = document.getElementById("responseBandValue");
   const compactResponseBandText = measurementAvailable
-    ? `${levelLabel(responseBandLevel)} · ${formatPercent(peak, 0)} response${heldMeasurement ? " · held" : ""}`
+    ? `${formatPercent(peak, 0)} optical response${heldMeasurement ? " · held" : ""}`
     : unavailableResponseText;
   setText("responseBandValue", compactResponseBandText);
   if (responseBandValue) {
@@ -6239,15 +6229,11 @@ function updateUI(frame) {
     ? "idle"
     : !responseAvailable
       ? frameSourceIsFresh(frame) ? "response unavailable" : "stale frame"
-    : trainedModelDisplay
-      ? levelLabel(record?.response_level)
-    : globalRecognitionFrame
-      ? completeGlobalRecognitionFrame
-        ? levelLabel(responseLevelFromSurfaceValue(surfaceMetrics.surface_peak))
-        : "global spectrum incomplete"
-    : arrayMode === "simulated_array_demo"
-      ? simulatedScenarioStateLabel(arrayFrame, surfaceMetrics)
-      : levelLabel(record?.response_level);
+    : globalRecognitionFrame && !completeGlobalRecognitionFrame
+      ? "global spectrum incomplete"
+      : contactPresentation.active
+        ? "contact"
+        : "no_contact";
   setText("surfaceResponseLevel", displaySurfaceResponseLevel);
   setText("diagnosticSurfaceResponseLevel", displaySurfaceResponseLevel);
   const surfacePeakValue = Number(

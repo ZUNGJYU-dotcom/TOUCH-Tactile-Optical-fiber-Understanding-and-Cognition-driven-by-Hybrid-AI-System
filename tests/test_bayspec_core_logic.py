@@ -387,12 +387,17 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
             "globalEventPeakShiftPm / WAVELENGTH_SHIFT_FULL_SCALE_PM",
             app_js,
         )
-        self.assertIn("var(--response-no-contact-end, 25%)", styles_css)
-        self.assertIn("var(--response-small-end, 80%)", styles_css)
-        self.assertIn("var(--response-moderate-end, 90%)", styles_css)
+        self.assertIn("#dfeef4 0%", styles_css)
+        self.assertIn("#63b7b7 34%", styles_css)
+        self.assertIn("#f0d57a 67%", styles_css)
+        self.assertIn("#c8665f 100%", styles_css)
+        self.assertNotIn("var(--response-no-contact-end", styles_css)
         self.assertIn("0.5 * (RESPONSE_BAND_THRESHOLDS.noContactMax + RESPONSE_BAND_THRESHOLDS.smallMax)", app_js)
         self.assertIn("0.5 * (RESPONSE_BAND_THRESHOLDS.smallMax + RESPONSE_BAND_THRESHOLDS.moderateMax)", app_js)
-        self.assertIn("Normalized visual response: no contact below", app_js)
+        self.assertIn(
+            "Continuous normalized optical response from 0% to 100%",
+            app_js,
+        )
         self.assertIn("responseLevelFromSurfaceValue(proxyResponseRatio)", app_js)
         self.assertIn("const trainedModelTrace", app_js)
         self.assertIn("trace: trainedModelTrace || normalizedEventTrace", app_js)

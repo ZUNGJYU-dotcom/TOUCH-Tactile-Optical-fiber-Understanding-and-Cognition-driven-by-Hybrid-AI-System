@@ -148,6 +148,44 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
         self.assertNotIn('"coupled response"', coupling_block)
         self.assertGreaterEqual(coupling_block.count('? "coupled"'), 3)
 
+    def test_operator_response_gauge_is_continuous_not_categorical(self) -> None:
+        band_markup = self.html.split('<div class="operator-band-card">', 1)[1].split(
+            '<nav class="diagnostic-tabs', 1
+        )[0]
+        self.assertIn("Optical Response", band_markup)
+        self.assertIn("Continuous normalized optical response", band_markup)
+        for label in ("0%", "25%", "50%", "75%", "100%"):
+            self.assertIn(f"<span>{label}</span>", band_markup)
+        for legacy_label in ("<span>light</span>", "<span>normal</span>", "<span>hard</span>"):
+            self.assertNotIn(legacy_label, band_markup)
+
+        update_block = self.app_js.split(
+            'const marker = document.getElementById("responseBandMarker");', 1
+        )[1].split('let note = "raw coupled response";', 1)[0]
+        self.assertIn("Continuous normalized optical response from 0% to 100%", update_block)
+        self.assertIn("optical response", update_block)
+        self.assertNotIn("responseBandLevel", update_block)
+        self.assertNotIn("levelLabel(", update_block)
+
+        track_rule = self.css.split(".operator-mode .response-band-track {", 1)[1].split("}", 1)[0]
+        self.assertNotIn("--response-small-end", track_rule)
+        labels_rule = self.css.split(".operator-mode .response-band-labels {", 1)[1].split("}", 1)[0]
+        self.assertIn("repeat(5, minmax(0, 1fr))", labels_rule)
+
+    def test_operator_surface_state_uses_contact_not_force_bands(self) -> None:
+        presentation = self.app_js.split("function surfaceContactPresentation(", 1)[1].split(
+            "function clampArrayCoord", 1
+        )[0]
+        self.assertIn('primary: "contact"', presentation)
+        self.assertNotIn("primary: levelLabel(", presentation)
+
+        summary = self.app_js.split("const displaySurfaceResponseLevel =", 1)[1].split(
+            'setText("surfaceResponseLevel"', 1
+        )[0]
+        self.assertIn('? "contact"', summary)
+        self.assertIn(': "no_contact"', summary)
+        self.assertNotIn("levelLabel(", summary)
+
 
 if __name__ == "__main__":
     unittest.main()
