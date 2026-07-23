@@ -91,8 +91,51 @@ const diagnosticAccordionCards = Array.from(
 );
 const diagnosticTabButtons = Array.from(document.querySelectorAll("[data-diagnostic-tab]"));
 const diagnosticGroupedCards = Array.from(document.querySelectorAll("[data-diagnostic-group]"));
+const desktopTitlebar = document.getElementById("desktopTitlebar");
+const desktopMinimizeButton = document.getElementById("desktopMinimizeButton");
+const desktopMaximizeButton = document.getElementById("desktopMaximizeButton");
+const desktopCloseButton = document.getElementById("desktopCloseButton");
 let spectrumDrawerOpener = null;
 let settingsPanelOpener = null;
+
+function activateDesktopChrome() {
+  document.body.classList.add("pywebview-desktop");
+}
+
+async function invokeDesktopWindowCommand(commandName) {
+  const desktopApi = window.pywebview?.api;
+  if (!desktopApi || typeof desktopApi[commandName] !== "function") return null;
+  try {
+    return await desktopApi[commandName]();
+  } catch (error) {
+    console.error(`[desktop-window:${commandName}]`, error);
+    return null;
+  }
+}
+
+window.addEventListener("pywebviewready", activateDesktopChrome);
+
+desktopMinimizeButton?.addEventListener("click", () => {
+  void invokeDesktopWindowCommand("minimize_window");
+});
+
+desktopMaximizeButton?.addEventListener("click", async () => {
+  const result = await invokeDesktopWindowCommand("toggle_maximize_window");
+  if (!result?.ok) return;
+  const maximized = Boolean(result.maximized);
+  desktopMaximizeButton.classList.toggle("is-maximized", maximized);
+  desktopMaximizeButton.setAttribute("aria-label", maximized ? "Restore window" : "Maximize window");
+  desktopMaximizeButton.title = maximized ? "Restore" : "Maximize";
+});
+
+desktopTitlebar?.addEventListener("dblclick", (event) => {
+  if (event.target.closest("button")) return;
+  desktopMaximizeButton?.click();
+});
+
+desktopCloseButton?.addEventListener("click", () => {
+  void invokeDesktopWindowCommand("close_window");
+});
 
 function refreshLucideIcons() {
   if (!window.lucide?.createIcons) return;
@@ -165,7 +208,12 @@ const DIAGNOSTICS_PANEL_WIDTH_STORAGE_KEY = "touch-diagnostics-panel-width";
 const DIAGNOSTICS_PANEL_DEFAULT_WIDTH_PX = 420;
 const DIAGNOSTICS_PANEL_MIN_WIDTH_PX = 280;
 const DIAGNOSTICS_PANEL_MAX_WIDTH_PX = 680;
-const DIAGNOSTICS_CENTER_MIN_WIDTH_PX = 400;
+// The Surface workspace contains both the 3D proxy and the 2D map. Keeping a
+// real minimum here prevents a widened diagnostics rail from collapsing those
+// two views into an overlapping layout.
+const DIAGNOSTICS_CENTER_MIN_WIDTH_PX = 520;
+const DIAGNOSTICS_CENTER_COMPACT_MIN_WIDTH_PX = 420;
+const DIAGNOSTICS_COMPACT_BREAKPOINT_PX = 1100;
 const DEMO_PLAYBACK_RATE_MIN = 0.1;
 const DEMO_PLAYBACK_RATE_MAX = 2.0;
 // Reach a new physical-frame target in about 0.2 s while retaining continuous
@@ -967,14 +1015,26 @@ const state = {
   frameRequestSequence: 0,
   lastCommittedFrameRequest: 0,
   frameRequestInFlight: false,
+  frameRequestController: null,
   forcedFrameRequestQueued: false,
   px6dRequestInFlight: false,
+  px6dRequestController: null,
   px6dLatest: null,
   px6dUiStatus: null,
   px6dAligned: null,
   px6dOpticalFrame: null,
   px6dCaptureRequestInFlight: false,
+  px6dCapturePollInFlight: false,
+  px6dCapturePollController: null,
+  px6dCaptureStatusEpoch: 0,
   px6dCaptureStatus: null,
+  pageVisible: document.visibilityState !== "hidden",
+  bootStarted: false,
+  bootComplete: false,
+  clientSchedulersStarted: false,
+  frameSchedulerId: null,
+  px6dSchedulerId: null,
+  px6dCaptureSchedulerId: null,
 };
 
 let scene;
@@ -1000,6 +1060,8 @@ let sensorSurfaceGroup;
 let slotOutlineHelper;
 let grooveReferenceHelper;
 let resizeToken = 0;
+let windowResizeSettleTimer = 0;
+let windowResizeActive = false;
 
 function setText(id, value) {
   const element = document.getElementById(id);
@@ -1036,7 +1098,7 @@ function updatePx6dPanel(payload = {}) {
   const zeroed = mechanicalSource?.zeroed || {};
   const filteredZeroed = mechanicalSource?.filtered_zeroed || zeroed;
   const mechanical = mechanicalSource?.mechanical || {};
-  const displayedMechanical = mechanicalSource?.filtered_mechanical || mechanical;
+  const candidateMechanical = mechanicalSource?.filtered_mechanical || mechanical;
   const referenceValue = finiteNumberOrNull(
     aligned?.force_fz_n ??
     sample?.force_fz_n ??
@@ -1045,11 +1107,21 @@ function updatePx6dPanel(payload = {}) {
     sample?.conditioned_reference_fz_n ??
     sample?.filtered_reference_fz_n
   );
-  const rawFz = finiteNumberOrNull(aligned?.raw?.fz_n ?? sample?.raw?.fz_n);
+  const rawFzValue = finiteNumberOrNull(aligned?.raw?.fz_n ?? sample?.raw?.fz_n);
   const connected = status?.connected === true;
   const tareReady = Boolean(aligned?.tare_ready ?? sample?.tare_ready ?? status?.tare_ready);
   const sampleAge = finiteNumberOrNull(status?.last_sample_age_sec);
-  const fresh = connected && Number.isFinite(sampleAge) && sampleAge < 0.5;
+  const freshnessLimit = finiteNumberOrNull(status?.sample_freshness_limit_sec) ?? 0.5;
+  const fresh = status?.sample_fresh === true || (
+    connected &&
+    Number.isFinite(sampleAge) &&
+    sampleAge >= 0 &&
+    sampleAge <= freshnessLimit
+  );
+  const currentForceReady = connected && tareReady && fresh;
+  const rawFz = fresh ? rawFzValue : null;
+  const currentFilteredZeroed = currentForceReady ? filteredZeroed : {};
+  const displayedMechanical = currentForceReady ? candidateMechanical : {};
   const stateLabel = !connected
     ? "offline"
     : !tareReady
@@ -1065,7 +1137,7 @@ function updatePx6dPanel(payload = {}) {
     stateLabel,
   };
 
-  const displayedCompressionFz = Number.isFinite(referenceValue)
+  const displayedCompressionFz = currentForceReady && Number.isFinite(referenceValue)
     ? Math.max(0, referenceValue)
     : null;
   setText(
@@ -1091,12 +1163,12 @@ function updatePx6dPanel(payload = {}) {
     Number.isFinite(displayedCompressionFz) ? displayedCompressionFz.toFixed(3) : "--"
   );
   const axisSpecs = [
-    ["diagnosticPx6dFx", filteredZeroed?.fx_n, 3],
-    ["diagnosticPx6dFy", filteredZeroed?.fy_n, 3],
+    ["diagnosticPx6dFx", currentFilteredZeroed?.fx_n, 3],
+    ["diagnosticPx6dFy", currentFilteredZeroed?.fy_n, 3],
     ["diagnosticPx6dFz", displayedCompressionFz, 3],
-    ["diagnosticPx6dMx", filteredZeroed?.mx_nm, 4],
-    ["diagnosticPx6dMy", filteredZeroed?.my_nm, 4],
-    ["diagnosticPx6dMz", filteredZeroed?.mz_nm, 4],
+    ["diagnosticPx6dMx", currentFilteredZeroed?.mx_nm, 4],
+    ["diagnosticPx6dMy", currentFilteredZeroed?.my_nm, 4],
+    ["diagnosticPx6dMz", currentFilteredZeroed?.mz_nm, 4],
   ];
   axisSpecs.forEach(([id, value, digits]) => {
     const numeric = finiteNumberOrNull(value);
@@ -1117,10 +1189,12 @@ function updatePx6dPanel(payload = {}) {
   setText("diagnosticPx6dTareStatus", tareReady ? "ready" : status?.tare_status || sample?.tare_status || "required");
   const tareNoise = finiteNumberOrNull(aligned?.tare_fz_std_n ?? sample?.tare_fz_std_n ?? status?.tare_fz_std_n);
   setText("diagnosticPx6dTareNoise", Number.isFinite(tareNoise) ? `${tareNoise.toFixed(4)} N` : "--");
-  const filteredFz = finiteNumberOrNull(aligned?.filtered_reference_fz_n ?? sample?.filtered_reference_fz_n);
+  const filteredFz = currentForceReady
+    ? finiteNumberOrNull(aligned?.filtered_reference_fz_n ?? sample?.filtered_reference_fz_n)
+    : null;
   const driftOffset = finiteNumberOrNull(aligned?.drift_offset_n ?? sample?.drift_offset_n ?? status?.force_conditioning?.current_drift_offset_n);
   setText("diagnosticPx6dFilteredFz", Number.isFinite(filteredFz) ? `${filteredFz.toFixed(4)} N` : "--");
-  setText("diagnosticPx6dDriftOffset", tareReady && Number.isFinite(driftOffset) ? `${driftOffset.toFixed(4)} N` : "--");
+  setText("diagnosticPx6dDriftOffset", currentForceReady && Number.isFinite(driftOffset) ? `${driftOffset.toFixed(4)} N` : "--");
   setText(
     "diagnosticPx6dFilterStatus",
     aligned?.force_filter_status || sample?.force_filter_status || status?.force_conditioning?.filter_status || "--"
@@ -1180,13 +1254,20 @@ function updatePx6dPanel(payload = {}) {
 }
 
 async function fetchPx6dReference() {
-  if (state.px6dRequestInFlight) return;
+  if (!state.pageVisible || state.px6dRequestInFlight) return;
   state.px6dRequestInFlight = true;
+  const requestController = new AbortController();
+  state.px6dRequestController = requestController;
   try {
-    const payload = await requestJSON("/api/px6d/latest", { cache: "no-store" }, { timeoutMs: 1200 });
+    const payload = await requestJSON(
+      "/api/px6d/latest",
+      { cache: "no-store" },
+      { timeoutMs: 1200, signal: requestController.signal }
+    );
     state.px6dLatest = payload;
     updatePx6dPanel(payload);
   } catch (error) {
+    if (error?.name === "AbortError" && requestController.signal.aborted) return;
     updatePx6dPanel({
       status: {
         connected: false,
@@ -1195,7 +1276,10 @@ async function fetchPx6dReference() {
       },
     });
   } finally {
-    state.px6dRequestInFlight = false;
+    if (state.px6dRequestController === requestController) {
+      state.px6dRequestController = null;
+      state.px6dRequestInFlight = false;
+    }
   }
 }
 
@@ -1386,17 +1470,50 @@ function updatePx6dCapturePanel(payload = {}) {
 }
 
 async function fetchPx6dCaptureStatus() {
-  if (state.px6dCaptureRequestInFlight) return;
+  if (
+    !state.pageVisible ||
+    state.px6dCaptureRequestInFlight ||
+    state.px6dCapturePollInFlight
+  ) return;
+  state.px6dCapturePollInFlight = true;
+  const requestEpoch = state.px6dCaptureStatusEpoch;
+  const requestController = new AbortController();
+  state.px6dCapturePollController = requestController;
   try {
-    const payload = await requestJSON("/api/px6d_capture/status", { cache: "no-store" }, { timeoutMs: 1200 });
+    const payload = await requestJSON(
+      "/api/px6d_capture/status",
+      { cache: "no-store" },
+      { timeoutMs: 1200, signal: requestController.signal }
+    );
+    if (requestEpoch !== state.px6dCaptureStatusEpoch) return;
     updatePx6dCapturePanel(payload);
   } catch (error) {
+    if (error?.name === "AbortError" && requestController.signal.aborted) return;
+    if (requestEpoch !== state.px6dCaptureStatusEpoch) return;
     updatePx6dCapturePanel({
       ...(state.px6dCaptureStatus || {}),
       running: false,
       capture_status: "capture API unavailable",
       last_error: commandErrorMessage(error, "capture API unavailable"),
     });
+  } finally {
+    if (state.px6dCapturePollController === requestController) {
+      state.px6dCapturePollController = null;
+      state.px6dCapturePollInFlight = false;
+    }
+  }
+}
+
+function invalidatePx6dCaptureStatusPoll() {
+  state.px6dCaptureStatusEpoch += 1;
+  if (state.px6dCapturePollController && !state.px6dCapturePollController.signal.aborted) {
+    state.px6dCapturePollController.abort();
+  }
+}
+
+function invalidatePx6dReferenceRequest() {
+  if (state.px6dRequestController && !state.px6dRequestController.signal.aborted) {
+    state.px6dRequestController.abort();
   }
 }
 
@@ -1628,6 +1745,9 @@ function frameResponseIsUsable(frame) {
 
 function invalidateFrameRequestContext() {
   state.frameModeEpoch += 1;
+  if (state.frameRequestController && !state.frameRequestController.signal.aborted) {
+    state.frameRequestController.abort();
+  }
 }
 
 function setDataSourceDisplay(sourceState) {
@@ -4017,7 +4137,7 @@ async function setSurfaceFullscreen(active) {
   state.surfaceNativeFullscreenEntered = false;
 }
 
-function updateRecognitionValidationMode(useTemporal, { announce = true } = {}) {
+function updateRecognitionValidationMode(useTemporal, { announce = true, refresh = true } = {}) {
   state.temporalValidationMode = Boolean(useTemporal);
   settingsTemporalValidationButton?.classList.toggle("active", state.temporalValidationMode);
   settingsStaticFallbackButton?.classList.toggle("active", !state.temporalValidationMode);
@@ -4043,7 +4163,7 @@ function updateRecognitionValidationMode(useTemporal, { announce = true } = {}) 
       { autoHideMs: 3600 }
     );
   }
-  fetchFrame({ force: true });
+  if (refresh) fetchFrame({ force: true });
 }
 
 function initThree() {
@@ -4416,6 +4536,10 @@ function applyThreeGeometry(raw, deformation, { recomputeNormals = false } = {})
 
 function animate(timestamp = 0) {
   requestAnimationFrame(animate);
+  if (windowResizeActive) {
+    state.lastThreeFrameMs = timestamp;
+    return;
+  }
   const previous = state.lastThreeFrameMs || timestamp;
   const deltaSeconds = Math.max(0.001, Math.min(0.08, (timestamp - previous) / 1000 || 1 / 60));
   state.lastThreeFrameMs = timestamp;
@@ -4592,8 +4716,14 @@ function diagnosticsPanelWidthBounds() {
   const leftWidth = leftPanel?.getBoundingClientRect().width || 180;
   const dashboardStyle = dashboard ? window.getComputedStyle(dashboard) : null;
   const gap = Number.parseFloat(dashboardStyle?.columnGap || dashboardStyle?.gap || "8") || 8;
-  const available = Math.floor(dashboardWidth - leftWidth - DIAGNOSTICS_CENTER_MIN_WIDTH_PX - (gap * 2));
-  const min = Math.min(DIAGNOSTICS_PANEL_MIN_WIDTH_PX, Math.max(240, available));
+  const centerMinimum = dashboardWidth <= DIAGNOSTICS_COMPACT_BREAKPOINT_PX
+    ? DIAGNOSTICS_CENTER_COMPACT_MIN_WIDTH_PX
+    : DIAGNOSTICS_CENTER_MIN_WIDTH_PX;
+  const available = Math.max(
+    0,
+    Math.floor(dashboardWidth - leftWidth - centerMinimum - (gap * 2))
+  );
+  const min = Math.min(DIAGNOSTICS_PANEL_MIN_WIDTH_PX, available);
   const max = Math.max(min, Math.min(DIAGNOSTICS_PANEL_MAX_WIDTH_PX, available));
   return { min, max };
 }
@@ -5308,17 +5438,14 @@ function setPaused(paused) {
 }
 
 async function stopLiveInputsForDemo() {
-  try {
-    await fetch("/api/live/stop?control_sense=false", { method: "POST" });
-  } catch {}
-  try {
-    await fetch("/api/export_watch/stop", { method: "POST" });
-  } catch {}
-  try {
-    await fetch("/api/sdk/stop", { method: "POST" });
-  } catch {}
+  await requestJSON(
+    "/api/live/stop?control_sense=false",
+    { method: "POST" },
+    { timeoutMs: 12000 }
+  );
   state.exportWatchActive = false;
   state.sdkLiveActive = false;
+  state.liveRequested = false;
 }
 
 async function ensureLiveInputsStoppedForDemo() {
@@ -5337,7 +5464,11 @@ async function prepareDemoMode({ reset = false } = {}) {
   state.arrayDemoScenario = null;
   state.dataStreamActive = true;
   if (reset || !state.demoModeActive) {
-    await fetch("/api/reset?keep_baseline=false", { method: "POST" });
+    await requestJSON(
+      "/api/reset?keep_baseline=false",
+      { method: "POST" },
+      { timeoutMs: 7000 }
+    );
   }
   await postJSON("/api/baseline", {
     channel_id: state.selectedChannel,
@@ -5375,6 +5506,25 @@ async function injectDemoFrame(level, { reset = false } = {}) {
   setDemoStatus(state.demoAutoplay ? "auto" : levelLabel(preset.label), state.demoAutoplay ? "auto" : "running");
   updateDemoControls();
   await fetchFrame();
+}
+
+async function runDemoTransition(action, button = null) {
+  try {
+    await action();
+    return true;
+  } catch (error) {
+    console.warn("[demo-transition]", error);
+    if (button) {
+      button.classList.add("command-error");
+      window.setTimeout(() => button.classList.remove("command-error"), 4500);
+    }
+    setCommandFeedback(
+      commandErrorMessage(error, "Unable to switch playback while acquisition is stopping"),
+      "error",
+      { autoHideMs: 7000 }
+    );
+    return false;
+  }
 }
 
 function resetArrayDemoTraceHistory(channelId = "P22") {
@@ -5493,11 +5643,11 @@ async function injectArrayDemoFrame(
   }
   const stepCount = ARRAY_SLIDE_STEPS[scenario] || 1;
   const step = Math.min(state.arrayDemoStep, Math.max(0, stepCount - 1));
-  const response = await fetch(
+  const data = await requestJSON(
     `/api/array_demo/frame?scenario=${encodeURIComponent(scenario)}&step=${step}&coupling_view=${encodeURIComponent(state.couplingView)}`,
-    { cache: "no-store" }
+    { cache: "no-store" },
+    { timeoutMs: 7000 }
   );
-  const data = await response.json();
   if (demoEpoch !== state.frameModeEpoch) return;
   const arrayFrame = data.array_frame;
   arrayFrame.scenario = scenario;
@@ -5530,11 +5680,11 @@ async function injectArrayDemoFrameAtStep(scenario, step = 0) {
   state.arrayDemoStep = Math.max(0, Number(step) || 0);
   state.trajectoryHistory = [];
   resetArrayDemoTraceHistory();
-  const response = await fetch(
+  const data = await requestJSON(
     `/api/array_demo/frame?scenario=${encodeURIComponent(scenario)}&step=${state.arrayDemoStep}&coupling_view=${encodeURIComponent(state.couplingView)}`,
-    { cache: "no-store" }
+    { cache: "no-store" },
+    { timeoutMs: 7000 }
   );
-  const data = await response.json();
   if (demoEpoch !== state.frameModeEpoch) return;
   const arrayFrame = data.array_frame;
   arrayFrame.scenario = scenario;
@@ -6720,6 +6870,7 @@ function sourceFrameRenderKey(rawFrame) {
 }
 
 async function fetchFrame({ force = false } = {}) {
+  if (!state.pageVisible) return;
   if (state.paused && !force) return;
   const now = performance.now();
   if (!force && state.demoModeActive && !state.arrayDemoActive) return;
@@ -6754,6 +6905,8 @@ async function fetchFrame({ force = false } = {}) {
     state.nextLiveModelPollAt = now + LIVE_MODEL_POLL_INTERVAL_MS;
   }
   state.frameRequestInFlight = true;
+  const requestController = new AbortController();
+  state.frameRequestController = requestController;
   const requestSequence = ++state.frameRequestSequence;
   const requestEpoch = state.frameModeEpoch;
   const commitFrame = (frame) => {
@@ -6774,7 +6927,7 @@ async function fetchFrame({ force = false } = {}) {
       const data = await requestJSON(
         `/api/array_demo/frame?scenario=${encodeURIComponent(frameScenario)}&step=${step}&coupling_view=${encodeURIComponent(state.couplingView)}`,
         { cache: "no-store" },
-        { timeoutMs: 7000 }
+        { timeoutMs: 7000, signal: requestController.signal }
       );
       if (requestEpoch !== state.frameModeEpoch) return;
       if (!actionFinished) {
@@ -6808,7 +6961,7 @@ async function fetchFrame({ force = false } = {}) {
     const rawFrame = await requestJSON(
       `/api/global_spectrum_frame?trace_limit=${traceLimit}&include_spectrum=true&include_dynamic_shadow=${temporalValidation}&temporal_validation_mode=${temporalValidation}`,
       { cache: "no-store" },
-      { timeoutMs: 7000 }
+      { timeoutMs: 7000, signal: requestController.signal }
     );
     const renderKey = sourceFrameRenderKey(rawFrame);
     if (!force && renderKey && renderKey === state.lastRenderedSourceFrameKey) {
@@ -6820,10 +6973,14 @@ async function fetchFrame({ force = false } = {}) {
       updateCaptureReadiness();
     }
   } catch (error) {
+    if (error?.name === "AbortError" && requestController.signal.aborted) return;
     if (requestEpoch !== state.frameModeEpoch || requestSequence < state.lastCommittedFrameRequest) return;
     updateOperatorStreamSummary();
     setText("responseText", String(error));
   } finally {
+    if (state.frameRequestController === requestController) {
+      state.frameRequestController = null;
+    }
     state.frameRequestInFlight = false;
     if (state.forcedFrameRequestQueued) {
       state.forcedFrameRequestQueued = false;
@@ -6832,9 +6989,19 @@ async function fetchFrame({ force = false } = {}) {
   }
 }
 
-async function requestJSON(url, options = {}, { timeoutMs = 10000 } = {}) {
+async function requestJSON(url, options = {}, { timeoutMs = 10000, signal = null } = {}) {
   const controller = new AbortController();
-  const timeoutToken = window.setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  // Abort without a custom string reason so fetch consistently rejects with a
+  // standards-defined AbortError. The flags below distinguish cancellation
+  // from timeout without relying on browser-specific rejection values.
+  const relayAbort = () => controller.abort();
+  if (signal?.aborted) relayAbort();
+  else signal?.addEventListener("abort", relayAbort, { once: true });
+  const timeoutToken = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     const response = await fetch(url, { ...options, signal: controller.signal });
     const rawText = await response.text();
@@ -6853,11 +7020,17 @@ async function requestJSON(url, options = {}, { timeoutMs = 10000 } = {}) {
     return payload;
   } catch (error) {
     if (error?.name === "AbortError") {
+      if (!timedOut && signal?.aborted) {
+        const cancelled = new Error("Request cancelled because the display context changed.");
+        cancelled.name = "AbortError";
+        throw cancelled;
+      }
       throw new Error("Command timed out. Check the device connection and try again.");
     }
     throw error;
   } finally {
     window.clearTimeout(timeoutToken);
+    signal?.removeEventListener("abort", relayAbort);
   }
 }
 
@@ -7098,16 +7271,34 @@ liveTwinButton.addEventListener("click", () => {
 });
 
 inputSourceSelect.addEventListener("change", async () => {
-  leaveDemoMode();
-  resetTrainedModelTraceHistory();
-  state.dataStreamActive = true;
-  if (inputSourceSelect.value !== "export_watch" && state.exportWatchActive) {
-    await fetch("/api/export_watch/stop", { method: "POST" });
+  try {
+    leaveDemoMode();
+    resetTrainedModelTraceHistory();
+    state.dataStreamActive = true;
+    if (inputSourceSelect.value !== "export_watch" && state.exportWatchActive) {
+      await requestJSON(
+        "/api/export_watch/stop",
+        { method: "POST" },
+        { timeoutMs: 12000 }
+      );
+      state.exportWatchActive = false;
+    }
+    if (inputSourceSelect.value !== "direct_sdk" && state.sdkLiveActive) {
+      await requestJSON(
+        "/api/sdk/stop",
+        { method: "POST" },
+        { timeoutMs: 12000 }
+      );
+      state.sdkLiveActive = false;
+    }
+    await fetchFrame({ force: true });
+  } catch (error) {
+    console.error("[input source change]", error);
+    setCommandFeedback(commandErrorMessage(error, "Input source change failed"), "error", {
+      autoHideMs: 7000,
+    });
+    syncPrimaryCommandLabels();
   }
-  if (inputSourceSelect.value !== "direct_sdk" && state.sdkLiveActive) {
-    await fetch("/api/sdk/stop", { method: "POST" });
-  }
-  await fetchFrame();
 });
 
 pauseButton.addEventListener("click", () => {
@@ -7149,17 +7340,23 @@ demoStepButtons.forEach((button) => {
   button.addEventListener("click", async () => {
     stopDemoAutoplay();
     closeOperatorDemoMenuAfterScenarioSelection();
-    await injectDemoFrame(button.dataset.demoLevel, { reset: true });
+    await runDemoTransition(
+      () => injectDemoFrame(button.dataset.demoLevel, { reset: true }),
+      button
+    );
   });
 });
 
 arrayDemoStepButtons.forEach((button) => {
   button.addEventListener("click", async () => {
     closeOperatorDemoMenuAfterScenarioSelection();
-    await injectArrayDemoFrame(button.dataset.arrayScenario || "center_press", {
-      resetTrajectory: true,
-      playbackMode: "loop",
-    });
+    await runDemoTransition(
+      () => injectArrayDemoFrame(button.dataset.arrayScenario || "center_press", {
+        resetTrajectory: true,
+        playbackMode: "loop",
+      }),
+      button
+    );
   });
 });
 
@@ -7437,13 +7634,8 @@ document.addEventListener("fullscreenchange", () => {
 thumbAlignmentSaveButton?.addEventListener("click", async () => {
   const payload = collectThumbAlignmentConfig();
   try {
-    const response = await fetch("/api/thumb_scene_config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const result = await response.json();
-    if (result.ok && result.config) {
+    const result = await postJSON("/api/thumb_scene_config", payload);
+    if (result.config) {
       state.thumbSceneConfig = result.config;
       populateThumbAlignmentPanel();
       applyThumbSceneLayout();
@@ -7540,24 +7732,33 @@ demoAutoButton?.addEventListener("click", async () => {
     stopDemoAutoplay();
     return;
   }
-  await injectArrayDemoFrame(state.arrayDemoScenario || "center_press", {
-    resetTrajectory: true,
-    playbackMode: "loop",
-  });
+  await runDemoTransition(
+    () => injectArrayDemoFrame(state.arrayDemoScenario || "center_press", {
+      resetTrajectory: true,
+      playbackMode: "loop",
+    }),
+    demoAutoButton
+  );
 });
 
 demoSingleButton?.addEventListener("click", async () => {
-  await injectArrayDemoFrame(state.arrayDemoScenario || "center_press", {
-    resetTrajectory: true,
-    playbackMode: "single",
-  });
+  await runDemoTransition(
+    () => injectArrayDemoFrame(state.arrayDemoScenario || "center_press", {
+      resetTrajectory: true,
+      playbackMode: "single",
+    }),
+    demoSingleButton
+  );
 });
 
 demoResetButton?.addEventListener("click", async () => {
   stopDemoAutoplay();
   state.demoModeActive = false;
   state.demoCurrentLevel = null;
-  await injectDemoFrame("no_contact", { reset: true });
+  await runDemoTransition(
+    () => injectDemoFrame("no_contact", { reset: true }),
+    demoResetButton
+  );
 });
 
 async function performPx6dSoftwareZero() {
@@ -7662,6 +7863,7 @@ px6dCaptureStartButton?.addEventListener("click", async () => {
     setCommandFeedback(`Check ${readiness.missing.join(", ")}.`, "warning", { autoHideMs: 4000 });
     return;
   }
+  invalidatePx6dCaptureStatusPoll();
   state.px6dCaptureRequestInFlight = true;
   updatePx6dCapturePanel(state.px6dCaptureStatus || {});
   try {
@@ -7697,6 +7899,7 @@ px6dCaptureStartButton?.addEventListener("click", async () => {
 
 px6dCaptureStopButton?.addEventListener("click", async () => {
   if (state.px6dCaptureRequestInFlight) return;
+  invalidatePx6dCaptureStatusPoll();
   state.px6dCaptureRequestInFlight = true;
   updatePx6dCapturePanel(state.px6dCaptureStatus || {});
   try {
@@ -7723,21 +7926,68 @@ px6dCaptureStopButton?.addEventListener("click", async () => {
 });
 
 window.addEventListener("resize", () => {
-  cancelAnimationFrame(resizeToken);
-  resizeToken = requestAnimationFrame(() => {
-    if (state.displayMode === "diagnostics") {
-      setDiagnosticsPanelWidth(Number(diagnosticsPanelResizer?.getAttribute("aria-valuenow")), { persist: false });
-    }
-    resizeThree();
-    updateUI(state.frame);
-  });
+  windowResizeActive = true;
+  window.clearTimeout(windowResizeSettleTimer);
+  windowResizeSettleTimer = window.setTimeout(() => {
+    cancelAnimationFrame(resizeToken);
+    resizeToken = requestAnimationFrame(() => {
+      if (state.displayMode === "diagnostics") {
+        setDiagnosticsPanelWidth(Number(diagnosticsPanelResizer?.getAttribute("aria-valuenow")), { persist: false });
+      }
+      resizeThree();
+      state.chartsNeedRefresh = true;
+      state.threeNeedsRefresh = true;
+      windowResizeActive = false;
+    });
+  }, 120);
 });
 
+function handlePageVisibilityChange() {
+  state.pageVisible = document.visibilityState !== "hidden";
+  if (!state.pageVisible) {
+    state.forcedFrameRequestQueued = false;
+    invalidateFrameRequestContext();
+    invalidatePx6dReferenceRequest();
+    invalidatePx6dCaptureStatusPoll();
+    state.lastThreeFrameMs = 0;
+    state.chartDeltaAccumulator = 0;
+    state.geometryDeltaAccumulator = 0;
+    return;
+  }
+  state.lastThreeFrameMs = 0;
+  state.lastChartUpdateMs = 0;
+  state.lastGeometryUpdateMs = 0;
+  state.nextLiveModelPollAt = 0;
+  state.chartsNeedRefresh = true;
+  state.threeNeedsRefresh = true;
+  fetchFrame({ force: true });
+  fetchPx6dReference();
+  fetchPx6dCaptureStatus();
+}
+
+document.addEventListener("visibilitychange", handlePageVisibilityChange);
+
+function startClientSchedulers() {
+  if (state.clientSchedulersStarted) return;
+  state.clientSchedulersStarted = true;
+  state.frameSchedulerId = window.setInterval(fetchFrame, DEMO_FRAME_SCHEDULER_INTERVAL_MS);
+  state.px6dSchedulerId = window.setInterval(fetchPx6dReference, PX6D_UI_POLL_INTERVAL_MS);
+  state.px6dCaptureSchedulerId = window.setInterval(
+    fetchPx6dCaptureStatus,
+    PX6D_CAPTURE_POLL_INTERVAL_MS
+  );
+}
+
 async function boot() {
+  if (state.bootStarted) return;
+  state.bootStarted = true;
   initializeDiagnosticsPanelResize();
   await loadThumbSceneConfig();
   setDemoPlaybackRate(state.demoPlaybackRate, { persist: false });
-  updateRecognitionValidationMode(state.temporalValidationMode, { announce: false });
+  updateRecognitionValidationMode(state.temporalValidationMode, {
+    announce: false,
+    refresh: false,
+  });
   updateDisplayMode("operator");
   updateGeometryDisplayMode(state.geometryDisplayMode);
   updateSurfaceRenderMode("physical_proxy");
@@ -7747,13 +7997,21 @@ async function boot() {
   const idleFrame = makeIdleFrame();
   state.frame = idleFrame;
   updateUI(idleFrame);
-  setInterval(fetchFrame, DEMO_FRAME_SCHEDULER_INTERVAL_MS);
   await fetchPx6dReference();
-  setInterval(fetchPx6dReference, PX6D_UI_POLL_INTERVAL_MS);
   await fetchPx6dCaptureStatus();
-  setInterval(fetchPx6dCaptureStatus, PX6D_CAPTURE_POLL_INTERVAL_MS);
+  startClientSchedulers();
+  state.bootComplete = true;
 }
 
-boot();
+boot().catch((error) => {
+  state.bootStarted = false;
+  state.bootComplete = false;
+  console.error("[boot]", error);
+  setText("responseText", "Interface initialization failed");
+  setCommandFeedback(
+    commandErrorMessage(error, "Interface initialization failed"),
+    "error"
+  );
+});
 
 

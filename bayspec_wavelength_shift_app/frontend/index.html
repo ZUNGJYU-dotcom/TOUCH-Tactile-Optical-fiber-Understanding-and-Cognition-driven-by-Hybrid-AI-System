@@ -3,9 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>TOUCH System - Temporal Spectral Validation</title>
+    <title>TOUCH</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/styles.css?v=recording-workspace-v23" />
+    <link rel="stylesheet" href="/static/styles.css?v=desktop-chrome-v33" />
     <script type="importmap">
       {
         "imports": {
@@ -16,12 +16,33 @@
     </script>
   </head>
   <body class="minimal-copy">
+    <script>
+      if (new URLSearchParams(window.location.search).get("desktop") === "1") {
+        document.body.classList.add("pywebview-desktop");
+      }
+    </script>
+    <div id="desktopTitlebar" class="desktop-titlebar" aria-label="Desktop window controls">
+      <div class="desktop-titlebar-drag pywebview-drag-region" title="Drag window">
+        <img class="desktop-titlebar-mark" src="/static/touch_system_icon.png" alt="" aria-hidden="true" />
+      </div>
+      <div class="desktop-window-controls">
+        <button id="desktopMinimizeButton" type="button" aria-label="Minimize window" title="Minimize">
+          <i data-lucide="minus" aria-hidden="true"></i>
+        </button>
+        <button id="desktopMaximizeButton" type="button" aria-label="Maximize window" title="Maximize">
+          <span class="window-glyph window-maximize-icon" aria-hidden="true"></span>
+          <span class="window-glyph window-restore-icon" aria-hidden="true"></span>
+        </button>
+        <button id="desktopCloseButton" class="desktop-close-button" type="button" aria-label="Close window" title="Close">
+          <i data-lucide="x" aria-hidden="true"></i>
+        </button>
+      </div>
+    </div>
     <div class="app-shell operator-mode">
       <header class="topbar">
         <div class="title-zone">
           <h1 class="touch-brand-title">
             <span class="touch-brand-main">TOUCH</span>
-            <span class="touch-brand-tag">System</span>
           </h1>
           <div class="subline touch-brand-subtitle">BaySpec temporal spectrum position and response-level validation</div>
         </div>
@@ -322,7 +343,9 @@
                 <h2 class="heatmap-title">2D Response Map</h2>
                 <span id="heatmapChip" class="chip explanatory-copy">spatial mapping pending</span>
               </div>
-              <canvas id="heatmapCanvas" class="heatmap-canvas"></canvas>
+              <div class="heatmap-canvas-viewport">
+                <canvas id="heatmapCanvas" class="heatmap-canvas"></canvas>
+              </div>
               <div class="axis-note explanatory-copy" id="heatmapAxisNote">Global FBG01-FBG09 spectrum only. Physical P11-P33 mapping is pending.</div>
             </div>
           </div>
@@ -864,6 +887,6 @@
 
     </div>
     <script src="/static/vendor/lucide/lucide.min.js"></script>
-    <script type="module" src="/static/app.js?v=recording-workspace-v23"></script>
+    <script type="module" src="/static/app.js?v=desktop-chrome-v33"></script>
   </body>
 </html>

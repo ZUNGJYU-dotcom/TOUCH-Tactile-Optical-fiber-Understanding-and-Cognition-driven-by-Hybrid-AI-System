@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import copy
+from contextlib import asynccontextmanager
+from functools import wraps
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -17,7 +21,7 @@ from typing import Any
 import numpy as np
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 
@@ -51,6 +55,29 @@ IDOK = 1
 IDYES = 6
 SENSE_CMD_STOP = 32853
 SENSE_CMD_FAST_RECORDING = 32879
+MAX_MANUAL_INGEST_BODY_BYTES = 8 * 1024 * 1024
+
+
+class IngestRequestTooLarge(ValueError):
+    pass
+
+
+async def _read_limited_ingest_body(request: Request) -> bytes:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except ValueError:
+            declared_size = None
+        if declared_size is not None and declared_size > MAX_MANUAL_INGEST_BODY_BYTES:
+            raise IngestRequestTooLarge("manual ingest request exceeds 8 MiB")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > MAX_MANUAL_INGEST_BODY_BYTES:
+            raise IngestRequestTooLarge("manual ingest request exceeds 8 MiB")
+    return bytes(body)
 PROJECT_ROOT = APP_ROOT if getattr(sys, "frozen", False) else APP_ROOT.parent
 THUMB_SCENE_CONFIG_PATH = PROJECT_ROOT / "config" / "thumb_holder_scene.yaml"
 STATIC_SPECTRAL_MODEL_PATH = PROJECT_ROOT / "models" / "static_spectral_recognition_bundle.joblib"
@@ -88,6 +115,7 @@ STATIC_SPECTRAL_SESSION_CALIBRATION_LOCK = threading.Lock()
 STATIC_SPECTRAL_SESSION_CALIBRATOR: PerPositionOrdinalCalibrator | None = None
 STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE: dict[str, Any] = {}
 DYNAMIC_TEMPORAL_SHADOW_LOCK = threading.Lock()
+LIVE_SOURCE_CONTROL_LOCK = threading.RLock()
 DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN: str | None = None
 DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY: tuple[Any, ...] | None = None
 DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT = 0
@@ -1447,6 +1475,11 @@ class SenseWindowController:
 class SenseExportWatcher:
     """Poll Sense 20/20 exports and ingest wavelength-calibrated spectra."""
 
+    # Layout detection needs multiple adjacent spectra. Waiting for three
+    # nominal 512-word frames prevents a growing 513-word recording from being
+    # misread as two complete 512-word frames during its first milliseconds.
+    MIN_INITIAL_DAT_BYTES = 3 * 512 * 2
+
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.active = False
@@ -1463,8 +1496,17 @@ class SenseExportWatcher:
         self.started_at: float | None = None
         self.ingest_count = 0
         self.failed_ingest_count = 0
+        self.skipped_duplicate_export_count = 0
+        self.incomplete_dat_skip_count = 0
+        self.unstable_file_skip_count = 0
+        self.last_dat_progress: dict[str, Any] | None = None
         self.thread: threading.Thread | None = None
         self.generation = 0
+        self.ingest_lock = threading.Lock()
+        self.ingest_in_progress = False
+        self.stop_event = threading.Event()
+        self.lifecycle_status = "stopped"
+        self.last_operation_status = "idle"
 
     def status(self) -> dict:
         with self.lock:
@@ -1505,12 +1547,31 @@ class SenseExportWatcher:
                 "last_error": self.last_error,
                 "ingest_count": self.ingest_count,
                 "failed_ingest_count": self.failed_ingest_count,
+                "skipped_duplicate_export_count": self.skipped_duplicate_export_count,
+                "incomplete_dat_skip_count": self.incomplete_dat_skip_count,
+                "unstable_file_skip_count": self.unstable_file_skip_count,
+                "last_dat_progress": copy.deepcopy(self.last_dat_progress),
+                "worker_alive": bool(self.thread is not None and self.thread.is_alive()),
+                "ingest_in_progress": self.ingest_in_progress,
+                "stop_requested": self.stop_event.is_set(),
+                "lifecycle_status": self.lifecycle_status,
+                "last_operation_status": self.last_operation_status,
                 "last_result": self.last_result,
                 "source": "sense_export_file_polling",
             }
 
     def start(self, channel_id: str, export_root: str | None, interval_sec: float) -> dict:
         with self.lock:
+            existing_worker_alive = bool(self.thread is not None and self.thread.is_alive())
+            if existing_worker_alive and not self.active:
+                self.lifecycle_status = "stop_timeout"
+                self.last_operation_status = "previous_worker_stop_timeout"
+                self.last_error = "Previous Sense export watcher is still stopping"
+                return {
+                    "ok": False,
+                    "operation_status": "previous_worker_stop_timeout",
+                    **self.status(),
+                }
             requested_root = (
                 str(Path(export_root).expanduser().resolve())
                 if export_root
@@ -1539,75 +1600,329 @@ class SenseExportWatcher:
                 self.last_ingest_time = None
                 self.ingest_count = 0
                 self.failed_ingest_count = 0
+                self.skipped_duplicate_export_count = 0
+                self.incomplete_dat_skip_count = 0
+                self.unstable_file_skip_count = 0
                 self.generation += 1
+                self.stop_event.clear()
                 if configuration_changed:
                     # A signature from another root/channel must never suppress
                     # the first export of the newly selected source.
                     self.last_signature = None
+                    self.last_dat_progress = None
             self.active = True
             self.last_error = None
+            self.lifecycle_status = "starting"
+            self.last_operation_status = "starting"
             if self.thread is None or not self.thread.is_alive():
-                self.thread = threading.Thread(target=self._loop, daemon=True)
-                self.thread.start()
-            return self.status()
+                worker = threading.Thread(
+                    target=self._loop,
+                    name="sense-export-watcher",
+                    daemon=True,
+                )
+                self.thread = worker
+                try:
+                    worker.start()
+                except Exception as exc:
+                    self.thread = None
+                    self.active = False
+                    self.stop_event.clear()
+                    self.lifecycle_status = "start_failed"
+                    self.last_operation_status = "start_failed"
+                    self.last_error = (
+                        "Sense export watcher failed to start: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    return {
+                        "ok": False,
+                        "operation_status": "start_failed",
+                        **self.status(),
+                    }
+            self.lifecycle_status = "running"
+            self.last_operation_status = "started"
+            return {"ok": True, "operation_status": "started", **self.status()}
 
     def stop(self) -> dict:
         with self.lock:
+            worker = self.thread
+            if (
+                not self.active
+                and not self.ingest_in_progress
+                and (worker is None or not worker.is_alive())
+            ):
+                self.stop_event.clear()
+                self.thread = None
+                self.lifecycle_status = "stopped"
+                self.last_operation_status = "already_stopped"
+                return {
+                    "ok": True,
+                    "operation_status": "already_stopped",
+                    **self.status(),
+                }
             self.active = False
             self.generation += 1
-            return self.status()
+            self.stop_event.set()
+            self.lifecycle_status = "stopping"
+            self.last_operation_status = "stopping"
+        # Wait for a file parse already in progress. Source-switch endpoints
+        # reset the shared bridge only after this quiescence barrier returns.
+        acquired = self.ingest_lock.acquire(timeout=5.0)
+        if not acquired:
+            with self.lock:
+                self.last_error = "Sense export ingest did not stop before timeout"
+                self.lifecycle_status = "stop_timeout"
+                self.last_operation_status = "stop_timeout"
+            return {
+                "ok": False,
+                "operation_status": "stop_timeout",
+                **self.status(),
+            }
+        self.ingest_lock.release()
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=2.0)
+        worker_alive = bool(worker is not None and worker.is_alive())
+        if worker_alive:
+            with self.lock:
+                self.last_error = "Sense export watcher did not stop before timeout"
+                self.lifecycle_status = "stop_timeout"
+                self.last_operation_status = "stop_timeout"
+            return {
+                "ok": False,
+                "operation_status": "stop_timeout",
+                **self.status(),
+            }
+        with self.lock:
+            if self.thread is worker:
+                self.thread = None
+            self.stop_event.clear()
+            self.lifecycle_status = "stopped"
+            self.last_operation_status = "stopped"
+        return {"ok": True, "operation_status": "stopped", **self.status()}
+
+    @staticmethod
+    def _file_signature(path: Path) -> tuple[str, int, int, float]:
+        stat = path.stat()
+        return (
+            str(path),
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+            float(stat.st_mtime),
+        )
+
+    def _confirm_stable_text_export(
+        self,
+        path: Path,
+        signature: tuple[str, int, int],
+    ) -> tuple[str, int, int, float] | None:
+        if self.stop_event.wait(0.05):
+            return None
+        try:
+            confirmed = self._file_signature(path)
+        except OSError:
+            return None
+        if confirmed[:3] != signature:
+            return None
+        return confirmed
+
+    @staticmethod
+    def _dat_frame_digest(
+        path: Path,
+        *,
+        record_words: int,
+        prefix_words: int,
+        frame_count: int,
+    ) -> str | None:
+        if record_words <= 0 or prefix_words < 0 or frame_count <= 0:
+            return None
+        byte_offset = (prefix_words + (frame_count - 1) * record_words) * 2
+        byte_count = record_words * 2
+        try:
+            with path.open("rb") as handle:
+                handle.seek(byte_offset)
+                frame_bytes = handle.read(byte_count)
+        except OSError:
+            return None
+        if len(frame_bytes) != byte_count:
+            return None
+        return hashlib.sha256(frame_bytes).hexdigest()[:24]
+
+    def _dat_export_has_new_complete_frame(self, path: Path, file_size: int) -> bool:
+        with self.lock:
+            progress = copy.deepcopy(self.last_dat_progress)
+        if not progress or progress.get("path") != str(path):
+            return (
+                int(file_size) >= self.MIN_INITIAL_DAT_BYTES
+                and int(file_size) % 2 == 0
+            )
+        record_words = int(progress.get("record_words") or 0)
+        prefix_words = int(progress.get("prefix_words") or 0)
+        previous_count = int(progress.get("frame_count") or 0)
+        if record_words <= 0:
+            return True
+        available_words = max(0, int(file_size) // 2 - prefix_words)
+        frame_count = available_words // record_words
+        if frame_count < previous_count:
+            # Sense may truncate and reuse the same recording path. Treat that
+            # as a fresh layout bootstrap instead of parsing two partial 513-
+            # word records as a valid 512-word file.
+            return (
+                int(file_size) >= self.MIN_INITIAL_DAT_BYTES
+                and int(file_size) % 2 == 0
+            )
+        if frame_count > previous_count:
+            return True
+        digest = self._dat_frame_digest(
+            path,
+            record_words=record_words,
+            prefix_words=prefix_words,
+            frame_count=frame_count,
+        )
+        return bool(digest and digest != progress.get("frame_digest"))
+
+    def _remember_dat_progress(self, path: Path, result: dict[str, Any]) -> None:
+        frame_count = int(result.get("dat_frame_count") or 0)
+        record_words = int(result.get("dat_record_words") or 0)
+        prefix_words = int(result.get("dat_header_bytes") or 0) // 2
+        digest = self._dat_frame_digest(
+            path,
+            record_words=record_words,
+            prefix_words=prefix_words,
+            frame_count=frame_count,
+        )
+        if frame_count <= 0 or record_words <= 0 or digest is None:
+            return
+        self.last_dat_progress = {
+            "path": str(path),
+            "frame_count": frame_count,
+            "record_words": record_words,
+            "prefix_words": prefix_words,
+            "frame_digest": digest,
+        }
 
     def _loop(self) -> None:
-        while True:
-            with self.lock:
-                active = self.active
-                channel_id = self.channel_id
-                export_root = self.export_root
-                interval = self.interval_sec
-                generation = self.generation
-            if not active:
-                time.sleep(0.2)
-                continue
-            try:
-                latest = bridge.latest_export_file(root=export_root)
-                if latest is None:
-                    with self.lock:
-                        self.last_error = "no CSV/TXT export file found"
-                        self.last_file = None
-                    time.sleep(interval)
-                    continue
-                stat = latest.stat()
-                signature = (str(latest), int(stat.st_mtime_ns), int(stat.st_size))
-                if signature != self.last_signature:
-                    # Give Sense a brief moment to finish writing the file.
-                    time.sleep(0.05)
-                    with self.lock:
-                        if not self.active or generation != self.generation:
-                            continue
-                    result = bridge.ingest_export_file(
-                        latest,
-                        channel_id=channel_id,
-                        source="bayspec_sense2020_export_watch",
-                    )
-                    with self.lock:
-                        if not self.active or generation != self.generation:
-                            continue
-                        self.last_attempt_time = time.time()
-                        self.last_result = result
-                        self.last_error = None if result.get("ok") else str(result.get("reason"))
-                        self.last_file = str(latest)
-                        self.last_file_mtime = stat.st_mtime
-                        if result.get("ok"):
-                            self.last_signature = signature
-                            self.last_ingest_time = self.last_attempt_time
-                            self.ingest_count += int(result.get("records_ingested") or 0)
-                        else:
-                            self.failed_ingest_count += 1
-                time.sleep(interval)
-            except Exception as exc:
+        current_worker = threading.current_thread()
+        try:
+            while not self.stop_event.is_set():
                 with self.lock:
-                    self.last_error = str(exc)
-                time.sleep(interval)
+                    active = self.active
+                    channel_id = self.channel_id
+                    export_root = self.export_root
+                    interval = self.interval_sec
+                    generation = self.generation
+                if not active:
+                    break
+                try:
+                    latest = bridge.latest_export_file(root=export_root)
+                    if latest is None:
+                        with self.lock:
+                            if self.active and generation == self.generation:
+                                self.last_error = "no CSV/TXT export file found"
+                                self.last_file = None
+                        if self.stop_event.wait(interval):
+                            break
+                        continue
+                    signature_state = self._file_signature(latest)
+                    signature = signature_state[:3]
+                    file_mtime = signature_state[3]
+                    if signature != self.last_signature:
+                        is_dat = latest.suffix.lower() == ".dat"
+                        if is_dat:
+                            with self.lock:
+                                has_dat_progress = bool(
+                                    self.last_dat_progress
+                                    and self.last_dat_progress.get("path") == str(latest)
+                                )
+                            if not self._dat_export_has_new_complete_frame(
+                                latest,
+                                signature[2],
+                            ):
+                                with self.lock:
+                                    if self.active and generation == self.generation:
+                                        self.last_file = str(latest)
+                                        self.last_file_mtime = file_mtime
+                                        if has_dat_progress:
+                                            self.last_signature = signature
+                                            self.skipped_duplicate_export_count += 1
+                                        else:
+                                            self.incomplete_dat_skip_count += 1
+                                if self.stop_event.wait(interval):
+                                    break
+                                continue
+                        else:
+                            confirmed = self._confirm_stable_text_export(
+                                latest,
+                                signature,
+                            )
+                            if confirmed is None:
+                                with self.lock:
+                                    if self.active and generation == self.generation:
+                                        self.unstable_file_skip_count += 1
+                                if self.stop_event.wait(interval):
+                                    break
+                                continue
+                            signature_state = confirmed
+                            signature = confirmed[:3]
+                            file_mtime = confirmed[3]
+                        with self.lock:
+                            if not self.active or generation != self.generation:
+                                continue
+                        with self.ingest_lock:
+                            with self.lock:
+                                if not self.active or generation != self.generation:
+                                    continue
+                                self.ingest_in_progress = True
+                            try:
+                                result = bridge.ingest_export_file(
+                                    latest,
+                                    channel_id=channel_id,
+                                    source="bayspec_sense2020_export_watch",
+                                )
+                            finally:
+                                with self.lock:
+                                    self.ingest_in_progress = False
+                        with self.lock:
+                            same_source = (
+                                str(self.channel_id) == str(channel_id)
+                                and self.export_root == export_root
+                            )
+                            if result.get("ok") and same_source:
+                                self.last_signature = signature
+                                if is_dat:
+                                    self._remember_dat_progress(latest, result)
+                            if not self.active or generation != self.generation:
+                                continue
+                            self.last_attempt_time = time.time()
+                            self.last_result = result
+                            self.last_error = None if result.get("ok") else str(result.get("reason"))
+                            self.last_file = str(latest)
+                            self.last_file_mtime = file_mtime
+                            if result.get("ok"):
+                                self.last_ingest_time = self.last_attempt_time
+                                self.ingest_count += int(result.get("records_ingested") or 0)
+                            else:
+                                self.failed_ingest_count += 1
+                    if self.stop_event.wait(interval):
+                        break
+                except Exception as exc:
+                    with self.lock:
+                        if self.active and generation == self.generation:
+                            self.last_attempt_time = time.time()
+                            self.failed_ingest_count += 1
+                            self.last_error = str(exc)
+                    if self.stop_event.wait(interval):
+                        break
+        finally:
+            with self.lock:
+                if self.thread is current_worker:
+                    self.thread = None
+                unexpected_exit = self.active and not self.stop_event.is_set()
+                self.active = False
+                if unexpected_exit:
+                    self.last_error = self.last_error or "Sense export watcher stopped unexpectedly"
+                    self.lifecycle_status = "worker_exited"
+                    self.last_operation_status = "worker_exited"
+                elif self.lifecycle_status != "stop_timeout":
+                    self.lifecycle_status = "stopped"
 
 
 export_watcher = SenseExportWatcher()
@@ -2660,17 +2975,6 @@ def simulated_array_frame(scenario: str, step: int = 0, coupling_view: str = "ra
     }
 
 
-app = FastAPI(title="TOUCH System Trained Static Spectrum Twin", version="0.2.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-app.mount("/static", StaticFiles(directory=FRONTEND_ROOT), name="static")
-
-
-@app.on_event("startup")
 def startup_reference_sources() -> None:
     if PX6D_REFERENCE_CONFIG.get("enabled", True) and PX6D_REFERENCE_CONFIG.get(
         "auto_start", True
@@ -2678,12 +2982,35 @@ def startup_reference_sources() -> None:
         px6d_reader.start()
 
 
-@app.on_event("shutdown")
 def shutdown_live_sources() -> None:
-    optical_force_capture.stop()
-    sdk_live_reader.stop()
-    export_watcher.stop()
-    px6d_reader.stop()
+    with LIVE_SOURCE_CONTROL_LOCK:
+        optical_force_capture.stop()
+        sdk_live_reader.stop()
+        export_watcher.stop()
+        px6d_reader.stop()
+
+
+@asynccontextmanager
+async def application_lifespan(_app: FastAPI):
+    startup_reference_sources()
+    try:
+        yield
+    finally:
+        shutdown_live_sources()
+
+
+app = FastAPI(
+    title="TOUCH System Trained Static Spectrum Twin",
+    version="0.2.0",
+    lifespan=application_lifespan,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.mount("/static", StaticFiles(directory=FRONTEND_ROOT), name="static")
 
 
 @app.get("/")
@@ -2772,7 +3099,11 @@ def px6d_tare(duration_sec: float = Query(default=1.0, ge=0.25, le=5.0)) -> dict
 @app.get("/api/px6d/latest")
 def px6d_latest() -> dict:
     result = px6d_reader.latest()
-    result["sample_ready"] = bool(result.pop("ok", False))
+    sample_present = bool(result.pop("ok", False))
+    sample_fresh = bool((result.get("status") or {}).get("sample_fresh"))
+    result["sample_present"] = sample_present
+    result["sample_fresh"] = sample_fresh
+    result["sample_ready"] = bool(sample_present and sample_fresh)
     result["ok"] = True
     result["mode"] = "px6d_reference_force"
     return result
@@ -2794,9 +3125,22 @@ def px6d_capture_status() -> dict:
 async def px6d_capture_start(request: Request) -> dict:
     try:
         payload = await request.json()
-    except Exception:
-        payload = {}
-    result = optical_force_capture.start(
+    except Exception as exc:
+        return {
+            "ok": False,
+            "mode": "optical_px6d_synchronized_capture",
+            "status": "capture_request_invalid",
+            "reason": f"request body must be JSON: {type(exc).__name__}",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "mode": "optical_px6d_synchronized_capture",
+            "status": "capture_request_invalid",
+            "reason": "request body must be a JSON object",
+        }
+    result = await asyncio.to_thread(
+        optical_force_capture.start,
         position_label=str(payload.get("position_label") or "unlabeled"),
         action_label=str(payload.get("action_label") or "unlabeled"),
         trial_id=str(payload.get("trial_id") or "trial_001"),
@@ -2894,27 +3238,43 @@ def delete_shadow_session_level_calibration() -> dict:
 
 @app.post("/api/reset")
 def reset(keep_baseline: bool = Query(default=True)) -> dict:
-    result = bridge.reset(keep_baseline=keep_baseline)
-    result["dynamic_temporal_shadow_reset"] = _reset_dynamic_temporal_shadow(
-        "api_reset"
-    )
-    if not keep_baseline:
-        result["session_level_calibration_reset"] = (
-            _clear_session_level_calibration("baseline_reset")
+    with LIVE_SOURCE_CONTROL_LOCK:
+        result = bridge.reset(keep_baseline=keep_baseline)
+        result["dynamic_temporal_shadow_reset"] = _reset_dynamic_temporal_shadow(
+            "api_reset"
         )
-    result.update({"mode": "bayspec_wavelength_shift_reset"})
-    return result
+        if not keep_baseline:
+            result["session_level_calibration_reset"] = (
+                _clear_session_level_calibration("baseline_reset")
+            )
+        result.update({"mode": "bayspec_wavelength_shift_reset"})
+        return result
 
 
 @app.post("/api/ingest")
-async def ingest(request: Request) -> dict:
+async def ingest(request: Request) -> Any:
     try:
-        payload = await request.json()
-    except Exception:
+        body = await _read_limited_ingest_body(request)
+        payload = json.loads(body.decode("utf-8"))
+    except IngestRequestTooLarge as exc:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "ok": False,
+                "status": "ingest_request_too_large",
+                "reason": str(exc),
+                "maximum_body_bytes": MAX_MANUAL_INGEST_BODY_BYTES,
+            },
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return {"ok": False, "reason": "request body must be JSON"}
-    result = bridge.ingest(payload)
-    result.update({"mode": "bayspec_wavelength_shift_json_ingest"})
-    return result
+    with LIVE_SOURCE_CONTROL_LOCK:
+        conflict = _manual_ingest_source_conflict()
+        if conflict is not None:
+            return conflict
+        result = bridge.ingest(payload)
+        result.update({"mode": "bayspec_wavelength_shift_json_ingest"})
+        return result
 
 
 @app.post("/api/ingest_csv")
@@ -2922,12 +3282,27 @@ async def ingest_csv(
     request: Request,
     channel_id: str = Query(default="P22"),
     device_id: str = Query(default="F1871328"),
-) -> dict:
-    body = await request.body()
+) -> Any:
+    try:
+        body = await _read_limited_ingest_body(request)
+    except IngestRequestTooLarge as exc:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "ok": False,
+                "status": "ingest_request_too_large",
+                "reason": str(exc),
+                "maximum_body_bytes": MAX_MANUAL_INGEST_BODY_BYTES,
+            },
+        )
     text = body.decode("utf-8", errors="ignore")
-    result = bridge.ingest_csv_text(text, channel_id=channel_id, device_id=device_id)
-    result.update({"mode": "bayspec_wavelength_shift_csv_ingest"})
-    return result
+    with LIVE_SOURCE_CONTROL_LOCK:
+        conflict = _manual_ingest_source_conflict()
+        if conflict is not None:
+            return conflict
+        result = bridge.ingest_csv_text(text, channel_id=channel_id, device_id=device_id)
+        result.update({"mode": "bayspec_wavelength_shift_csv_ingest"})
+        return result
 
 
 @app.post("/api/ingest_latest_export")
@@ -2935,9 +3310,13 @@ def ingest_latest_export(
     channel_id: str = Query(default="P22"),
     export_root: str | None = Query(default=None),
 ) -> dict:
-    result = bridge.ingest_latest_export(root=export_root, channel_id=channel_id)
-    result.update({"mode": "bayspec_sense_export_ingest_once"})
-    return result
+    with LIVE_SOURCE_CONTROL_LOCK:
+        conflict = _manual_ingest_source_conflict()
+        if conflict is not None:
+            return conflict
+        result = bridge.ingest_latest_export(root=export_root, channel_id=channel_id)
+        result.update({"mode": "bayspec_sense_export_ingest_once"})
+        return result
 
 
 def _begin_acquisition_session() -> dict:
@@ -2982,6 +3361,32 @@ def _sdk_session_matches(
     )
 
 
+def _export_watch_session_matches(
+    status: dict[str, Any],
+    *,
+    channel_id: str,
+    export_root: str | None,
+    interval_sec: float,
+) -> bool:
+    requested_root = (
+        str(Path(export_root).expanduser().resolve()) if export_root else None
+    )
+    current_root_value = status.get("export_root")
+    current_root = (
+        str(Path(current_root_value).expanduser().resolve())
+        if current_root_value
+        else None
+    )
+    return bool(
+        status.get("active")
+        and status.get("worker_alive", True)
+        and str(status.get("channel_id") or "") == str(channel_id)
+        and current_root == requested_root
+        and abs(float(status.get("interval_sec") or 0.0) - float(interval_sec))
+        <= 1e-9
+    )
+
+
 def _unchanged_acquisition_session() -> dict[str, Any]:
     return {
         "ok": True,
@@ -2991,17 +3396,134 @@ def _unchanged_acquisition_session() -> dict[str, Any]:
     }
 
 
+def _live_source_stop_completed(status: dict[str, Any]) -> bool:
+    """Return true only when a source switch can safely reset shared state."""
+
+    if status.get("ok") is False:
+        return False
+    # Treat any remaining producer or in-flight ingest as live, even when a
+    # buggy adapter forgot to set stop_requested or optimistically returned
+    # ok=True. A source switch is safe only after the old source is quiescent.
+    return not any(
+        bool(status.get(field))
+        for field in (
+            "active",
+            "requested_active",
+            "worker_alive",
+            "process_running",
+            "ingest_in_progress",
+            "start_in_progress",
+            "start_cancel_requested",
+        )
+    )
+
+
+def _manual_ingest_source_conflict() -> dict[str, Any] | None:
+    """Reject one-shot imports while a background producer owns the bridge."""
+
+    sources = {
+        "sdk_live": sdk_live_reader.status(),
+        "export_watch": export_watcher.status(),
+    }
+    busy_sources = [
+        name
+        for name, status in sources.items()
+        if not _live_source_stop_completed({"ok": True, **status})
+    ]
+    if not busy_sources:
+        return None
+    return {
+        "ok": False,
+        "mode": "manual_ingest_blocked",
+        "status": "live_source_active",
+        "reason": "stop_live_source_before_manual_ingest",
+        "busy_sources": busy_sources,
+        "source_status": sources,
+    }
+
+
+def _source_switch_blocked(
+    *,
+    source: str,
+    status: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "mode": "live_source_switch_blocked",
+        "status": "previous_live_source_not_stopped",
+        "reason": f"{source}_stop_failed",
+        "message": (
+            f"Cannot switch acquisition source because {source} did not stop "
+            "cleanly. Retry stop before starting another source."
+        ),
+        source: status,
+        "acquisition_session_reset": {
+            "ok": False,
+            "baseline_invalidated": False,
+            "status": "not_started",
+            "reason": "previous_live_source_not_stopped",
+        },
+    }
+
+
+def _serialized_live_source_control(operation):
+    """Serialize source switching and baseline-invalidating operations.
+
+    FastAPI executes synchronous routes in a worker pool. Without one shared
+    guard, simultaneous SDK/export requests can both pass their preflight
+    checks, reset the session twice, and leave two producers writing into the
+    same bridge. The re-entrant lock also keeps direct test calls and lifespan
+    shutdown on the same lifecycle contract.
+    """
+
+    @wraps(operation)
+    def guarded(*args, **kwargs):
+        with LIVE_SOURCE_CONTROL_LOCK:
+            return operation(*args, **kwargs)
+
+    return guarded
+
+
 @app.post("/api/export_watch/start")
+@_serialized_live_source_control
 def export_watch_start(
     channel_id: str = Query(default="P22"),
     export_root: str | None = Query(default=None),
     interval_sec: float = Query(default=0.35, ge=0.1, le=5.0),
 ) -> dict:
     sdk_status = sdk_live_reader.stop()
+    if not _live_source_stop_completed(sdk_status):
+        return _source_switch_blocked(source="sdk_live", status=sdk_status)
+    existing_watch = export_watcher.status()
+    requested_interval_sec = max(0.1, min(float(interval_sec), 5.0))
+    if _export_watch_session_matches(
+        existing_watch,
+        channel_id=channel_id,
+        export_root=export_root,
+        interval_sec=requested_interval_sec,
+    ):
+        return {
+            "ok": True,
+            "mode": "sense_export_watch_already_running",
+            "export_watcher": existing_watch,
+            "sdk_live": sdk_status,
+            "acquisition_session_reset": _unchanged_acquisition_session(),
+        }
+    if existing_watch.get("active") or existing_watch.get("ingest_in_progress"):
+        stopped_watch = export_watcher.stop()
+        if not _live_source_stop_completed(stopped_watch):
+            return _source_switch_blocked(
+                source="export_watcher",
+                status=stopped_watch,
+            )
     session_reset = _begin_acquisition_session()
-    status = export_watcher.start(channel_id=channel_id, export_root=export_root, interval_sec=interval_sec)
+    status = export_watcher.start(
+        channel_id=channel_id,
+        export_root=export_root,
+        interval_sec=requested_interval_sec,
+    )
     return {
-        "ok": True,
+        "ok": bool(status.get("ok", status.get("active")) and status.get("active")),
         "mode": "sense_export_watch_started",
         "export_watcher": status,
         "sdk_live": sdk_status,
@@ -3010,9 +3532,14 @@ def export_watch_start(
 
 
 @app.post("/api/export_watch/stop")
+@_serialized_live_source_control
 def export_watch_stop() -> dict:
     status = export_watcher.stop()
-    return {"ok": True, "mode": "sense_export_watch_stopped", "export_watcher": status}
+    return {
+        "ok": _live_source_stop_completed(status),
+        "mode": "sense_export_watch_stopped",
+        "export_watcher": status,
+    }
 
 
 @app.get("/api/export_watch/status")
@@ -3021,6 +3548,7 @@ def export_watch_status() -> dict:
 
 
 @app.post("/api/sdk/start")
+@_serialized_live_source_control
 def sdk_start(
     channel_id: str = Query(default="P22"),
     interval_ms: int = Query(default=100, ge=20, le=2000),
@@ -3041,9 +3569,19 @@ def sdk_start(
             "sdk_live": existing_status,
             "acquisition_session_reset": _unchanged_acquisition_session(),
         }
-    if existing_status.get("active"):
-        sdk_live_reader.stop()
-    export_watcher.stop()
+    if existing_status.get("active") or existing_status.get("worker_alive"):
+        stopped_status = sdk_live_reader.stop()
+        if not _live_source_stop_completed(stopped_status):
+            return _source_switch_blocked(
+                source="sdk_live",
+                status=stopped_status,
+            )
+    stopped_watch = export_watcher.stop()
+    if not _live_source_stop_completed(stopped_watch):
+        return _source_switch_blocked(
+            source="export_watcher",
+            status=stopped_watch,
+        )
     session_reset = _begin_acquisition_session()
     status = sdk_live_reader.start(
         channel_id=channel_id,
@@ -3051,7 +3589,7 @@ def sdk_start(
         integration=requested_integration,
     )
     return {
-        "ok": bool(status.get("active")),
+        "ok": bool(status.get("ok", status.get("active")) and status.get("active")),
         "mode": "bayspec_direct_sdk_started",
         "sdk_live": status,
         "acquisition_session_reset": session_reset,
@@ -3063,9 +3601,14 @@ def sdk_start(
 
 
 @app.post("/api/sdk/stop")
+@_serialized_live_source_control
 def sdk_stop() -> dict:
     status = sdk_live_reader.stop()
-    return {"ok": True, "mode": "bayspec_direct_sdk_stopped", "sdk_live": status}
+    return {
+        "ok": _live_source_stop_completed(status),
+        "mode": "bayspec_direct_sdk_stopped",
+        "sdk_live": status,
+    }
 
 
 @app.get("/api/sdk/status")
@@ -3090,6 +3633,7 @@ def sense_stop() -> dict:
 
 
 @app.post("/api/live/start")
+@_serialized_live_source_control
 def live_start(
     channel_id: str = Query(default="P22"),
     export_root: str | None = Query(default=None),
@@ -3116,9 +3660,19 @@ def live_start(
                     "mode": "sense_control_not_required_for_direct_sdk",
                 },
             }
-        if existing_status.get("active"):
-            sdk_live_reader.stop()
-        export_watcher.stop()
+        if existing_status.get("active") or existing_status.get("worker_alive"):
+            stopped_status = sdk_live_reader.stop()
+            if not _live_source_stop_completed(stopped_status):
+                return _source_switch_blocked(
+                    source="sdk_live",
+                    status=stopped_status,
+                )
+        stopped_watch = export_watcher.stop()
+        if not _live_source_stop_completed(stopped_watch):
+            return _source_switch_blocked(
+                source="export_watcher",
+                status=stopped_watch,
+            )
         session_reset = _begin_acquisition_session()
         sdk_status = sdk_live_reader.start(
             channel_id=channel_id,
@@ -3126,7 +3680,10 @@ def live_start(
             integration=40000,
         )
         return {
-            "ok": bool(sdk_status.get("active")),
+            "ok": bool(
+                sdk_status.get("ok", sdk_status.get("active"))
+                and sdk_status.get("active")
+            ),
             "mode": "bayspec_live_twin_started",
             "sdk_live": sdk_status,
             "acquisition_session_reset": session_reset,
@@ -3138,14 +3695,49 @@ def live_start(
         }
 
     sdk_status = sdk_live_reader.stop()
+    if not _live_source_stop_completed(sdk_status):
+        return _source_switch_blocked(source="sdk_live", status=sdk_status)
+    existing_watch = export_watcher.status()
+    requested_interval_sec = max(0.1, min(float(interval_sec), 5.0))
+    if _export_watch_session_matches(
+        existing_watch,
+        channel_id=channel_id,
+        export_root=export_root,
+        interval_sec=requested_interval_sec,
+    ):
+        return {
+            "ok": True,
+            "mode": "bayspec_live_twin_already_running",
+            "export_watcher": existing_watch,
+            "sdk_live": sdk_status,
+            "acquisition_session_reset": _unchanged_acquisition_session(),
+            "sense_control": {
+                "ok": True,
+                "mode": "sense_control_unchanged_existing_watch",
+            },
+        }
+    if existing_watch.get("active") or existing_watch.get("ingest_in_progress"):
+        stopped_watch = export_watcher.stop()
+        if not _live_source_stop_completed(stopped_watch):
+            return _source_switch_blocked(
+                source="export_watcher",
+                status=stopped_watch,
+            )
     session_reset = _begin_acquisition_session()
-    watch_status = export_watcher.start(channel_id=channel_id, export_root=export_root, interval_sec=interval_sec)
+    watch_status = export_watcher.start(
+        channel_id=channel_id,
+        export_root=export_root,
+        interval_sec=requested_interval_sec,
+    )
     sense_result = sense_controller.start_fast_recording(ensure_stopped=True) if control_sense else {
         "ok": True,
         "mode": "sense_control_skipped",
     }
     return {
-        "ok": bool(watch_status.get("active")),
+        "ok": bool(
+            watch_status.get("ok", watch_status.get("active"))
+            and watch_status.get("active")
+        ),
         "mode": "bayspec_live_twin_started",
         "export_watcher": watch_status,
         "sdk_live": sdk_status,
@@ -3159,12 +3751,17 @@ def live_start(
 
 
 @app.post("/api/live/stop")
+@_serialized_live_source_control
 def live_stop(control_sense: bool = Query(default=True)) -> dict:
     sdk_status = sdk_live_reader.stop()
     watch_status = export_watcher.stop()
     sense_result = sense_controller.stop_scan() if control_sense else {"ok": True, "mode": "sense_control_skipped"}
     return {
-        "ok": True,
+        "ok": (
+            _live_source_stop_completed(sdk_status)
+            and _live_source_stop_completed(watch_status)
+            and sense_result.get("ok") is not False
+        ),
         "mode": "bayspec_live_twin_stopped",
         "sdk_live": sdk_status,
         "export_watcher": watch_status,
@@ -3178,16 +3775,18 @@ async def set_baseline(request: Request) -> dict:
         payload = await request.json()
     except Exception:
         payload = {}
-    result = bridge.set_baseline(payload)
-    if result.get("baseline_set") or result.get("static_model_spectrum_baseline_ready"):
-        result["dynamic_temporal_shadow_reset"] = _reset_dynamic_temporal_shadow(
-            "runtime_baseline_replaced"
-        )
-    result.update({"mode": "bayspec_wavelength_baseline_set"})
-    return result
+    with LIVE_SOURCE_CONTROL_LOCK:
+        result = bridge.set_baseline(payload)
+        if result.get("baseline_set") or result.get("static_model_spectrum_baseline_ready"):
+            result["dynamic_temporal_shadow_reset"] = _reset_dynamic_temporal_shadow(
+                "runtime_baseline_replaced"
+            )
+        result.update({"mode": "bayspec_wavelength_baseline_set"})
+        return result
 
 
 @app.post("/api/global_candidate_baseline")
+@_serialized_live_source_control
 def set_global_candidate_baseline(
     minimum_frames: int = Query(default=30, ge=3, le=500),
 ) -> dict:

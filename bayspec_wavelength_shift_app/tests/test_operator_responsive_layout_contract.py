@@ -32,8 +32,9 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
         self.assertIn("min-width: 0 !important", responsive_css)
         self.assertIn("overflow: hidden !important", responsive_css)
 
-    def test_desktop_starts_maximized_but_remains_resizable(self) -> None:
-        self.assertIn("maximized=True", self.launcher)
+    def test_desktop_starts_restored_then_supports_true_fullscreen(self) -> None:
+        self.assertIn("maximized=False", self.launcher)
+        self.assertIn("window.toggle_fullscreen()", self.launcher)
         self.assertIn("width=1180", self.launcher)
         self.assertIn("height=760", self.launcher)
         self.assertIn("min_size=(1024, 680)", self.launcher)
