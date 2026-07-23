@@ -7,13 +7,14 @@ APP_ROOT = PROJECT_ROOT / "bayspec_wavelength_shift_app"
 
 
 class ResponseBandThresholdContractTests(unittest.TestCase):
-    def test_light_band_is_shifted_up_and_shared_across_layers(self) -> None:
+    def test_thresholds_remain_internal_while_operator_gauge_is_continuous(self) -> None:
         config = (PROJECT_ROOT / "config" / "bayspec_wavelength_shift_channels.yaml").read_text(
             encoding="utf-8"
         )
         backend = (APP_ROOT / "backend" / "main.py").read_text(encoding="utf-8")
         frontend = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
         styles = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
+        html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn("no_contact_max_ratio: 0.25", config)
         self.assertIn("light_max_ratio: 0.80", config)
@@ -36,9 +37,15 @@ class ResponseBandThresholdContractTests(unittest.TestCase):
             frontend,
         )
 
-        self.assertIn("var(--response-no-contact-end, 25%)", styles)
-        self.assertIn("var(--response-small-end, 80%)", styles)
-        self.assertIn("var(--response-moderate-end, 90%)", styles)
+        self.assertIn("Continuous normalized optical response from 0% to 100%", frontend)
+        self.assertIn("<span>0%</span>", html)
+        self.assertIn("<span>25%</span>", html)
+        self.assertIn("<span>50%</span>", html)
+        self.assertIn("<span>75%</span>", html)
+        self.assertIn("<span>100%</span>", html)
+        self.assertIn("#dfeef4 0%", styles)
+        self.assertIn("#c8665f 100%", styles)
+        self.assertNotIn("var(--response-no-contact-end", styles)
 
 
 if __name__ == "__main__":
