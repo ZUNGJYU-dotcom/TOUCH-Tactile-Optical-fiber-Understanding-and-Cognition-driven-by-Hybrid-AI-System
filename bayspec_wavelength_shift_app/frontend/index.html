@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TOUCH</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/styles.css?v=continuous-response-v34" />
+    <link rel="stylesheet" href="/static/styles.css?v=five-finger-sensor-array-v2" />
     <script type="importmap">
       {
         "imports": {
@@ -169,7 +169,7 @@
           <div>
             <div class="panel-heading compact">
               <div>
-                <h2>9-FBG spectrum overview</h2>
+                <h2 id="spectrumOverviewTitle">Thumb 9-FBG spectrum</h2>
                 <p id="spectrumAxisNote">FBG target peaks and detected peak markers</p>
               </div>
             </div>
@@ -305,6 +305,17 @@
               <span id="surfaceProxyCaption" class="explanatory-copy">Sensor slot response surface</span>
             </div>
             <div class="stage-actions">
+              <label id="fingerFocusControl" class="finger-focus-control" title="Select the fingertip used by the spectrum and 3x3 response views">
+                <span>Finger</span>
+                <select id="fingerFocusSelect" aria-label="Select tactile finger">
+                  <option value="thumb">Thumb</option>
+                  <option value="index">Index</option>
+                  <option value="middle">Middle</option>
+                  <option value="ring">Ring</option>
+                  <option value="little">Little</option>
+                  <option value="all">All</option>
+                </select>
+              </label>
               <button id="wholeHandModeButton" type="button">Whole hand</button>
               <button id="thumbHolderModeButton" class="active" type="button">Thumb holder mode</button>
               <button id="surfaceOnlyModeButton" type="button">Surface Only</button>
@@ -890,6 +901,6 @@
 
     </div>
     <script src="/static/vendor/lucide/lucide.min.js"></script>
-    <script type="module" src="/static/app.js?v=robot-nano-hand-v9"></script>
+    <script type="module" src="/static/app.js?v=five-finger-sensor-array-v6"></script>
   </body>
 </html>

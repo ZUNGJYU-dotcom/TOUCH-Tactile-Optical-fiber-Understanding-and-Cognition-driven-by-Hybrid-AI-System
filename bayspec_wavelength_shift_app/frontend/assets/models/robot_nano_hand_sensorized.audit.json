@@ -1,0 +1,115 @@
+{
+  "source_triangle_count": 305198,
+  "output_triangle_count": 303586,
+  "removed_triangle_count": 1612,
+  "slots": {
+    "index": {
+      "removed_triangle_count": 391,
+      "center_model": [
+        79.087,
+        62.01,
+        -39.369
+      ],
+      "longitudinal_axis_model": [
+        -0.07830769,
+        0.96147507,
+        -0.26350253
+      ],
+      "transverse_axis_model": [
+        0.95856705,
+        0.0,
+        -0.284867
+      ],
+      "outward_normal_model": [
+        -0.27389252,
+        -0.27489213,
+        -0.92163833
+      ],
+      "carved_length_mm": 14.4,
+      "carved_width_mm": 8.64,
+      "depth_tolerance_mm": 2.2
+    },
+    "middle": {
+      "removed_triangle_count": 429,
+      "center_model": [
+        55.573,
+        82.611,
+        -41.918
+      ],
+      "longitudinal_axis_model": [
+        -0.53718276,
+        0.75284542,
+        -0.38033992
+      ],
+      "transverse_axis_model": [
+        0.81506161,
+        0.34728712,
+        -0.46375234
+      ],
+      "outward_normal_model": [
+        -0.21704667,
+        -0.55912022,
+        -0.80017206
+      ],
+      "carved_length_mm": 14.4,
+      "carved_width_mm": 8.64,
+      "depth_tolerance_mm": 2.4
+    },
+    "ring": {
+      "removed_triangle_count": 376,
+      "center_model": [
+        23.129,
+        101.826,
+        -19.171
+      ],
+      "longitudinal_axis_model": [
+        -0.09134731,
+        0.97767838,
+        -0.18921059
+      ],
+      "transverse_axis_model": [
+        0.99321302,
+        0.07571132,
+        -0.08829321
+      ],
+      "outward_normal_model": [
+        -0.07199698,
+        -0.19599177,
+        -0.97795893
+      ],
+      "carved_length_mm": 14.4,
+      "carved_width_mm": 8.64,
+      "depth_tolerance_mm": 2.2
+    },
+    "little": {
+      "removed_triangle_count": 416,
+      "center_model": [
+        -9.32,
+        92.498,
+        -24.449
+      ],
+      "longitudinal_axis_model": [
+        -0.0829456,
+        0.96660762,
+        -0.24246595
+      ],
+      "transverse_axis_model": [
+        0.99618814,
+        0.08701643,
+        0.0061094
+      ],
+      "outward_normal_model": [
+        0.02700392,
+        -0.24103495,
+        -0.97014068
+      ],
+      "carved_length_mm": 14.4,
+      "carved_width_mm": 8.64,
+      "depth_tolerance_mm": 2.4
+    }
+  },
+  "source": "E:\\重要文档\\实验\\柔性传感\\光纤\\Micro-FBG\\普通FBG\\算法\\touch_static_spectral_twin_edition\\bayspec_wavelength_shift_app\\frontend\\assets\\models\\robot_nano_hand_body.glb",
+  "output": "E:\\重要文档\\实验\\柔性传感\\光纤\\Micro-FBG\\普通FBG\\算法\\touch_static_spectral_twin_edition\\bayspec_wavelength_shift_app\\frontend\\assets\\models\\robot_nano_hand_sensorized.glb",
+  "config": "E:\\重要文档\\实验\\柔性传感\\光纤\\Micro-FBG\\普通FBG\\算法\\touch_static_spectral_twin_edition\\config\\thumb_holder_scene.yaml",
+  "geometry_status": "four_fingertip_recesses_carved"
+}

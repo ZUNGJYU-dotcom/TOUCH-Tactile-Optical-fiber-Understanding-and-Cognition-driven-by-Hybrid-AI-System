@@ -1,6 +1,6 @@
 ﻿thumb_holder_scene:
   enabled: true
-  default_geometry_mode: thumb_holder
+  default_geometry_mode: whole_hand
   model_asset_url: ""
   fallback_asset_url: /static/assets/models/thumb_holder.stl
   fallback_placeholder_enabled: false
@@ -12,7 +12,8 @@
 
 whole_hand_scene:
   enabled: true
-  asset_url: /static/assets/models/robot_nano_hand_body.glb
+  asset_url: /static/assets/models/robot_nano_hand_sensorized.glb
+  fallback_asset_url: /static/assets/models/robot_nano_hand_body.glb
   source_name: Robot Nano Hand
   source_repository_url: https://github.com/TheRobotStudio/robot-nano-hand
   source_step_file: STEP/Complete_Hand_06_Final_Print_03e.STEP
@@ -41,11 +42,76 @@ whole_hand_scene:
     - 0.0
     - 0.0
     - 1.0
-  sensor_local_lift: [0.22, 0.0, 0.0]
+  sensor_local_lift: [-0.48, 0.0, 0.0]
   camera:
     position: [4.7, 2.2, -8.8]
     target: [0.0, 0.0, 0.0]
-  note: "Official MIT-licensed hand assembly with the original thumb tip removed and the existing calibrated TOUCH thumb sensor fitted in its place."
+  note: "Official MIT-licensed hand assembly with the original thumb tip removed and the existing TOUCH thumb sensor fitted in its place. Four additional fingertip recesses are visualization geometry for the synchronized prototype."
+
+finger_sensor_array:
+  enabled: true
+  geometry_status: five_finger_sensorized_prototype
+  data_status: synchronized_demo_only
+  default_selected_finger: thumb
+  demo_sync_mode: synchronized_with_thumb
+  spectrum_scope_mode: selected_finger
+  array_scope_mode: selected_finger
+  source_asset_url: /static/assets/models/robot_nano_hand_sensorized.glb
+  original_asset_url: /static/assets/models/robot_nano_hand_body.glb
+  note: "All five fingertip surfaces share the thumb demo response for now. This does not claim five independent measured spectra or calibrated force."
+  fingers:
+    thumb:
+      label: Thumb
+      enabled: true
+      sensor_source: existing_thumb_slot
+    index:
+      label: Index
+      enabled: true
+      mesh_component_id: 22
+      center_model: [79.087, 62.010, -39.369]
+      longitudinal_axis_model: [0.0, 1.0, 0.0]
+      outward_normal_model: [-0.274, -0.275, -0.922]
+      slot_length_mm: 15.0
+      slot_width_mm: 9.0
+      slot_depth_tolerance_mm: 2.2
+      sensor_thickness_scale: 1.35
+      surface_offset_mm: 0.08
+    middle:
+      label: Middle
+      enabled: true
+      mesh_component_id: 16
+      center_model: [55.573, 82.611, -41.918]
+      longitudinal_axis_model: [-0.392, 0.920, 0.0]
+      outward_normal_model: [-0.217, -0.559, -0.800]
+      slot_length_mm: 15.0
+      slot_width_mm: 9.0
+      slot_depth_tolerance_mm: 2.4
+      sensor_thickness_scale: 1.35
+      surface_offset_mm: 0.08
+    ring:
+      label: Ring
+      enabled: true
+      mesh_component_id: 10
+      center_model: [23.129, 101.826, -19.171]
+      longitudinal_axis_model: [-0.076, 0.997, 0.0]
+      outward_normal_model: [-0.072, -0.196, -0.978]
+      slot_length_mm: 15.0
+      slot_width_mm: 9.0
+      slot_depth_tolerance_mm: 2.2
+      sensor_thickness_scale: 1.35
+      surface_offset_mm: 0.08
+    little:
+      label: Little
+      enabled: true
+      mesh_component_id: 4
+      center_model: [-9.320, 92.498, -24.449]
+      longitudinal_axis_model: [-0.087, 0.996, 0.0]
+      outward_normal_model: [0.027, -0.241, -0.970]
+      slot_length_mm: 15.0
+      slot_width_mm: 9.0
+      slot_depth_tolerance_mm: 2.4
+      sensor_thickness_scale: 1.35
+      surface_offset_mm: 0.08
 
 thumb_model:
   visible: true
@@ -88,7 +154,7 @@ sensor_slot_transform:
   height_mm: 7.0
   depth_mm: 1.0
   z_offset_mm: 0.08
-  surface_scene_scale: [0.482, 0.268, 0.460]
+  surface_scene_scale: [0.482, -0.268, 0.460]
   boundary_profile:
     source: stl_diff_groove_faces
     angular_samples: 64

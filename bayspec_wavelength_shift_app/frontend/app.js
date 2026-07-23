@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { loadRobotNanoHandModel, loadThumbHolderModel } from "./model_loader.js?v=robot-nano-hand-v5";
+import { loadRobotNanoHandModel, loadThumbHolderModel } from "./model_loader.js?v=five-finger-sensor-array-v2";
 
 const channelSelect = document.getElementById("channelSelect");
 const inputSourceSelect = document.getElementById("inputSourceSelect");
@@ -33,6 +33,8 @@ const responseTerrainModeButton = document.getElementById("responseTerrainModeBu
 const wholeHandModeButton = document.getElementById("wholeHandModeButton");
 const thumbHolderModeButton = document.getElementById("thumbHolderModeButton");
 const surfaceOnlyModeButton = document.getElementById("surfaceOnlyModeButton");
+const fingerFocusControl = document.getElementById("fingerFocusControl");
+const fingerFocusSelect = document.getElementById("fingerFocusSelect");
 const surfaceFullscreenButton = document.getElementById("surfaceFullscreenButton");
 const thumbAlignmentSaveButton = document.getElementById("thumbAlignmentSaveButton");
 const thumbAlignmentResetButton = document.getElementById("thumbAlignmentResetButton");
@@ -260,6 +262,15 @@ const ARRAY_DISPLAY_ROWS = [
   ["P13", "P23", "P33"],
 ];
 const ARRAY_DISPLAY_ORDER = ARRAY_DISPLAY_ROWS.flat();
+const FINGER_ORDER = ["thumb", "index", "middle", "ring", "little"];
+const FINGER_LABELS = {
+  thumb: "Thumb",
+  index: "Index",
+  middle: "Middle",
+  ring: "Ring",
+  little: "Little",
+  all: "All fingers",
+};
 const ARRAY_CHANNEL_COORDS = {
   P11: { x: -1, y: 1 },
   P21: { x: 0, y: 1 },
@@ -1001,6 +1012,7 @@ const state = {
   displayMode: "operator",
   surfaceRenderMode: "physical_proxy",
   geometryDisplayMode: "thumb_holder",
+  selectedFinger: "thumb",
   surfaceFullscreenActive: false,
   surfaceNativeFullscreenEntered: false,
   thumbSceneConfig: null,
@@ -1009,7 +1021,7 @@ const state = {
   thumbModelAssetUrl: "/static/assets/models/thumb_holder.stl",
   wholeHandModelStatus: "not_loaded",
   wholeHandModelMessage: "--",
-  wholeHandModelAssetUrl: "/static/assets/models/robot_nano_hand_body.glb",
+  wholeHandModelAssetUrl: "/static/assets/models/robot_nano_hand_sensorized.glb",
   couplingView: "raw_coupled_response",
   layoutCheckVisible: false,
   commandPending: null,
@@ -1066,6 +1078,7 @@ let wholeHandBodyObject;
 let sensorSurfaceGroup;
 let slotOutlineHelper;
 let grooveReferenceHelper;
+const fingerSensorGroups = new Map();
 let resizeToken = 0;
 let windowResizeSettleTimer = 0;
 let windowResizeActive = false;
@@ -3511,7 +3524,7 @@ function createOvalSurfaceGridGeometry(width, depth, radialSegments = 9, angular
 
 function createGrooveReferenceLineGeometry(slotTransform = {}) {
   const position = vectorFromConfig(slotTransform.position, [0.546, 0.674, -0.007]);
-  const scale = vectorFromConfig(slotTransform.surface_scene_scale, [0.482, 0.268, 0.460]);
+  const scale = vectorFromConfig(slotTransform.surface_scene_scale, [0.482, -0.268, 0.460]);
   const lift = Number(slotTransform.vertical_lift ?? 0.22);
   const points = currentSlotBoundaryPoints(7, 5, 96);
   const positions = [];
@@ -3649,17 +3662,152 @@ function setObjectMatrixFromRowMajor(object, values) {
   return true;
 }
 
+function normalizedConfigVector(values, fallback) {
+  const vector = new THREE.Vector3(...vectorFromConfig(values, fallback));
+  if (vector.lengthSq() < 1e-9) {
+    vector.set(...fallback);
+  }
+  return vector.normalize();
+}
+
+function selectedFingerLabel() {
+  return FINGER_LABELS[state.selectedFinger] || FINGER_LABELS.thumb;
+}
+
+function fingerConfig(fingerId) {
+  return state.thumbSceneConfig?.finger_sensor_array?.fingers?.[fingerId] || null;
+}
+
+function setupFingerSensorGroups() {
+  for (const [fingerId, group] of fingerSensorGroups.entries()) {
+    if (fingerId !== "thumb") group.parent?.remove(group);
+  }
+  fingerSensorGroups.clear();
+  if (!sensorSurfaceGroup) return;
+  fingerSensorGroups.set("thumb", sensorSurfaceGroup);
+  sensorSurfaceGroup.userData.fingerId = "thumb";
+
+  for (const fingerId of FINGER_ORDER.filter((item) => item !== "thumb")) {
+    const config = fingerConfig(fingerId);
+    if (!config || config.enabled === false) continue;
+    const group = sensorSurfaceGroup.clone(true);
+    group.name = `sensor_slot_surface_group_${fingerId}`;
+    group.userData.fingerId = fingerId;
+    group.traverse((child) => {
+      if (child.name === "sensor_slot_surface_outline" && child.material) {
+        child.material = child.material.clone();
+        child.material.depthTest = true;
+        child.renderOrder = 7;
+      }
+    });
+    fingerSensorGroups.set(fingerId, group);
+    wholeHandRoot?.add(group);
+  }
+  updateFingerSensorFocusStyles();
+}
+
+function applyFingerSensorLayout() {
+  const arrayConfig = state.thumbSceneConfig?.finger_sensor_array || {};
+  const arrayEnabled = arrayConfig.enabled !== false;
+  for (const fingerId of FINGER_ORDER.filter((item) => item !== "thumb")) {
+    const group = fingerSensorGroups.get(fingerId);
+    const config = fingerConfig(fingerId);
+    if (!group || !config) continue;
+    if (group.parent !== wholeHandRoot) wholeHandRoot?.add(group);
+    const center = new THREE.Vector3(...vectorFromConfig(config.center_model, [0, 0, 0]));
+    const outward = normalizedConfigVector(config.outward_normal_model, [0, 0, -1]);
+    const longitudinal = normalizedConfigVector(config.longitudinal_axis_model, [0, 1, 0]);
+    longitudinal.addScaledVector(outward, -longitudinal.dot(outward)).normalize();
+    const inward = outward.clone().multiplyScalar(-1);
+    const transverse = new THREE.Vector3().crossVectors(longitudinal, inward).normalize();
+    const basis = new THREE.Matrix4().makeBasis(longitudinal, inward, transverse);
+    const offset = Number(config.surface_offset_mm ?? 0.08);
+
+    group.matrixAutoUpdate = true;
+    group.position.copy(center).addScaledVector(outward, Number.isFinite(offset) ? offset : 0.08);
+    group.quaternion.setFromRotationMatrix(basis);
+    group.scale.set(
+      Math.max(0.1, Number(config.slot_length_mm ?? 15) / 7),
+      Math.max(0.1, Number(config.sensor_thickness_scale ?? 1.35)),
+      Math.max(0.1, Number(config.slot_width_mm ?? 9) / 5)
+    );
+    group.visible = arrayEnabled && config.enabled !== false;
+    group.userData.slotCenterModel = center.toArray();
+    group.userData.longitudinalAxisModel = longitudinal.toArray();
+    group.userData.inwardNormalModel = inward.toArray();
+    group.userData.transverseAxisModel = transverse.toArray();
+    group.userData.demoSyncMode = arrayConfig.demo_sync_mode || "synchronized_with_thumb";
+  }
+  updateFingerSensorFocusStyles();
+}
+
+function updateFingerSensorFocusStyles() {
+  const selected = state.selectedFinger;
+  for (const [fingerId, group] of fingerSensorGroups.entries()) {
+    const focused = selected === "all" || selected === fingerId;
+    group.userData.focused = focused;
+    group.traverse((child) => {
+      if (child.name !== "sensor_slot_surface_outline" || !child.material) return;
+      child.material.color.set(focused ? "#188fb8" : "#6ea9b8");
+      child.material.opacity = focused ? 0.78 : 0.22;
+      child.material.needsUpdate = true;
+    });
+  }
+}
+
+function updateFingerScopeLabels() {
+  const label = selectedFingerLabel();
+  const scope = state.selectedFinger === "all" ? "All fingers" : label;
+  setText("spectrumOverviewTitle", `${scope} 9-FBG spectrum`);
+  setText("footprintTitle", `${scope} 9-FBG Fingerprint`);
+  if (fingerFocusSelect && fingerFocusSelect.value !== state.selectedFinger) {
+    fingerFocusSelect.value = state.selectedFinger;
+  }
+  if (fingerFocusControl) {
+    fingerFocusControl.dataset.selectedFinger = state.selectedFinger;
+  }
+  if (state.geometryDisplayMode === "whole_hand") {
+    setText(
+      "tactileSurfaceTitle",
+      state.selectedFinger === "all" ? "Five-Finger Tactile Surface" : `${label} Tactile Surface`
+    );
+    setText(
+      "surfaceProxyCaption",
+      state.selectedFinger === "all" ? "Synchronized five-finger response" : `${label} sensor response`
+    );
+  }
+  for (const elementId of ["levelBadge", "heatmapChip"]) {
+    const element = document.getElementById(elementId);
+    if (!element) continue;
+    const current = String(element.textContent || "").trim();
+    const suffix = current.replace(
+      /^(?:Thumb|Index|Middle|Ring|Little|All fingers)\s+/i,
+      ""
+    );
+    element.textContent = `${scope} ${suffix || "surface"}`;
+  }
+}
+
+function setSelectedFinger(fingerId) {
+  const normalized = String(fingerId || "thumb").toLowerCase();
+  state.selectedFinger = [...FINGER_ORDER, "all"].includes(normalized) ? normalized : "thumb";
+  updateFingerSensorFocusStyles();
+  updateFingerScopeLabels();
+  state.threeNeedsRefresh = true;
+}
+
 async function loadThumbSceneConfig() {
   const fallback = {
     thumb_holder_scene: {
-      default_geometry_mode: "thumb_holder",
+      default_geometry_mode: "whole_hand",
       model_asset_url: "",
       fallback_asset_url: "/static/assets/models/thumb_holder.stl",
       fallback_placeholder_enabled: true,
     },
     whole_hand_scene: {
       enabled: true,
-      asset_url: "/static/assets/models/robot_nano_hand_body.glb",
+      asset_url: "/static/assets/models/robot_nano_hand_sensorized.glb",
+      fallback_asset_url: "/static/assets/models/robot_nano_hand_body.glb",
       source_repository_url: "https://github.com/TheRobotStudio/robot-nano-hand",
       source_license: "MIT",
       body_opacity: 0.42,
@@ -3674,10 +3822,72 @@ async function loadThumbSceneConfig() {
         6.40797836, -4.54927926, 0.42965253, -107.2841714,
         0, 0, 0, 1,
       ],
-      sensor_local_lift: [0.22, 0, 0],
+      sensor_local_lift: [-0.48, 0, 0],
       camera: {
         position: [4.7, 2.2, -8.8],
         target: [0, 0, 0],
+      },
+    },
+    finger_sensor_array: {
+      enabled: true,
+      geometry_status: "five_finger_sensorized_prototype",
+      data_status: "synchronized_demo_only",
+      default_selected_finger: "thumb",
+      demo_sync_mode: "synchronized_with_thumb",
+      spectrum_scope_mode: "selected_finger",
+      array_scope_mode: "selected_finger",
+      source_asset_url: "/static/assets/models/robot_nano_hand_sensorized.glb",
+      original_asset_url: "/static/assets/models/robot_nano_hand_body.glb",
+      fingers: {
+        thumb: {
+          label: "Thumb",
+          enabled: true,
+          sensor_source: "existing_thumb_slot",
+        },
+        index: {
+          label: "Index",
+          enabled: true,
+          center_model: [79.087, 62.010, -39.369],
+          longitudinal_axis_model: [0, 1, 0],
+          outward_normal_model: [-0.274, -0.275, -0.922],
+          slot_length_mm: 15,
+          slot_width_mm: 9,
+          sensor_thickness_scale: 1.35,
+          surface_offset_mm: 0.08,
+        },
+        middle: {
+          label: "Middle",
+          enabled: true,
+          center_model: [55.573, 82.611, -41.918],
+          longitudinal_axis_model: [-0.392, 0.920, 0],
+          outward_normal_model: [-0.217, -0.559, -0.800],
+          slot_length_mm: 15,
+          slot_width_mm: 9,
+          sensor_thickness_scale: 1.35,
+          surface_offset_mm: 0.08,
+        },
+        ring: {
+          label: "Ring",
+          enabled: true,
+          center_model: [23.129, 101.826, -19.171],
+          longitudinal_axis_model: [-0.076, 0.997, 0],
+          outward_normal_model: [-0.072, -0.196, -0.978],
+          slot_length_mm: 15,
+          slot_width_mm: 9,
+          sensor_thickness_scale: 1.35,
+          surface_offset_mm: 0.08,
+        },
+        little: {
+          label: "Little",
+          enabled: true,
+          center_model: [-9.320, 92.498, -24.449],
+          longitudinal_axis_model: [-0.087, 0.996, 0],
+          outward_normal_model: [0.027, -0.241, -0.970],
+          slot_length_mm: 15,
+          slot_width_mm: 9,
+          sensor_thickness_scale: 1.35,
+          surface_offset_mm: 0.08,
+        },
       },
     },
     thumb_model_transform: {
@@ -3697,7 +3907,7 @@ async function loadThumbSceneConfig() {
       position: [0.546, 0.674, -0.007],
       rotation_deg: [0, 0, 90],
       vertical_lift: 0.22,
-      surface_scene_scale: [0.482, 0.268, 0.460],
+      surface_scene_scale: [0.482, -0.268, 0.460],
       boundary_profile: {
         source: "stl_diff_groove_faces",
         angular_samples: 64,
@@ -3734,11 +3944,18 @@ async function loadThumbSceneConfig() {
   state.thumbSceneConfig = resolved;
   state.thumbModelAssetUrl = fallback.thumb_holder_scene.fallback_asset_url;
   state.wholeHandModelAssetUrl = resolved.whole_hand_scene?.asset_url || fallback.whole_hand_scene.asset_url;
+  const configuredFinger = String(
+    resolved.finger_sensor_array?.default_selected_finger || "thumb"
+  ).toLowerCase();
+  state.selectedFinger = [...FINGER_ORDER, "all"].includes(configuredFinger)
+    ? configuredFinger
+    : "thumb";
+  if (fingerFocusSelect) fingerFocusSelect.value = state.selectedFinger;
   state.thumbModelMessage = "using local STL thumb holder fallback";
   const configuredMode = state.thumbSceneConfig?.thumb_holder_scene?.default_geometry_mode;
   state.geometryDisplayMode = ["whole_hand", "thumb_holder", "surface_only"].includes(configuredMode)
     ? configuredMode
-    : "thumb_holder";
+    : "whole_hand";
   populateThumbAlignmentPanel();
 }
 
@@ -3756,7 +3973,7 @@ function populateThumbAlignmentPanel() {
   const modelScale = vectorFromConfig(model.scale, [1, 1, 1]);
   const slotPosition = vectorFromConfig(slot.position, [0.546, 0.674, -0.007]);
   const slotRotation = vectorFromConfig(slot.rotation_deg, [0, 0, 90]);
-  const slotScale = vectorFromConfig(slot.surface_scene_scale, [0.482, 0.268, 0.460]);
+  const slotScale = vectorFromConfig(slot.surface_scene_scale, [0.482, -0.268, 0.460]);
   [
     ["thumbModelVisible", model.visible !== false],
     ["thumbSurfaceVisible", slot.visible !== false],
@@ -3828,7 +4045,7 @@ function collectThumbAlignmentConfig() {
       position: [numberInputValue("thumbSlotPosX", 0.546), numberInputValue("thumbSlotPosY", 0.674), numberInputValue("thumbSlotPosZ", -0.007)],
       rotation_deg: [numberInputValue("thumbSlotRotX", 0), numberInputValue("thumbSlotRotY", 0), numberInputValue("thumbSlotRotZ", 90)],
       vertical_lift: Number(state.thumbSceneConfig?.sensor_slot_transform?.vertical_lift ?? 0.22),
-      surface_scene_scale: [numberInputValue("thumbSlotScaleX", 0.482), numberInputValue("thumbSlotScaleY", 0.268), numberInputValue("thumbSlotScaleZ", 0.460)],
+      surface_scene_scale: [numberInputValue("thumbSlotScaleX", 0.482), numberInputValue("thumbSlotScaleY", -0.268), numberInputValue("thumbSlotScaleZ", 0.460)],
       boundary_profile: state.thumbSceneConfig?.sensor_slot_transform?.boundary_profile || {
         source: "stl_diff_groove_faces",
         angular_samples: 64,
@@ -3872,7 +4089,7 @@ function resetThumbAlignmentConfig() {
       position: [0.546, 0.674, -0.007],
       rotation_deg: [0, 0, 90],
       vertical_lift: 0.22,
-      surface_scene_scale: [0.482, 0.268, 0.460],
+      surface_scene_scale: [0.482, -0.268, 0.460],
       boundary_profile: {
         source: "stl_diff_groove_faces",
         angular_samples: 64,
@@ -3983,11 +4200,11 @@ function applyThumbSceneLayout() {
       if (sensorSurfaceGroup.parent !== desiredParent) desiredParent.add(sensorSurfaceGroup);
       const position = vectorFromConfig(slotTransform.position, localToThumb ? [0.546, 0.674, -0.007] : [0, -1.52, -0.05]);
       const rotation = radiansFromDegrees(slotTransform.rotation_deg, localToThumb ? [0, 0, 90] : [0, 0, 0]);
-      const scale = vectorFromConfig(slotTransform.surface_scene_scale, localToThumb ? [0.482, 0.268, 0.460] : [0.34, 0.34, 0.24]);
+      const scale = vectorFromConfig(slotTransform.surface_scene_scale, localToThumb ? [0.482, -0.268, 0.460] : [0.34, 0.34, 0.24]);
       sensorSurfaceGroup.position.set(position[0], position[1], position[2]);
       if (localToThumb) {
         if (wholeHandMode) {
-          const localLift = vectorFromConfig(wholeHandConfig.sensor_local_lift, [0.22, 0, 0]);
+          const localLift = vectorFromConfig(wholeHandConfig.sensor_local_lift, [-0.48, 0, 0]);
           sensorSurfaceGroup.position.add(new THREE.Vector3(localLift[0], localLift[1], localLift[2]));
         } else {
           const lift = Number(slotTransform.vertical_lift ?? 0.22);
@@ -4026,6 +4243,8 @@ function applyThumbSceneLayout() {
   if (slotOutlineHelper) {
     slotOutlineHelper.visible = physicalMode;
   }
+  applyFingerSensorLayout();
+  updateFingerScopeLabels();
   placeSceneGridBelowModel();
   state.threeNeedsRefresh = true;
 }
@@ -4125,6 +4344,38 @@ function exposeThreeDebugHandle() {
         gridY: sceneGrid?.position?.y ?? null,
         referenceBoundsMinY: sceneGrid?.userData?.referenceBoundsMinY ?? null,
         clearance: sceneGrid?.userData?.clearance ?? null,
+      };
+    },
+    setSelectedFinger(fingerId) {
+      setSelectedFinger(fingerId);
+      return state.selectedFinger;
+    },
+    getFingerSensorStatus() {
+      const sensors = {};
+      for (const [fingerId, group] of fingerSensorGroups.entries()) {
+        group.updateMatrixWorld(true);
+        const bounds = new THREE.Box3().setFromObject(group);
+        const worldCenter = new THREE.Vector3();
+        group.getWorldPosition(worldCenter);
+        sensors[fingerId] = {
+          visible: group.visible,
+          focused: Boolean(group.userData.focused),
+          parent: group.parent?.name || null,
+          worldCenter: worldCenter.toArray(),
+          bounds:
+            bounds.isEmpty()
+              ? null
+              : {
+                  min: bounds.min.toArray(),
+                  max: bounds.max.toArray(),
+                },
+          demoSyncMode: group.userData.demoSyncMode || "shared_geometry",
+        };
+      }
+      return {
+        selectedFinger: state.selectedFinger,
+        geometryDisplayMode: state.geometryDisplayMode,
+        sensors,
       };
     },
     getModelStatus() {
@@ -4234,6 +4485,10 @@ function updateGeometryDisplayMode(mode) {
         ? "Sensor slot wavelength response"
         : "Footprint-aligned wavelength response"
   );
+  if (fingerFocusControl) {
+    fingerFocusControl.hidden = !wholeHandMode;
+  }
+  updateFingerScopeLabels();
   if (surfaceMesh?.material) {
     surfaceMesh.material.roughness = physicalMode ? 0.36 : 0.50;
     surfaceMesh.material.emissiveIntensity = physicalMode ? 0.08 : 0.015;
@@ -4523,6 +4778,7 @@ function initThree() {
   bottomGridMesh.renderOrder = 1;
   sensorSurfaceGroup.add(bottomGridMesh);
 
+  setupFingerSensorGroups();
   setupThumbHolderModel();
   setupWholeHandModel();
   applyThumbSceneLayout();
@@ -5269,7 +5525,12 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
   const dominantCandidateId = surfaceMetrics?.contact_evidence_passed
     ? dominantGlobalCandidate(record)?.candidate_id || null
     : null;
-  setText("footprintTitle", globalCandidateView ? "Global FBG Fingerprint" : "Contact Footprint");
+  const selectedFingerScope =
+    state.selectedFinger === "all" ? "All fingers" : selectedFingerLabel();
+  setText(
+    "footprintTitle",
+    `${selectedFingerScope} ${globalCandidateView ? "9-FBG Fingerprint" : "Contact Footprint"}`
+  );
   const fallbackLike = !arrayFrame || ["p22_fallback", "single_point_p22", "no_valid_channel", ""].includes(String(arrayFrame.mode || ""));
   const globalEventPeakShiftPm = Number(surfaceMetrics?.global_event_absolute_shift_pm ?? record?.absolute_shift_pm);
   const responseBlockReason = String(record?.response_block_reason || "");
@@ -6270,15 +6531,18 @@ function updateUI(frame) {
   );
 
   const badge = document.getElementById("levelBadge");
+  const fingerScope = selectedFingerLabel();
+  const selectedFingerScope =
+    state.selectedFinger === "all" ? "All fingers" : fingerScope;
   badge.textContent = trainedModelDisplay
-    ? "Trained spectrum model"
+    ? `${selectedFingerScope} spectrum model`
     : globalRecognitionFrame
-    ? "Global spectral fingerprint"
+    ? `${selectedFingerScope} spectral fingerprint`
     : isFallbackLikeFrame
-      ? "P22 legacy fallback"
+      ? `${selectedFingerScope} synchronized fallback`
       : arrayMode === "simulated_array_demo"
-        ? state.displayMode === "operator" ? "Coupled response" : "Coupled simulated demo"
-        : "Surface Mode";
+        ? `${selectedFingerScope} coupled response`
+        : `${selectedFingerScope} surface`;
   badge.className = `level-badge ${levelClass(record?.response_level)}`;
   const contactPresentation = surfaceContactPresentation({
     arrayFrame,
@@ -6293,14 +6557,14 @@ function updateUI(frame) {
   setText(
     "heatmapChip",
     trainedModelDisplay
-      ? `model position ${dominantChannel || "--"}`
+      ? `${selectedFingerScope} · ${dominantChannel || "--"}`
       : globalRecognitionFrame
-      ? "provisional spatial proxy"
+      ? `${selectedFingerScope} spatial proxy`
       : isFallbackLikeFrame
-        ? "P22 legacy fallback"
+        ? `${selectedFingerScope} synchronized fallback`
         : arrayMode === "simulated_array_demo"
-          ? state.displayMode === "operator" ? "array response" : "simulated array demo"
-          : "surface mode"
+          ? `${selectedFingerScope} array response`
+          : `${selectedFingerScope} surface`
   );
   setText(
     "heatmapAxisNote",
@@ -7814,6 +8078,10 @@ wholeHandModeButton?.addEventListener("click", () => {
   updateGeometryDisplayMode("whole_hand");
 });
 
+fingerFocusSelect?.addEventListener("change", () => {
+  setSelectedFinger(fingerFocusSelect.value);
+});
+
 thumbHolderModeButton?.addEventListener("click", () => {
   updateGeometryDisplayMode("thumb_holder");
 });
@@ -8197,6 +8465,7 @@ async function boot() {
   updateSurfaceRenderMode("physical_proxy");
   updateCouplingView("raw_coupled_response");
   initThree();
+  setSelectedFinger(state.selectedFinger);
   exposeThreeDebugHandle();
   const idleFrame = makeIdleFrame();
   state.frame = idleFrame;

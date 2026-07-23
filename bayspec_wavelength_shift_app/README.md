@@ -12,7 +12,7 @@ workspace keeps the complete synchronized capture workflow in one place, and
 the seven-item diagnostic navigation scrolls horizontally when the panel is
 narrow. The selected workspace is automatically scrolled into view.
 
-## Robot Hand Scene
+## Five-Finger Robot Hand Scene
 
 The 3D presentation supports three geometry modes: the complete Robot Nano
 Hand, the modified thumb holder, and the isolated sensor surface. The complete
@@ -20,7 +20,12 @@ hand body is derived from The Robot Studio's MIT-licensed
 [Robot Nano Hand](https://github.com/TheRobotStudio/robot-nano-hand) assembly.
 Its original thumb tip is omitted and replaced by this project's existing
 modified thumb sensor, preserving the calibrated slot and response-surface
-alignment. Geometry mode can be changed in Settings or Diagnostics.
+alignment. The index, middle, ring, and little fingertips each include a carved
+sensor recess and a fitted copy of the same tactile response unit. A five-finger
+selector scopes the spectrum title, 9-FBG fingerprint, response map, and status
+labels to Thumb, Index, Middle, Ring, Little, or All. Simulated response remains
+synchronized across all five fingertips while the selector changes the
+inspection scope. Geometry mode can be changed in Settings or Diagnostics.
 
 ## Input and Output
 

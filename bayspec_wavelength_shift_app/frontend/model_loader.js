@@ -231,16 +231,17 @@ export async function loadRobotNanoHandModel(config = {}) {
   const sceneConfig = config.whole_hand_scene || {};
   const visual = config.visual_style || {};
   const assetUrl = sceneConfig.asset_url || "/static/assets/models/robot_nano_hand_body.glb";
+  const fallbackAssetUrl = sceneConfig.fallback_asset_url || "/static/assets/models/robot_nano_hand_body.glb";
 
-  try {
-    const assetProbe = await fetch(assetUrl, { method: "HEAD", cache: "no-store" });
+  async function loadAsset(candidateUrl) {
+    const assetProbe = await fetch(candidateUrl, { method: "HEAD", cache: "no-store" });
     if (!assetProbe.ok) {
       throw new Error("Robot Nano Hand body asset not found");
     }
     const { GLTFLoader } = await import("three/addons/loaders/GLTFLoader.js");
     const loader = new GLTFLoader();
     const gltf = await new Promise((resolve, reject) => {
-      loader.load(assetUrl, resolve, undefined, reject);
+      loader.load(candidateUrl, resolve, undefined, reject);
     });
     const object = gltf.scene || gltf.scenes?.[0];
     if (!object) throw new Error("Robot Nano Hand GLB loaded without a scene");
@@ -255,9 +256,14 @@ export async function loadRobotNanoHandModel(config = {}) {
       side: THREE.DoubleSide,
     });
     object.userData.modelLoadStatus = "glb_loaded";
-    object.userData.assetUrl = assetUrl;
+    object.userData.assetUrl = candidateUrl;
     object.userData.sourceRepository = sceneConfig.source_repository_url || "";
     object.userData.sourceLicense = sceneConfig.source_license || "MIT";
+    return object;
+  }
+
+  try {
+    const object = await loadAsset(assetUrl);
     return {
       object,
       status: "glb_loaded",
@@ -265,6 +271,25 @@ export async function loadRobotNanoHandModel(config = {}) {
       message: "Robot Nano Hand body loaded",
     };
   } catch (error) {
+    if (fallbackAssetUrl && fallbackAssetUrl !== assetUrl) {
+      try {
+        const object = await loadAsset(fallbackAssetUrl);
+        object.userData.modelLoadStatus = "glb_fallback_loaded";
+        return {
+          object,
+          status: "glb_fallback_loaded",
+          assetUrl: fallbackAssetUrl,
+          message: `Sensorized hand unavailable; loaded original hand body: ${error?.message || String(error)}`,
+        };
+      } catch (fallbackError) {
+        return {
+          object: null,
+          status: "whole_hand_asset_unavailable",
+          assetUrl,
+          message: `${error?.message || String(error)}; ${fallbackError?.message || String(fallbackError)}`,
+        };
+      }
+    }
     return {
       object: null,
       status: "whole_hand_asset_unavailable",
