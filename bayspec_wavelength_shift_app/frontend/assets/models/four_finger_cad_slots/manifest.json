@@ -1,0 +1,133 @@
+{
+  "status": "provisional_cad_trial",
+  "workflow": "SolidWorks fitted fingertip tangent-plane cut followed by an enlarged equal-depth capsule recess",
+  "coordinate_system": "source finger STL local millimetres before SolidWorks export translation",
+  "slot_depth_mm": 0.8,
+  "flat_margin_mm": 0.6,
+  "fingers": {
+    "index": {
+      "stl": "index_local_flat_slot.stl",
+      "source_component_id": 5,
+      "target_hand_component": {
+        "triangle_count": 3058,
+        "center_model": [78.74, 59.50, -31.95],
+        "extent_model": [18.68, 30.01, 19.63]
+      },
+      "solidworks_export_translation_mm": [80.340252, 6.149067, 0.0],
+      "local_fingertip_center_mm": [-28.0, 46.09, 7.732],
+      "local_slot_center_mm": [-28.0, 52.9, 12.299155952],
+      "slot_length_mm": 13.75,
+      "slot_width_mm": 12.25,
+      "flat_plane_z_mm": 12.299155952,
+      "slot_floor_z_mm": 11.487721382,
+      "plane_slope_x_dz_dx": -0.000006421313,
+      "plane_slope_y_dz_dy": -0.169678279849,
+      "local_outward_normal": [0.000006330825, 0.167287208415, 0.985908205596],
+      "local_longitudinal_axis": [0.0, 0.985908205615, -0.167287208418],
+      "registration": {
+        "scale": 0.9050728679534478,
+        "rotation": [
+          [-0.9473630329007026, 0.1392050316800448, -0.28831448636539225],
+          [0.24793419018532917, 0.888741737859756, -0.38557328839426525],
+          [0.20256337583661874, -0.43676089859439127, -0.8764747550435739]
+        ],
+        "translation": [51.648716884048525, 31.52543564233716, -3.05980945696853],
+        "trimmed_rmse_mm": 0.33604719814702416,
+        "median_distance_mm": 0.30000687822215544
+      }
+    },
+    "middle": {
+      "stl": "middle_local_flat_slot.stl",
+      "source_component_id": 3,
+      "target_hand_component": {
+        "triangle_count": 3120,
+        "center_model": [54.74, 80.37, -32.16],
+        "extent_model": [19.04, 30.54, 24.88]
+      },
+      "solidworks_export_translation_mm": [83.117262, 6.291635, 0.0],
+      "local_fingertip_center_mm": [-28.25, 46.374, 8.118],
+      "local_slot_center_mm": [-28.25, 53.5, 13.110246031],
+      "slot_length_mm": 14.0,
+      "slot_width_mm": 12.75,
+      "flat_plane_z_mm": 13.110246031,
+      "slot_floor_z_mm": 12.299184999,
+      "plane_slope_x_dz_dx": 0.000031551268,
+      "plane_slope_y_dz_dy": -0.166864452239,
+      "local_outward_normal": [-0.000031120981, 0.164588799753, 0.986362269162],
+      "local_longitudinal_axis": [0.0, 0.98636226964, -0.164588799833],
+      "registration": {
+        "scale": 0.9538436529799148,
+        "rotation": [
+          [-0.9741367225224989, 0.03394724031285877, -0.22339478666312992],
+          [0.17534877637036522, 0.7371218061063123, -0.652613399791932],
+          [0.1425147447057323, -0.6749066808364762, -0.7240100273502779]
+        ],
+        "translation": [29.50115373662993, 57.46971569985435, 6.873991806065881],
+        "trimmed_rmse_mm": 0.3422160923941693,
+        "median_distance_mm": 0.28827842338150456
+      }
+    },
+    "ring": {
+      "stl": "ring_local_flat_slot.stl",
+      "source_component_id": 4,
+      "target_hand_component": {
+        "triangle_count": 3088,
+        "center_model": [23.62, 96.64, -10.29],
+        "extent_model": [19.48, 34.0, 19.97]
+      },
+      "solidworks_export_translation_mm": [83.117262, 6.291635, 1.0],
+      "local_fingertip_center_mm": [-28.25, 46.374, 8.118],
+      "local_slot_center_mm": [-28.25, 53.5, 13.110246031],
+      "slot_length_mm": 14.0,
+      "slot_width_mm": 12.75,
+      "flat_plane_z_mm": 13.110246031,
+      "slot_floor_z_mm": 12.299184999,
+      "plane_slope_x_dz_dx": 0.000031551268,
+      "plane_slope_y_dz_dy": -0.166864452239,
+      "local_outward_normal": [-0.000031120981, 0.164588799753, 0.986362269162],
+      "local_longitudinal_axis": [0.0, 0.98636226964, -0.164588799833],
+      "registration": {
+        "scale": 0.9972496626337246,
+        "rotation": [
+          [-0.9974743840263692, -0.0039874551493581075, -0.07091511413406439],
+          [0.018508347500689405, 0.9493372224322341, -0.3137136898151651],
+          [0.06857327674837511, -0.31423389108446537, -0.946865759973349]
+        ],
+        "translation": [-3.6152469168722874, 55.5672981322536, 12.77866742733343],
+        "trimmed_rmse_mm": 0.35325048678684734,
+        "median_distance_mm": 0.2737509015348797
+      }
+    },
+    "little": {
+      "stl": "little_local_flat_slot.stl",
+      "source_component_id": 2,
+      "target_hand_component": {
+        "triangle_count": 3120,
+        "center_model": [-8.95, 87.50, -15.75],
+        "extent_model": [19.12, 32.89, 19.97]
+      },
+      "solidworks_export_translation_mm": [76.066225, 6.145152, 0.0],
+      "local_fingertip_center_mm": [-27.5, 45.522, 6.959],
+      "local_slot_center_mm": [-27.5, 51.6, 10.983746849],
+      "slot_length_mm": 13.25,
+      "slot_width_mm": 10.75,
+      "flat_plane_z_mm": 10.983746849,
+      "slot_floor_z_mm": 10.174999479,
+      "plane_slope_x_dz_dx": -0.000055637792,
+      "plane_slope_y_dz_dy": -0.148283437367,
+      "local_outward_normal": [0.000055036017, 0.146679611407, 0.989184051918],
+      "local_longitudinal_axis": [0.0, 0.989184053416, -0.14667961163],
+      "registration": {
+        "scale": 1.0963773746680232,
+        "rotation": [
+          [-0.9939613217463348, -0.10209671136924751, 0.04021383343905604],
+          [-0.10971869761034822, 0.9301911629159081, -0.350294458745553],
+          [-0.001642640243190644, -0.35259135264599933, -0.9357759559703893]
+        ],
+        "translation": [-34.91339166914812, 40.72100766648126, 7.867453497172477],
+        "trimmed_rmse_mm": 0.3844067708968199,
+        "median_distance_mm": 0.3401454746360242
+      }
+    }
+  }
+}

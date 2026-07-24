@@ -42,15 +42,16 @@ whole_hand_scene:
     - 0.0
     - 0.0
     - 1.0
-  sensor_local_lift: [-0.48, 0.0, 0.0]
+  sensor_local_lift: [0.22, 0.0, 0.0]
   camera:
     position: [4.7, 2.2, -8.8]
     target: [0.0, 0.0, 0.0]
-  note: "Official MIT-licensed hand assembly with the original thumb tip removed and the existing TOUCH thumb sensor fitted in its place. Four additional fingertip recesses are visualization geometry for the synchronized prototype."
+  note: "Official MIT-licensed hand assembly with the existing modified TOUCH thumb preserved. The four non-thumb fingertip components use provisional enlarged SolidWorks seats fitted to each fingertip surface with equal-depth sensor recesses."
 
 finger_sensor_array:
   enabled: true
-  geometry_status: five_finger_sensorized_prototype
+  geometry_status: solidworks_tilted_flush_max_area_recesses_integrated
+  manufacturing_status: provisional_trial_dimensions
   data_status: synchronized_demo_only
   default_selected_finger: thumb
   demo_sync_mode: synchronized_with_thumb
@@ -58,7 +59,7 @@ finger_sensor_array:
   array_scope_mode: selected_finger
   source_asset_url: /static/assets/models/robot_nano_hand_sensorized.glb
   original_asset_url: /static/assets/models/robot_nano_hand_body.glb
-  note: "All five fingertip surfaces share the thumb demo response for now. This does not claim five independent measured spectra or calibrated force."
+  note: "The four non-thumb sensors follow the actual provisional CAD slot centers, axes, and depths. All five surfaces still share synchronized display data and do not claim five independent measured spectra or calibrated force."
   fingers:
     thumb:
       label: Thumb
@@ -68,50 +69,54 @@ finger_sensor_array:
       label: Index
       enabled: true
       mesh_component_id: 22
-      center_model: [79.087, 62.010, -39.369]
-      longitudinal_axis_model: [0.0, 1.0, 0.0]
-      outward_normal_model: [-0.274, -0.275, -0.922]
-      slot_length_mm: 15.0
-      slot_width_mm: 9.0
-      slot_depth_tolerance_mm: 2.2
-      sensor_thickness_scale: 1.35
-      surface_offset_mm: 0.08
+      center_model: [79.112326, 63.501709, -38.861167]
+      longitudinal_axis_model: [0.185475, 0.940719, -0.283983]
+      outward_normal_model: [-0.260970, -0.231463, -0.937187]
+      slot_length_mm: 12.444752
+      slot_width_mm: 11.087143
+      slot_depth_mm: 0.724058
+      sensor_thickness_scale: 1.508455
+      surface_offset_mm: 0.04
+      cad_slot_source: four_finger_cad_slots/index_local_flat_slot.stl
     middle:
       label: Middle
       enabled: true
       mesh_component_id: 16
-      center_model: [55.573, 82.611, -41.918]
-      longitudinal_axis_model: [-0.392, 0.920, 0.0]
-      outward_normal_model: [-0.217, -0.559, -0.800]
-      slot_length_mm: 15.0
-      slot_width_mm: 9.0
-      slot_depth_tolerance_mm: 2.4
-      sensor_thickness_scale: 1.35
-      surface_offset_mm: 0.08
+      center_model: [54.689092, 82.199535, -40.460975]
+      longitudinal_axis_model: [0.070253, 0.834482, -0.546539]
+      outward_normal_model: [-0.214731, -0.522397, -0.825223]
+      slot_length_mm: 13.353811
+      slot_width_mm: 12.161507
+      slot_depth_mm: 0.763075
+      sensor_thickness_scale: 1.589739
+      surface_offset_mm: 0.04
+      cad_slot_source: four_finger_cad_slots/middle_local_flat_slot.stl
     ring:
       label: Ring
       enabled: true
       mesh_component_id: 10
-      center_model: [23.129, 101.826, -19.171]
-      longitudinal_axis_model: [-0.076, 0.997, 0.0]
-      outward_normal_model: [-0.072, -0.196, -0.978]
-      slot_length_mm: 15.0
-      slot_width_mm: 9.0
-      slot_depth_tolerance_mm: 2.2
-      sensor_thickness_scale: 1.35
-      surface_offset_mm: 0.08
+      center_model: [23.346004, 101.594176, -18.297977]
+      longitudinal_axis_model: [0.007739, 0.988024, -0.154105]
+      outward_normal_model: [-0.070573, -0.153186, -0.985674]
+      slot_length_mm: 13.961495
+      slot_width_mm: 12.714933
+      slot_depth_mm: 0.797800
+      sensor_thickness_scale: 1.662083
+      surface_offset_mm: 0.04
+      cad_slot_source: four_finger_cad_slots/ring_local_flat_slot.stl
     little:
       label: Little
       enabled: true
       mesh_component_id: 4
-      center_model: [-9.320, 92.498, -24.449]
-      longitudinal_axis_model: [-0.087, 0.996, 0.0]
-      outward_normal_model: [0.027, -0.241, -0.970]
-      slot_length_mm: 15.0
-      slot_width_mm: 9.0
-      slot_depth_tolerance_mm: 2.4
-      sensor_thickness_scale: 1.35
-      surface_offset_mm: 0.08
+      center_model: [-10.236739, 92.434478, -23.299121]
+      longitudinal_axis_model: [-0.106891, 0.971511, -0.211518]
+      outward_normal_model: [0.024749, -0.210072, -0.977373]
+      slot_length_mm: 14.527000
+      slot_width_mm: 11.786057
+      slot_depth_mm: 0.877102
+      sensor_thickness_scale: 1.827296
+      surface_offset_mm: 0.04
+      cad_slot_source: four_finger_cad_slots/little_local_flat_slot.stl
 
 thumb_model:
   visible: true

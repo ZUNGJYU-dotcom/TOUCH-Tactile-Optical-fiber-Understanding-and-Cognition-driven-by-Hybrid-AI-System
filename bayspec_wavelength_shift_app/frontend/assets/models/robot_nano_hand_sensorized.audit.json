@@ -1,115 +1,228 @@
 {
   "source_triangle_count": 305198,
-  "output_triangle_count": 303586,
-  "removed_triangle_count": 1612,
+  "output_triangle_count": 308676,
+  "removed_triangle_count": 12386,
+  "inserted_triangle_count": 15864,
+  "source_vertex_count": 152312,
+  "output_vertex_count": 160220,
   "slots": {
     "index": {
-      "removed_triangle_count": 391,
-      "center_model": [
-        79.087,
-        62.01,
-        -39.369
+      "replacement_method": "closed_solidworks_cad_component",
+      "hand_component_id": 22,
+      "hand_component_match_cost": 0.007403204939777932,
+      "removed_triangle_count": 3058,
+      "inserted_triangle_count": 3950,
+      "inserted_vertex_count": 1969,
+      "trial_stl_component_id": 2,
+      "target_component_center_model": [
+        78.735275,
+        59.501141,
+        -31.949525
+      ],
+      "target_component_extent_model": [
+        18.67601,
+        30.014259,
+        19.62763
+      ],
+      "registration_scale": 0.9050728679534478,
+      "registration_trimmed_rmse_mm": 0.33604719814702416,
+      "slot_center_model": [
+        79.112326,
+        63.501709,
+        -38.861167
       ],
       "longitudinal_axis_model": [
-        -0.07830769,
-        0.96147507,
-        -0.26350253
-      ],
-      "transverse_axis_model": [
-        0.95856705,
-        0.0,
-        -0.284867
+        0.18547471,
+        0.94071925,
+        -0.28398314
       ],
       "outward_normal_model": [
-        -0.27389252,
-        -0.27489213,
-        -0.92163833
+        -0.26097039,
+        -0.23146317,
+        -0.93718688
       ],
-      "carved_length_mm": 14.4,
-      "carved_width_mm": 8.64,
-      "depth_tolerance_mm": 2.2
+      "slot_length_model_mm": 12.444751934359907,
+      "slot_width_model_mm": 11.087142632429735,
+      "slot_depth_model_mm": 0.7240582943627583,
+      "flat_plane_local_z_mm": 12.299155952,
+      "slot_floor_local_z_mm": 11.487721382,
+      "local_longitudinal_axis": [
+        0.0,
+        0.98590821,
+        -0.16728721
+      ],
+      "local_outward_normal": [
+        6.33e-06,
+        0.16728721,
+        0.98590821
+      ],
+      "plane_slope_x_dz_dx": -6.421313e-06,
+      "plane_slope_y_dz_dy": -0.169678279849
     },
     "middle": {
-      "removed_triangle_count": 429,
-      "center_model": [
-        55.573,
-        82.611,
-        -41.918
+      "replacement_method": "closed_solidworks_cad_component",
+      "hand_component_id": 16,
+      "hand_component_match_cost": 0.006752274883183716,
+      "removed_triangle_count": 3120,
+      "inserted_triangle_count": 3964,
+      "inserted_vertex_count": 1976,
+      "trial_stl_component_id": 2,
+      "target_component_center_model": [
+        54.738522,
+        80.366146,
+        -32.157041
+      ],
+      "target_component_extent_model": [
+        19.03788,
+        30.542412,
+        24.882681
+      ],
+      "registration_scale": 0.9538436529799148,
+      "registration_trimmed_rmse_mm": 0.3422160923941693,
+      "slot_center_model": [
+        54.689092,
+        82.199535,
+        -40.460975
       ],
       "longitudinal_axis_model": [
-        -0.53718276,
-        0.75284542,
-        -0.38033992
-      ],
-      "transverse_axis_model": [
-        0.81506161,
-        0.34728712,
-        -0.46375234
+        0.07025256,
+        0.83448199,
+        -0.54653854
       ],
       "outward_normal_model": [
-        -0.21704667,
-        -0.55912022,
-        -0.80017206
+        -0.21473054,
+        -0.5223967,
+        -0.82522269
       ],
-      "carved_length_mm": 14.4,
-      "carved_width_mm": 8.64,
-      "depth_tolerance_mm": 2.4
+      "slot_length_model_mm": 13.353811141718808,
+      "slot_width_model_mm": 12.161506575493913,
+      "slot_depth_model_mm": 0.7630749223839319,
+      "flat_plane_local_z_mm": 13.110246031,
+      "slot_floor_local_z_mm": 12.299184999,
+      "local_longitudinal_axis": [
+        0.0,
+        0.98636227,
+        -0.1645888
+      ],
+      "local_outward_normal": [
+        -3.112e-05,
+        0.1645888,
+        0.98636227
+      ],
+      "plane_slope_x_dz_dx": 3.1551268e-05,
+      "plane_slope_y_dz_dy": -0.166864452239
     },
     "ring": {
-      "removed_triangle_count": 376,
-      "center_model": [
-        23.129,
-        101.826,
-        -19.171
+      "replacement_method": "closed_solidworks_cad_component",
+      "hand_component_id": 10,
+      "hand_component_match_cost": 0.007362608431951308,
+      "removed_triangle_count": 3088,
+      "inserted_triangle_count": 3964,
+      "inserted_vertex_count": 1976,
+      "trial_stl_component_id": 9,
+      "target_component_center_model": [
+        23.622334,
+        96.637417,
+        -10.28678
+      ],
+      "target_component_extent_model": [
+        19.48313,
+        34.00457,
+        19.973498
+      ],
+      "registration_scale": 0.9972496626337246,
+      "registration_trimmed_rmse_mm": 0.35325048678684734,
+      "slot_center_model": [
+        23.346004,
+        101.594176,
+        -18.297977
       ],
       "longitudinal_axis_model": [
-        -0.09134731,
-        0.97767838,
-        -0.18921059
-      ],
-      "transverse_axis_model": [
-        0.99321302,
-        0.07571132,
-        -0.08829321
+        0.00773876,
+        0.98802418,
+        -0.15410495
       ],
       "outward_normal_model": [
-        -0.07199698,
-        -0.19599177,
-        -0.97795893
+        -0.07057324,
+        -0.15318565,
+        -0.98567417
       ],
-      "carved_length_mm": 14.4,
-      "carved_width_mm": 8.64,
-      "depth_tolerance_mm": 2.2
+      "slot_length_model_mm": 13.961495276872144,
+      "slot_width_model_mm": 12.714933198579988,
+      "slot_depth_model_mm": 0.7977997301069797,
+      "flat_plane_local_z_mm": 13.110246031,
+      "slot_floor_local_z_mm": 12.299184999,
+      "local_longitudinal_axis": [
+        0.0,
+        0.98636227,
+        -0.1645888
+      ],
+      "local_outward_normal": [
+        -3.112e-05,
+        0.1645888,
+        0.98636227
+      ],
+      "plane_slope_x_dz_dx": 3.1551268e-05,
+      "plane_slope_y_dz_dy": -0.166864452239
     },
     "little": {
-      "removed_triangle_count": 416,
-      "center_model": [
-        -9.32,
-        92.498,
-        -24.449
+      "replacement_method": "closed_solidworks_cad_component",
+      "hand_component_id": 4,
+      "hand_component_match_cost": 0.0060231314237800815,
+      "removed_triangle_count": 3120,
+      "inserted_triangle_count": 3986,
+      "inserted_vertex_count": 1987,
+      "trial_stl_component_id": 3,
+      "target_component_center_model": [
+        -8.950665,
+        87.495937,
+        -15.750305
+      ],
+      "target_component_extent_model": [
+        19.121429,
+        32.893929,
+        19.96777
+      ],
+      "registration_scale": 1.0963773746680232,
+      "registration_trimmed_rmse_mm": 0.3844067708968199,
+      "slot_center_model": [
+        -10.236739,
+        92.434478,
+        -23.299121
       ],
       "longitudinal_axis_model": [
-        -0.0829456,
-        0.96660762,
-        -0.24246595
-      ],
-      "transverse_axis_model": [
-        0.99618814,
-        0.08701643,
-        0.0061094
+        -0.10689099,
+        0.97151132,
+        -0.21151849
       ],
       "outward_normal_model": [
-        0.02700392,
-        -0.24103495,
-        -0.97014068
+        0.02474867,
+        -0.21007165,
+        -0.9773727
       ],
-      "carved_length_mm": 14.4,
-      "carved_width_mm": 8.64,
-      "depth_tolerance_mm": 2.4
+      "slot_length_model_mm": 14.527000214351308,
+      "slot_width_model_mm": 11.78605677768125,
+      "slot_depth_model_mm": 0.8771018997344187,
+      "flat_plane_local_z_mm": 10.983746849,
+      "slot_floor_local_z_mm": 10.174999479,
+      "local_longitudinal_axis": [
+        0.0,
+        0.98918405,
+        -0.14667961
+      ],
+      "local_outward_normal": [
+        5.504e-05,
+        0.14667961,
+        0.98918405
+      ],
+      "plane_slope_x_dz_dx": -5.5637792e-05,
+      "plane_slope_y_dz_dy": -0.148283437367
     }
   },
-  "source": "E:\\重要文档\\实验\\柔性传感\\光纤\\Micro-FBG\\普通FBG\\算法\\touch_static_spectral_twin_edition\\bayspec_wavelength_shift_app\\frontend\\assets\\models\\robot_nano_hand_body.glb",
-  "output": "E:\\重要文档\\实验\\柔性传感\\光纤\\Micro-FBG\\普通FBG\\算法\\touch_static_spectral_twin_edition\\bayspec_wavelength_shift_app\\frontend\\assets\\models\\robot_nano_hand_sensorized.glb",
-  "config": "E:\\重要文档\\实验\\柔性传感\\光纤\\Micro-FBG\\普通FBG\\算法\\touch_static_spectral_twin_edition\\config\\thumb_holder_scene.yaml",
-  "geometry_status": "four_fingertip_recesses_carved"
+  "geometry_status": "solidworks_tilted_flush_max_area_recesses_integrated",
+  "geometry_semantics": "Four closed fingertip CAD components with enlarged fitted tangent seats and equal-depth 0.8 mm sensor pockets; existing modified thumb preserved.",
+  "manufacturing_status": "provisional_trial_dimensions",
+  "source": "bayspec_wavelength_shift_app/frontend/assets/models/robot_nano_hand_body.glb",
+  "output": "bayspec_wavelength_shift_app/frontend/assets/models/robot_nano_hand_sensorized.glb",
+  "manifest": "bayspec_wavelength_shift_app/frontend/assets/models/four_finger_cad_slots/manifest.json"
 }

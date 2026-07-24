@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import unittest
 
@@ -20,6 +21,15 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
             (REPO_ROOT / "config" / "thumb_holder_scene.yaml").read_text(
                 encoding="utf-8"
             )
+        )
+        cls.hand_audit = json.loads(
+            (
+                APP_ROOT
+                / "frontend"
+                / "assets"
+                / "models"
+                / "robot_nano_hand_sensorized.audit.json"
+            ).read_text(encoding="utf-8")
         )
 
     def test_official_model_asset_and_mit_provenance_are_vendored(self) -> None:
@@ -70,11 +80,19 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
         audit_text = audit.read_text(encoding="utf-8")
         for finger_id in ("index", "middle", "ring", "little"):
             self.assertIn(f'"{finger_id}"', audit_text)
-        self.assertIn('"geometry_status": "four_fingertip_recesses_carved"', audit_text)
+        self.assertIn(
+            '"geometry_status": "solidworks_tilted_flush_max_area_recesses_integrated"',
+            audit_text,
+        )
+        self.assertIn('"replacement_method": "closed_solidworks_cad_component"', audit_text)
 
     def test_five_finger_sensor_array_is_explicit_and_synchronized(self) -> None:
         sensor_array = self.config["finger_sensor_array"]
         self.assertTrue(sensor_array["enabled"])
+        self.assertEqual(
+            sensor_array["geometry_status"],
+            "solidworks_tilted_flush_max_area_recesses_integrated",
+        )
         self.assertEqual(sensor_array["demo_sync_mode"], "synchronized_with_thumb")
         self.assertEqual(sensor_array["data_status"], "synchronized_demo_only")
         self.assertEqual(
@@ -88,13 +106,64 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
             self.assertEqual(len(finger["longitudinal_axis_model"]), 3)
             self.assertEqual(len(finger["outward_normal_model"]), 3)
             self.assertGreater(finger["slot_length_mm"], finger["slot_width_mm"])
+            self.assertGreaterEqual(finger["slot_length_mm"], 12.4)
+            self.assertGreaterEqual(finger["slot_width_mm"], 11.0)
+            self.assertGreater(finger["slot_depth_mm"], 0)
+            self.assertIn("cad_slot_source", finger)
 
-    def test_thumb_dynamic_surface_stays_above_the_slot_body(self) -> None:
+    def test_four_finger_solidworks_slot_assets_are_vendored(self) -> None:
+        slot_dir = (
+            APP_ROOT
+            / "frontend"
+            / "assets"
+            / "models"
+            / "four_finger_cad_slots"
+        )
+        self.assertTrue((slot_dir / "manifest.json").is_file())
+        for finger_id in ("index", "middle", "ring", "little"):
+            slot_path = slot_dir / f"{finger_id}_local_flat_slot.stl"
+            self.assertTrue(slot_path.is_file())
+            self.assertGreater(slot_path.stat().st_size, 100_000)
+
+    def test_runtime_sensor_layout_matches_integrated_cad_audit(self) -> None:
+        fingers = self.config["finger_sensor_array"]["fingers"]
+        for finger_id in ("index", "middle", "ring", "little"):
+            runtime = fingers[finger_id]
+            cad = self.hand_audit["slots"][finger_id]
+            for runtime_key, audit_key in (
+                ("center_model", "slot_center_model"),
+                ("longitudinal_axis_model", "longitudinal_axis_model"),
+                ("outward_normal_model", "outward_normal_model"),
+            ):
+                for actual, expected in zip(runtime[runtime_key], cad[audit_key]):
+                    self.assertAlmostEqual(actual, expected, places=5)
+            self.assertAlmostEqual(
+                runtime["slot_length_mm"],
+                cad["slot_length_model_mm"],
+                places=5,
+            )
+            self.assertAlmostEqual(
+                runtime["slot_width_mm"],
+                cad["slot_width_model_mm"],
+                places=5,
+            )
+            self.assertAlmostEqual(
+                runtime["slot_depth_mm"],
+                cad["slot_depth_model_mm"],
+                places=5,
+            )
+            self.assertAlmostEqual(
+                runtime["sensor_thickness_scale"] * 0.48,
+                runtime["slot_depth_mm"],
+                places=5,
+            )
+
+    def test_thumb_dynamic_surface_keeps_verified_slot_pose_and_inward_depth(self) -> None:
         whole = self.config["whole_hand_scene"]
         slot = self.config["sensor_slot_transform"]
 
-        # The thumb surface normal maps to local -X in whole-hand mode.
-        self.assertLess(whole["sensor_local_lift"][0], 0)
+        # The verified thumb slot is offset toward local +X in whole-hand mode.
+        self.assertGreater(whole["sensor_local_lift"][0], 0)
         # The elastomer thickness must extend into the recess, not over the heat surface.
         self.assertLess(slot["surface_scene_scale"][1], 0)
 
