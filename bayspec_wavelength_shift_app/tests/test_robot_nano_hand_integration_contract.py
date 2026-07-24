@@ -17,6 +17,7 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         cls.html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        cls.css = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
         cls.config = yaml.safe_load(
             (REPO_ROOT / "config" / "thumb_holder_scene.yaml").read_text(
                 encoding="utf-8"
@@ -176,6 +177,41 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
         self.assertIn("fingerFocusSelect?.addEventListener", self.app_js)
         self.assertIn('setText("spectrumOverviewTitle"', self.app_js)
         self.assertIn('setText("footprintTitle"', self.app_js)
+
+    def test_fingertip_closeup_navigation_and_camera_transition_contract(self) -> None:
+        for element_id in ("previousFingerButton", "nextFingerButton"):
+            self.assertIn(f'id="{element_id}"', self.html)
+        self.assertIn("finger-closeup-nav", self.css)
+        self.assertIn("backdrop-filter: blur(14px)", self.css)
+        self.assertIn("function fingerCloseupPose", self.app_js)
+        self.assertIn("FINGER_CLOSEUP_DISTANCE_SCALE", self.app_js)
+        self.assertIn("sensorBackNormal", self.app_js)
+        self.assertIn('"sensor-back"', self.app_js)
+        self.assertIn("closeupViewSide", self.app_js)
+        self.assertIn("function beginCameraTransition", self.app_js)
+        self.assertIn("function updateCameraTransition", self.app_js)
+        self.assertIn("function settleOrbitControlsDamping", self.app_js)
+        self.assertIn("const cameraTransitionUpdated = updateCameraTransition(timestamp)", self.app_js)
+        self.assertIn("if (!cameraTransitionUpdated) controls?.update()", self.app_js)
+        self.assertIn("function fingerIdFromPointerEvent", self.app_js)
+        self.assertIn("function fingerIdFromProjectedRegion", self.app_js)
+        self.assertIn("function projectedFingerHitRegions", self.app_js)
+        self.assertIn("fingerHitRegions", self.app_js)
+        self.assertIn("function ensureFingerInteractionProxy", self.app_js)
+        self.assertIn("isFingerInteractionProxy", self.app_js)
+        self.assertIn("function visibleObjectBounds", self.app_js)
+        self.assertIn("FINGER_CLICK_MAX_MOVEMENT_PX", self.app_js)
+        self.assertIn(
+            'setSelectedFinger(fingerFocusSelect.value, { focusCamera: true })',
+            self.app_js,
+        )
+        self.assertIn("cycleFingerCloseup(-1)", self.app_js)
+        self.assertIn("cycleFingerCloseup(1)", self.app_js)
+        self.assertIn('const FINGER_NAVIGATION_ORDER = [...FINGER_ORDER, "all"]', self.app_js)
+        self.assertIn("FINGER_OVERVIEW_DURATION_MS", self.app_js)
+        self.assertIn("navigationVisible: keepFingerNavigation && wholeHandMode", self.app_js)
+        self.assertIn("controls.enabled = false", self.app_js)
+        self.assertIn("controls.enabled = true", self.app_js)
 
     def test_three_geometry_modes_remain_available(self) -> None:
         for element_id in (

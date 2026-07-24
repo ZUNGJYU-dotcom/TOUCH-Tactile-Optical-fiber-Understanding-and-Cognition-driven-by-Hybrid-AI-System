@@ -25,7 +25,11 @@ sensor recess and a fitted copy of the same tactile response unit. A five-finger
 selector scopes the spectrum title, 9-FBG fingerprint, response map, and status
 labels to Thumb, Index, Middle, Ring, Little, or All. Simulated response remains
 synchronized across all five fingertips while the selector changes the
-inspection scope. Geometry mode can be changed in Settings or Diagnostics.
+inspection scope. In the whole-hand view, clicking any fingertip sensor region
+or choosing a finger from the selector starts a smooth product-style inspection
+of the sensor back side. The translucent previous/next controls move between
+adjacent fingertips, while orbit rotation and zoom remain available after the
+transition. Geometry mode can be changed in Settings or Diagnostics.
 
 ## Input and Output
 

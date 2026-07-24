@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TOUCH</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/styles.css?v=five-finger-sensor-array-v2" />
+    <link rel="stylesheet" href="/static/styles.css?v=finger-region-closeup-v10" />
     <script type="importmap">
       {
         "imports": {
@@ -336,6 +336,28 @@
 
           <div class="surface-cockpit-grid">
             <div id="threeMount" class="three-mount">
+              <button
+                id="previousFingerButton"
+                class="finger-closeup-nav finger-closeup-nav-previous"
+                type="button"
+                aria-label="Previous fingertip"
+                data-tooltip="Previous fingertip"
+                title="Previous fingertip"
+                hidden
+              >
+                <i data-lucide="chevron-left" aria-hidden="true"></i>
+              </button>
+              <button
+                id="nextFingerButton"
+                class="finger-closeup-nav finger-closeup-nav-next"
+                type="button"
+                aria-label="Next fingertip"
+                data-tooltip="Next fingertip"
+                title="Next fingertip"
+                hidden
+              >
+                <i data-lucide="chevron-right" aria-hidden="true"></i>
+              </button>
               <div class="scene-caption">
                 <strong id="scenePrimaryCaption">no_contact</strong>
                 <span id="surfaceModeNote" class="explanatory-copy">Optical response level</span>
@@ -901,6 +923,6 @@
 
     </div>
     <script src="/static/vendor/lucide/lucide.min.js"></script>
-    <script type="module" src="/static/app.js?v=five-finger-sensor-array-v6"></script>
+    <script type="module" src="/static/app.js?v=finger-region-closeup-v10"></script>
   </body>
 </html>

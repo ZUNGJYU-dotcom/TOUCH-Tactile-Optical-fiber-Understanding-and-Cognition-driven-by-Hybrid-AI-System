@@ -35,6 +35,8 @@ const thumbHolderModeButton = document.getElementById("thumbHolderModeButton");
 const surfaceOnlyModeButton = document.getElementById("surfaceOnlyModeButton");
 const fingerFocusControl = document.getElementById("fingerFocusControl");
 const fingerFocusSelect = document.getElementById("fingerFocusSelect");
+const previousFingerButton = document.getElementById("previousFingerButton");
+const nextFingerButton = document.getElementById("nextFingerButton");
 const surfaceFullscreenButton = document.getElementById("surfaceFullscreenButton");
 const thumbAlignmentSaveButton = document.getElementById("thumbAlignmentSaveButton");
 const thumbAlignmentResetButton = document.getElementById("thumbAlignmentResetButton");
@@ -263,6 +265,12 @@ const ARRAY_DISPLAY_ROWS = [
 ];
 const ARRAY_DISPLAY_ORDER = ARRAY_DISPLAY_ROWS.flat();
 const FINGER_ORDER = ["thumb", "index", "middle", "ring", "little"];
+const FINGER_NAVIGATION_ORDER = [...FINGER_ORDER, "all"];
+const FINGER_CLOSEUP_DURATION_MS = 1050;
+const FINGER_OVERVIEW_DURATION_MS = 1250;
+const FINGER_CLOSEUP_FOV = 40;
+const FINGER_CLOSEUP_DISTANCE_SCALE = 4.0;
+const FINGER_CLICK_MAX_MOVEMENT_PX = 7;
 const FINGER_LABELS = {
   thumb: "Thumb",
   index: "Index",
@@ -1013,6 +1021,7 @@ const state = {
   surfaceRenderMode: "physical_proxy",
   geometryDisplayMode: "thumb_holder",
   selectedFinger: "thumb",
+  fingerCloseupActive: false,
   surfaceFullscreenActive: false,
   surfaceNativeFullscreenEntered: false,
   thumbSceneConfig: null,
@@ -1079,6 +1088,10 @@ let sensorSurfaceGroup;
 let slotOutlineHelper;
 let grooveReferenceHelper;
 const fingerSensorGroups = new Map();
+const fingerRaycaster = new THREE.Raycaster();
+const fingerPointer = new THREE.Vector2();
+let fingerPointerDown = null;
+let cameraTransition = null;
 let resizeToken = 0;
 let windowResizeSettleTimer = 0;
 let windowResizeActive = false;
@@ -3678,6 +3691,49 @@ function fingerConfig(fingerId) {
   return state.thumbSceneConfig?.finger_sensor_array?.fingers?.[fingerId] || null;
 }
 
+function ensureFingerInteractionProxy(group, fingerId) {
+  if (!group) return null;
+  let proxy = group.children.find((child) => child.userData?.isFingerInteractionProxy);
+  if (!proxy) {
+    proxy = new THREE.Mesh(
+      new THREE.BoxGeometry(10.4, 6.0, 6.8),
+      new THREE.MeshBasicMaterial({
+        color: "#ffffff",
+        transparent: true,
+        opacity: 0,
+        depthTest: false,
+        depthWrite: false,
+      })
+    );
+    proxy.name = "finger_sensor_interaction_proxy";
+    proxy.userData.isFingerInteractionProxy = true;
+    proxy.frustumCulled = false;
+    group.add(proxy);
+  }
+  proxy.userData.fingerId = fingerId;
+  return proxy;
+}
+
+function visibleObjectBounds(root) {
+  const bounds = new THREE.Box3();
+  const childBounds = new THREE.Box3();
+  root?.updateWorldMatrix(true, true);
+  root?.traverse((child) => {
+    if (
+      !child.visible ||
+      child.userData?.isFingerInteractionProxy ||
+      !child.geometry
+    ) {
+      return;
+    }
+    if (!child.geometry.boundingBox) child.geometry.computeBoundingBox();
+    if (!child.geometry.boundingBox) return;
+    childBounds.copy(child.geometry.boundingBox).applyMatrix4(child.matrixWorld);
+    bounds.union(childBounds);
+  });
+  return bounds;
+}
+
 function setupFingerSensorGroups() {
   for (const [fingerId, group] of fingerSensorGroups.entries()) {
     if (fingerId !== "thumb") group.parent?.remove(group);
@@ -3686,6 +3742,10 @@ function setupFingerSensorGroups() {
   if (!sensorSurfaceGroup) return;
   fingerSensorGroups.set("thumb", sensorSurfaceGroup);
   sensorSurfaceGroup.userData.fingerId = "thumb";
+  sensorSurfaceGroup.traverse((child) => {
+    child.userData.fingerId = "thumb";
+  });
+  ensureFingerInteractionProxy(sensorSurfaceGroup, "thumb");
 
   for (const fingerId of FINGER_ORDER.filter((item) => item !== "thumb")) {
     const config = fingerConfig(fingerId);
@@ -3694,12 +3754,14 @@ function setupFingerSensorGroups() {
     group.name = `sensor_slot_surface_group_${fingerId}`;
     group.userData.fingerId = fingerId;
     group.traverse((child) => {
+      child.userData.fingerId = fingerId;
       if (child.name === "sensor_slot_surface_outline" && child.material) {
         child.material = child.material.clone();
         child.material.depthTest = true;
         child.renderOrder = 7;
       }
     });
+    ensureFingerInteractionProxy(group, fingerId);
     fingerSensorGroups.set(fingerId, group);
     wholeHandRoot?.add(group);
   }
@@ -3734,6 +3796,7 @@ function applyFingerSensorLayout() {
     group.visible = arrayEnabled && config.enabled !== false;
     group.userData.slotCenterModel = center.toArray();
     group.userData.longitudinalAxisModel = longitudinal.toArray();
+    group.userData.outwardNormalModel = outward.toArray();
     group.userData.inwardNormalModel = inward.toArray();
     group.userData.transverseAxisModel = transverse.toArray();
     group.userData.demoSyncMode = arrayConfig.demo_sync_mode || "synchronized_with_thumb";
@@ -3788,12 +3851,234 @@ function updateFingerScopeLabels() {
   }
 }
 
-function setSelectedFinger(fingerId) {
+function setFingerCloseupNavigationVisible(
+  visible,
+  { closeup = state.selectedFinger !== "all" } = {}
+) {
+  const show = Boolean(visible && state.geometryDisplayMode === "whole_hand");
+  const closeupMode = Boolean(show && closeup);
+  if (previousFingerButton) previousFingerButton.hidden = !show;
+  if (nextFingerButton) nextFingerButton.hidden = !show;
+  if (threeMount) {
+    threeMount.dataset.cameraMode = closeupMode ? "finger-closeup" : "overview";
+    threeMount.dataset.focusedFinger = show ? state.selectedFinger : "";
+    if (!closeupMode) threeMount.dataset.closeupViewSide = "";
+  }
+}
+
+function smootherStep(value) {
+  const t = Math.max(0, Math.min(1, value));
+  return t * t * t * (t * (t * 6 - 15) + 10);
+}
+
+function settleOrbitControlsDamping() {
+  if (!controls) return;
+  const dampingEnabled = controls.enableDamping;
+  controls.enableDamping = false;
+  controls.update();
+  controls.enableDamping = dampingEnabled;
+}
+
+function cancelCameraTransition() {
+  cameraTransition = null;
+  if (controls) {
+    settleOrbitControlsDamping();
+    controls.enabled = true;
+  }
+}
+
+function beginCameraTransition(
+  pose,
+  {
+    closeup = false,
+    navigationVisible = closeup,
+    durationMs = FINGER_CLOSEUP_DURATION_MS,
+  } = {}
+) {
+  if (!camera || !controls || !pose?.position || !pose?.target) return false;
+  settleOrbitControlsDamping();
+  const startPosition = camera.position.clone();
+  const endPosition = pose.position.clone();
+  const startTarget = controls.target.clone();
+  const endTarget = pose.target.clone();
+  const startUp = camera.up.clone().normalize();
+  const endUp = (pose.up || camera.up).clone().normalize();
+  const pathLength = Math.max(0.001, startPosition.distanceTo(endPosition));
+  const lateral = new THREE.Vector3().crossVectors(
+    endPosition.clone().sub(startPosition),
+    endUp
+  );
+  if (lateral.lengthSq() < 1e-5) {
+    lateral.crossVectors(endPosition.clone().sub(startPosition), new THREE.Vector3(0, 1, 0));
+  }
+  if (lateral.lengthSq() > 1e-5) lateral.normalize();
+  const controlPoint = startPosition
+    .clone()
+    .lerp(endPosition, 0.5)
+    .addScaledVector(lateral, Math.min(0.34, pathLength * 0.07))
+    .addScaledVector(endUp, Math.min(0.20, pathLength * 0.045));
+
+  cameraTransition = {
+    active: true,
+    startedAt: performance.now(),
+    durationMs: Math.max(320, Number(durationMs) || FINGER_CLOSEUP_DURATION_MS),
+    startPosition,
+    controlPoint,
+    endPosition,
+    startTarget,
+    endTarget,
+    startUp,
+    endUp,
+    startFov: camera.fov,
+    endFov: Number(pose.fov) || camera.fov,
+    minDistance: Number(pose.minDistance) || controls.minDistance,
+    maxDistance: Number(pose.maxDistance) || controls.maxDistance,
+    closeup,
+  };
+  controls.enabled = false;
+  state.fingerCloseupActive = closeup;
+  setFingerCloseupNavigationVisible(navigationVisible, { closeup });
+  if (threeMount) {
+    threeMount.dataset.closeupViewSide = closeup ? pose.viewSide || "" : "";
+  }
+  return true;
+}
+
+function updateCameraTransition(timestamp) {
+  if (!cameraTransition?.active || !camera || !controls) return false;
+  const elapsed = Math.max(0, timestamp - cameraTransition.startedAt);
+  const progress = Math.min(1, elapsed / cameraTransition.durationMs);
+  const eased = smootherStep(progress);
+  const inverse = 1 - eased;
+
+  camera.position
+    .copy(cameraTransition.startPosition)
+    .multiplyScalar(inverse * inverse)
+    .addScaledVector(cameraTransition.controlPoint, 2 * inverse * eased)
+    .addScaledVector(cameraTransition.endPosition, eased * eased);
+  controls.target.lerpVectors(cameraTransition.startTarget, cameraTransition.endTarget, eased);
+  camera.up
+    .lerpVectors(cameraTransition.startUp, cameraTransition.endUp, eased)
+    .normalize();
+  camera.fov =
+    cameraTransition.startFov +
+    (cameraTransition.endFov - cameraTransition.startFov) * eased;
+  camera.updateProjectionMatrix();
+  camera.lookAt(controls.target);
+
+  if (progress >= 1) {
+    controls.minDistance = cameraTransition.minDistance;
+    controls.maxDistance = cameraTransition.maxDistance;
+    settleOrbitControlsDamping();
+    controls.enabled = true;
+    cameraTransition = null;
+  }
+  return true;
+}
+
+function fingerCloseupPose(fingerId) {
+  const group = fingerSensorGroups.get(fingerId);
+  if (!group || !group.visible || !wholeHandRoot?.visible) return null;
+  const bounds = visibleObjectBounds(group);
+  if (bounds.isEmpty()) return null;
+
+  const center = bounds.getCenter(new THREE.Vector3());
+  const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+  const origin = group.localToWorld(new THREE.Vector3(0, 0, 0));
+  const sensorFrontNormal = group
+    .localToWorld(new THREE.Vector3(0, -1, 0))
+    .sub(origin)
+    .normalize();
+  const longitudinal = group
+    .localToWorld(new THREE.Vector3(1, 0, 0))
+    .sub(origin)
+    .normalize();
+
+  const handBounds = visibleObjectBounds(wholeHandRoot);
+  if (!handBounds.isEmpty()) {
+    const handCenter = handBounds.getCenter(new THREE.Vector3());
+    const radial = center.clone().sub(handCenter);
+    if (
+      radial.lengthSq() > 1e-5 &&
+      sensorFrontNormal.dot(radial) < 0
+    ) {
+      sensorFrontNormal.negate();
+    }
+  }
+  if (longitudinal.dot(camera.up) < 0) longitudinal.negate();
+
+  const sensorBackNormal = sensorFrontNormal.clone().negate();
+  const transverse = new THREE.Vector3().crossVectors(
+    longitudinal,
+    sensorBackNormal
+  );
+  if (transverse.lengthSq() < 1e-5) transverse.set(1, 0, 0);
+  transverse.normalize();
+  const radius = Math.max(0.22, sphere.radius);
+  const distance = Math.max(
+    1.18,
+    Math.min(3.6, radius * FINGER_CLOSEUP_DISTANCE_SCALE)
+  );
+  const position = center
+    .clone()
+    .addScaledVector(sensorBackNormal, distance)
+    .addScaledVector(transverse, distance * 0.12)
+    .addScaledVector(longitudinal, distance * 0.07);
+
+  return {
+    position,
+    target: center,
+    up: longitudinal,
+    fov: FINGER_CLOSEUP_FOV,
+    minDistance: Math.max(0.38, distance * 0.42),
+    maxDistance: Math.max(4.2, distance * 3.8),
+    sensorFrontNormal,
+    sensorBackNormal,
+    viewSide: "sensor-back",
+    distance,
+  };
+}
+
+function focusFingerCloseup(fingerId, { durationMs = FINGER_CLOSEUP_DURATION_MS } = {}) {
+  if (!FINGER_ORDER.includes(fingerId)) return false;
+  if (state.geometryDisplayMode !== "whole_hand") {
+    updateGeometryDisplayMode("whole_hand");
+    requestAnimationFrame(() => focusFingerCloseup(fingerId, { durationMs }));
+    return true;
+  }
+  const pose = fingerCloseupPose(fingerId);
+  if (!pose) return false;
+  return beginCameraTransition(pose, { closeup: true, durationMs });
+}
+
+function cycleFingerCloseup(direction) {
+  const currentIndex = Math.max(
+    0,
+    FINGER_NAVIGATION_ORDER.indexOf(state.selectedFinger)
+  );
+  const nextIndex =
+    (currentIndex +
+      (direction < 0 ? -1 : 1) +
+      FINGER_NAVIGATION_ORDER.length) %
+    FINGER_NAVIGATION_ORDER.length;
+  setSelectedFinger(FINGER_NAVIGATION_ORDER[nextIndex], { focusCamera: true });
+}
+
+function setSelectedFinger(fingerId, { focusCamera = false } = {}) {
   const normalized = String(fingerId || "thumb").toLowerCase();
   state.selectedFinger = [...FINGER_ORDER, "all"].includes(normalized) ? normalized : "thumb";
   updateFingerSensorFocusStyles();
   updateFingerScopeLabels();
-  state.threeNeedsRefresh = true;
+  if (focusCamera) {
+    if (state.selectedFinger === "all") {
+      applyThumbCameraConfig({
+        animated: true,
+        keepFingerNavigation: true,
+      });
+    } else {
+      focusFingerCloseup(state.selectedFinger);
+    }
+  }
 }
 
 async function loadThumbSceneConfig() {
@@ -4254,7 +4539,10 @@ function applyThumbSceneLayout() {
   state.threeNeedsRefresh = true;
 }
 
-function applyThumbCameraConfig() {
+function applyThumbCameraConfig({
+  animated = false,
+  keepFingerNavigation = false,
+} = {}) {
   if (!camera || !controls) return;
   const wholeHandMode = state.geometryDisplayMode === "whole_hand";
   const thumbMode = state.geometryDisplayMode === "thumb_holder";
@@ -4270,11 +4558,37 @@ function applyThumbCameraConfig() {
     : thumbMode
       ? vectorFromConfig(cameraConfig.target, [0, -1.0, 0])
       : [0, -0.18, 0];
-  camera.up.set(thumbMode || wholeHandMode ? 0 : -1, thumbMode || wholeHandMode ? 1 : 0, 0);
-  camera.fov = wholeHandMode ? 40 : thumbMode ? 43 : 39;
+  const pose = {
+    position: new THREE.Vector3(position[0], position[1], position[2]),
+    target: new THREE.Vector3(target[0], target[1], target[2]),
+    up: new THREE.Vector3(
+      thumbMode || wholeHandMode ? 0 : -1,
+      thumbMode || wholeHandMode ? 1 : 0,
+      0
+    ),
+    fov: wholeHandMode ? 40 : thumbMode ? 43 : 39,
+    minDistance: wholeHandMode ? 5.0 : thumbMode ? 4.0 : 7.2,
+    maxDistance: wholeHandMode ? 18.0 : thumbMode ? 13.0 : 14.0,
+  };
+  if (animated) {
+    beginCameraTransition(pose, {
+      closeup: false,
+      navigationVisible: keepFingerNavigation && wholeHandMode,
+      durationMs: wholeHandMode ? FINGER_OVERVIEW_DURATION_MS : 900,
+    });
+    return;
+  }
+  cancelCameraTransition();
+  state.fingerCloseupActive = false;
+  setFingerCloseupNavigationVisible(
+    keepFingerNavigation && wholeHandMode,
+    { closeup: false }
+  );
+  camera.up.copy(pose.up);
+  camera.fov = pose.fov;
   camera.updateProjectionMatrix();
-  controls.minDistance = wholeHandMode ? 5.0 : thumbMode ? 4.0 : 7.2;
-  controls.maxDistance = wholeHandMode ? 18.0 : thumbMode ? 13.0 : 14.0;
+  controls.minDistance = pose.minDistance;
+  controls.maxDistance = pose.maxDistance;
   camera.position.set(position[0], position[1], position[2]);
   controls.target.set(target[0], target[1], target[2]);
   camera.lookAt(controls.target);
@@ -4354,6 +4668,32 @@ function exposeThreeDebugHandle() {
     setSelectedFinger(fingerId) {
       setSelectedFinger(fingerId);
       return state.selectedFinger;
+    },
+    focusFinger(fingerId, durationMs = FINGER_CLOSEUP_DURATION_MS) {
+      const normalized = String(fingerId || "").toLowerCase();
+      if (!FINGER_ORDER.includes(normalized)) return false;
+      setSelectedFinger(normalized);
+      return focusFingerCloseup(normalized, { durationMs });
+    },
+    showWholeHandOverview(animated = true) {
+      state.selectedFinger = "all";
+      updateFingerSensorFocusStyles();
+      updateFingerScopeLabels();
+      applyThumbCameraConfig({
+        animated,
+        keepFingerNavigation: true,
+      });
+      return true;
+    },
+    getCameraTransitionState() {
+      return {
+        active: Boolean(cameraTransition?.active),
+        closeup: Boolean(state.fingerCloseupActive),
+        selectedFinger: state.selectedFinger,
+        cameraMode: threeMount?.dataset.cameraMode || "overview",
+        cameraPosition: camera?.position?.toArray?.() || null,
+        cameraTarget: controls?.target?.toArray?.() || null,
+      };
     },
     getFingerSensorStatus() {
       const sensors = {};
@@ -4623,6 +4963,123 @@ function updateRecognitionValidationMode(useTemporal, { announce = true, refresh
   if (refresh) fetchFrame({ force: true });
 }
 
+function projectedFingerHitRegions(rect) {
+  const regions = [];
+  const cameraUp = camera.up.clone().normalize();
+
+  for (const [fingerId, group] of fingerSensorGroups.entries()) {
+    if (!group.visible) continue;
+    group.updateWorldMatrix(true, false);
+    const center = group.getWorldPosition(new THREE.Vector3());
+    const worldScale = group.getWorldScale(new THREE.Vector3());
+    const worldRadius =
+      4.7 * Math.max(Math.abs(worldScale.x), Math.abs(worldScale.z), 0.1);
+    const projectedCenter = center.clone().project(camera);
+    if (projectedCenter.z < -1 || projectedCenter.z > 1) continue;
+
+    const projectedEdge = center
+      .clone()
+      .addScaledVector(cameraUp, worldRadius)
+      .project(camera);
+    const centerX = rect.left + ((projectedCenter.x + 1) * 0.5) * rect.width;
+    const centerY = rect.top + ((1 - projectedCenter.y) * 0.5) * rect.height;
+    const projectedRadius =
+      Math.abs(projectedEdge.y - projectedCenter.y) * rect.height * 0.5;
+    const hitRadius = Math.max(30, Math.min(72, projectedRadius + 12));
+    regions.push({ fingerId, centerX, centerY, hitRadius });
+  }
+
+  if (threeMount) {
+    threeMount.dataset.fingerHitRegions = JSON.stringify(
+      regions.map(({ fingerId, centerX, centerY, hitRadius }) => ({
+        fingerId,
+        centerX: Math.round(centerX * 10) / 10,
+        centerY: Math.round(centerY * 10) / 10,
+        hitRadius: Math.round(hitRadius * 10) / 10,
+      }))
+    );
+  }
+  return regions;
+}
+
+function fingerIdFromProjectedRegion(event, rect, regions = null) {
+  let nearestFinger = null;
+  let nearestScore = Number.POSITIVE_INFINITY;
+  for (const { fingerId, centerX, centerY, hitRadius } of (
+    regions || projectedFingerHitRegions(rect)
+  )) {
+    const distance = Math.hypot(event.clientX - centerX, event.clientY - centerY);
+    const score = distance / hitRadius;
+    if (score <= 1 && score < nearestScore) {
+      nearestFinger = fingerId;
+      nearestScore = score;
+    }
+  }
+  return nearestFinger;
+}
+
+function fingerIdFromPointerEvent(event) {
+  if (
+    state.geometryDisplayMode !== "whole_hand" ||
+    !renderer?.domElement ||
+    !camera
+  ) {
+    return null;
+  }
+  const rect = renderer.domElement.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  const projectedRegions = projectedFingerHitRegions(rect);
+  fingerPointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  fingerPointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  fingerRaycaster.setFromCamera(fingerPointer, camera);
+
+  const targets = [];
+  for (const group of fingerSensorGroups.values()) {
+    if (!group.visible) continue;
+    group.traverse((child) => {
+      if (
+        child.visible &&
+        child.isMesh &&
+        child.userData?.isFingerInteractionProxy
+      ) {
+        targets.push(child);
+      }
+    });
+  }
+  const hit = fingerRaycaster.intersectObjects(targets, false)[0];
+  return (
+    hit?.object?.userData?.fingerId ||
+    fingerIdFromProjectedRegion(event, rect, projectedRegions) ||
+    null
+  );
+}
+
+function handleFingerPointerDown(event) {
+  if (event.button !== 0 || !event.isPrimary) return;
+  fingerPointerDown = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+  };
+}
+
+function handleFingerPointerUp(event) {
+  if (!fingerPointerDown || fingerPointerDown.pointerId !== event.pointerId) return;
+  const movement = Math.hypot(
+    event.clientX - fingerPointerDown.x,
+    event.clientY - fingerPointerDown.y
+  );
+  fingerPointerDown = null;
+  if (movement > FINGER_CLICK_MAX_MOVEMENT_PX) return;
+  const fingerId = fingerIdFromPointerEvent(event);
+  if (fingerId) setSelectedFinger(fingerId, { focusCamera: true });
+}
+
+function handleFingerPointerMove(event) {
+  if (!renderer?.domElement || fingerPointerDown) return;
+  renderer.domElement.style.cursor = fingerIdFromPointerEvent(event) ? "pointer" : "grab";
+}
+
 function initThree() {
   scene = new THREE.Scene();
   scene.background = new THREE.Color("#fafdff");
@@ -4642,6 +5099,13 @@ function initThree() {
   controls.minDistance = 4.0;
   controls.maxDistance = 13.0;
   applyThumbCameraConfig();
+  renderer.domElement.addEventListener("pointerdown", handleFingerPointerDown);
+  renderer.domElement.addEventListener("pointerup", handleFingerPointerUp);
+  renderer.domElement.addEventListener("pointermove", handleFingerPointerMove);
+  renderer.domElement.addEventListener("pointerleave", () => {
+    fingerPointerDown = null;
+    renderer.domElement.style.cursor = "grab";
+  });
 
   sceneAmbientLight = new THREE.AmbientLight("#ffffff", 2.2);
   scene.add(sceneAmbientLight);
@@ -5137,7 +5601,8 @@ function animate(timestamp = 0) {
     }
   }
 
-  controls?.update();
+  const cameraTransitionUpdated = updateCameraTransition(timestamp);
+  if (!cameraTransitionUpdated) controls?.update();
   renderer?.render(scene, camera);
 }
 
@@ -8084,7 +8549,15 @@ wholeHandModeButton?.addEventListener("click", () => {
 });
 
 fingerFocusSelect?.addEventListener("change", () => {
-  setSelectedFinger(fingerFocusSelect.value);
+  setSelectedFinger(fingerFocusSelect.value, { focusCamera: true });
+});
+
+previousFingerButton?.addEventListener("click", () => {
+  cycleFingerCloseup(-1);
+});
+
+nextFingerButton?.addEventListener("click", () => {
+  cycleFingerCloseup(1);
 });
 
 thumbHolderModeButton?.addEventListener("click", () => {
