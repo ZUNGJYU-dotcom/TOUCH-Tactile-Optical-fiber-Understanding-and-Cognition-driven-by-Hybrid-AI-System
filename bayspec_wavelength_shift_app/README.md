@@ -4,13 +4,18 @@ Standalone BaySpec desktop application for trained ordinary-FBG static
 spectrum recognition. It is separate from the PD-voltage, optical-intensity,
 and provisional wavelength-shift applications.
 
-## v0.14.0 Desktop Update
+## v0.15.1 Desktop Update
 
-Diagnostics now has a dedicated **Record** workspace placed immediately after
-**Signal**. **Input** only shows acquisition and adapter status. The Record
-workspace keeps the complete synchronized capture workflow in one place, and
-the seven-item diagnostic navigation scrolls horizontally when the panel is
-narrow. The selected workspace is automatically scrolled into view.
+The five-finger digital twin retains the fitted sensors on the index, middle,
+ring, and little fingertips. The thumb animation now drives the visible outer
+contact skin inward while the internal backing remains effectively fixed,
+matching the physical contact direction. Whole-hand framing and fingertip
+inspection transitions are retained.
+
+Diagnostics keeps its dedicated **Record** workspace immediately after
+**Signal**. The complete synchronized optical-force capture workflow remains in
+that workspace, and the diagnostic navigation scrolls horizontally when the
+panel is narrow.
 
 ## Five-Finger Robot Hand Scene
 
@@ -65,6 +70,18 @@ the trained digital twin.
 run_desktop.bat
 ```
 
+## Windows Portable Package
+
+Download `TOUCH-v0.15.1-windows-x64.zip`, extract the complete `TOUCH` folder,
+and run:
+
+```powershell
+.\TOUCH\TOUCH.exe
+```
+
+Keep the executable inside the extracted folder because the adjacent runtime,
+models, geometry, and frontend assets are required.
+
 Source server:
 
 ```powershell
@@ -78,7 +95,7 @@ verify its bundled frontend, backend contract, SDK helper, and model artifacts
 without opening a window, binding port `8640`, or starting PX6D acquisition:
 
 ```powershell
-& '.\TOUCH System - Trained Static Spectrum Twin.exe' --self-test
+& '.\TOUCH.exe' --self-test
 ```
 
 The process exits with code `0` when every check passes. Details are written to

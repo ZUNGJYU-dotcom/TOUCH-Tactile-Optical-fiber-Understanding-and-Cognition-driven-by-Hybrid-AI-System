@@ -11,7 +11,7 @@ fingerprint to estimate:
 It is a separate application. It does not replace or modify the retained PD
 voltage, optical-intensity, or provisional wavelength-shift editions.
 
-## Latest Update - v0.15.0
+## Latest Update - v0.15.1
 
 The whole-hand digital twin now preserves the existing modified TOUCH thumb and
 adds fitted sensing surfaces to the other four fingertips. The index, middle,
@@ -19,6 +19,12 @@ ring, and little fingertip seats are generated from provisional SolidWorks CAD,
 aligned to each local fingertip plane, enlarged within a structural border, and
 cut to an equal fitted depth. Source STL seats, a geometry manifest, the
 integrated whole-hand GLB, and the reproducible integration tool are included.
+
+Version 0.15.1 corrects the thumb response animation so the visible outer
+contact skin deforms inward while the internal backing remains effectively
+fixed. The whole-hand camera framing and the four additional fingertip sensors
+are preserved. A complete Windows x64 portable package is published with the
+release.
 
 The current PX6D reconnect, synchronized optical-force recording, dedicated
 Record workspace, compact Operator UI, and trained static-spectrum runtime are
@@ -129,6 +135,11 @@ diagnostic-only and cannot drive the UI or deformation.
 cd bayspec_wavelength_shift_app
 run_desktop.bat
 ```
+
+For the packaged Windows build, download
+`TOUCH-v0.15.1-windows-x64.zip` from the GitHub release, extract the complete
+`TOUCH` folder, and run `TOUCH\TOUCH.exe`. Do not move only the executable out
+of the extracted folder because its bundled runtime and assets are required.
 
 Generate the full guided validation plan without touching hardware:
 
