@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,15 @@ DEFAULT_PORT = 8640
 EXPECTED_BACKEND_APP = "TOUCH System Trained Static Spectrum Twin"
 EXPECTED_BACKEND_MODE = "standalone_bayspec_trained_static_spectrum_twin"
 EXPECTED_BACKEND_CONTRACT_VERSION = "trained_static_spectrum_api_v2"
+
+GWL_STYLE = -16
+WS_SYSMENU = 0x00080000
+WS_MINIMIZEBOX = 0x00020000
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
 
 
 def is_frozen() -> bool:
@@ -48,6 +58,77 @@ def write_log(message: str) -> None:
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     with log_path().open("a", encoding="utf-8") as f:
         f.write(f"[{stamp}] {message}\n")
+
+
+def enable_borderless_taskbar_toggle(
+    window: Any,
+    *,
+    user32: Any | None = None,
+) -> bool:
+    """Restore native taskbar minimize/restore behavior for a frameless form."""
+
+    if os.name != "nt" and user32 is None:
+        return False
+    native = getattr(window, "native", None)
+    handle = getattr(native, "Handle", None)
+    if handle is None:
+        return False
+    try:
+        hwnd = int(handle.ToInt64()) if hasattr(handle, "ToInt64") else int(handle)
+        if hwnd <= 0:
+            return False
+        api = user32 or ctypes.WinDLL("user32", use_last_error=True)
+        get_window_long = api.GetWindowLongPtrW
+        set_window_long = api.SetWindowLongPtrW
+        set_window_pos = api.SetWindowPos
+        if user32 is None:
+            get_window_long.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            get_window_long.restype = ctypes.c_ssize_t
+            set_window_long.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_ssize_t,
+            ]
+            set_window_long.restype = ctypes.c_ssize_t
+            set_window_pos.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint,
+            ]
+            set_window_pos.restype = ctypes.c_bool
+
+        current_style = int(get_window_long(hwnd, GWL_STYLE))
+        required_style = current_style | WS_SYSMENU | WS_MINIMIZEBOX
+        if required_style != current_style:
+            set_window_long(hwnd, GWL_STYLE, required_style)
+            set_window_pos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOSIZE
+                | SWP_NOMOVE
+                | SWP_NOZORDER
+                | SWP_NOACTIVATE
+                | SWP_FRAMECHANGED,
+            )
+        write_log(
+            "Desktop native taskbar toggle enabled "
+            f"hwnd={hwnd} style=0x{required_style & 0xFFFFFFFF:08X}"
+        )
+        return True
+    except Exception as exc:
+        write_log(
+            "Desktop native taskbar toggle setup failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False
 
 
 def show_error(title: str, message: str) -> None:
@@ -271,6 +352,7 @@ class DesktopApi:
         # explicitly applies the monitor bounds and restores the previous
         # bounds on the next call.
         window.toggle_fullscreen()
+        enable_borderless_taskbar_toggle(window)
 
         # WinForms may emit maximized/restored synchronously. Assign the
         # intended state instead of inverting again after that callback.
@@ -364,6 +446,7 @@ def main() -> int:
 
         window.events.maximized += desktop_api.note_window_maximized
         window.events.restored += desktop_api.note_window_restored
+        window.events.shown += enable_borderless_taskbar_toggle
 
         def on_closed() -> None:
             if owns_backend:

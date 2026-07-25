@@ -31,6 +31,7 @@ class SurfaceFullscreenContractTests(unittest.TestCase):
         self.assertIn('class="fullscreen-brand-mark"', html)
         self.assertIn('src="/static/touch_system_icon.png"', html)
         self.assertIn(".app-shell.surface-fullscreen-active .fullscreen-brand-mark", css)
+        self.assertIn("width: clamp(29px, 2.2vw, 38px)", css)
         self.assertIn("pointer-events: none", css)
         self.assertIn("width: 100vw !important", css)
         self.assertIn("height: 100vh !important", css)

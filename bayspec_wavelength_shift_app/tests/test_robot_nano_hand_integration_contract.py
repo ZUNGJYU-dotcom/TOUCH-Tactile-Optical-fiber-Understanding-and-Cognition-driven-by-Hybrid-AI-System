@@ -97,6 +97,16 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
         self.assertEqual(sensor_array["demo_sync_mode"], "synchronized_with_thumb")
         self.assertEqual(sensor_array["data_status"], "synchronized_demo_only")
         self.assertEqual(
+            sensor_array["semantic_to_geometry_id"],
+            {
+                "thumb": "thumb",
+                "index": "little",
+                "middle": "ring",
+                "ring": "middle",
+                "little": "index",
+            },
+        )
+        self.assertEqual(
             set(sensor_array["fingers"]),
             {"thumb", "index", "middle", "ring", "little"},
         )
@@ -196,6 +206,7 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
             self.assertIn(f'value="{finger_id}"', self.html)
         self.assertIn("setupFingerSensorGroups()", self.app_js)
         self.assertIn("applyFingerSensorLayout()", self.app_js)
+        self.assertIn("semantic_to_geometry_id?.[fingerId]", self.app_js)
         self.assertIn("fingerFocusSelect?.addEventListener", self.app_js)
         self.assertIn('setText("spectrumOverviewTitle"', self.app_js)
         self.assertIn('setText("footprintTitle"', self.app_js)
@@ -234,6 +245,24 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
         self.assertIn("navigationVisible: keepFingerNavigation && wholeHandMode", self.app_js)
         self.assertIn("controls.enabled = false", self.app_js)
         self.assertIn("controls.enabled = true", self.app_js)
+
+    def test_whole_hand_canvas_uses_stable_desktop_cursor(self) -> None:
+        self.assertIn(
+            'fingerIdFromPointerEvent(event) ? "pointer" : "default"',
+            self.app_js,
+        )
+        self.assertIn(
+            'renderer.domElement.style.cursor = "default"',
+            self.app_js,
+        )
+        self.assertNotIn(
+            'fingerIdFromPointerEvent(event) ? "pointer" : "grab"',
+            self.app_js,
+        )
+        self.assertNotIn(
+            'renderer.domElement.style.cursor = "grab"',
+            self.app_js,
+        )
 
     def test_three_geometry_modes_remain_available(self) -> None:
         for element_id in (

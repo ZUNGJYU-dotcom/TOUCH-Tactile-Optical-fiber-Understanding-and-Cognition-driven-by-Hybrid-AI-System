@@ -18,7 +18,7 @@
 }
 
 /* Native desktop shell: replace the black Windows frame with a quiet,
-   draggable lab-style bar. The bar intentionally carries no product name. */
+   draggable lab-style title bar. */
 .desktop-titlebar {
   display: none;
 }
@@ -59,6 +59,22 @@ body.pywebview-desktop .desktop-titlebar-mark {
   flex: 0 0 23px;
   object-fit: contain;
   filter: drop-shadow(0 2px 4px rgba(10, 142, 197, 0.12));
+  pointer-events: none;
+}
+
+.desktop-titlebar-name {
+  display: none;
+}
+
+body.pywebview-desktop .desktop-titlebar-name {
+  display: block;
+  min-width: 0;
+  margin-left: 8px;
+  color: #17354a;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
   pointer-events: none;
 }
 
@@ -233,7 +249,7 @@ body.surface-fullscreen-document {
   left: clamp(18px, 2vw, 28px);
   z-index: 10004 !important;
   display: block !important;
-  width: clamp(58px, 4.4vw, 76px);
+  width: clamp(29px, 2.2vw, 38px);
   height: auto;
   margin: 0 !important;
   padding: 0 !important;
@@ -3317,13 +3333,13 @@ button.active-watch,
     radial-gradient(circle at 20% 0%, #ffffff 0, #f5f9fc 42%, #e7f1f8 100%);
   background-size: 32px 32px, 32px 32px, auto;
   gap: 9px;
-  grid-template-rows: 74px minmax(0, 1fr) !important;
+  grid-template-rows: max-content minmax(0, 1fr) !important;
 }
 
 .diagnostics-mode .topbar {
   grid-template-columns: 190px minmax(360px, 0.82fr) minmax(520px, 1.18fr);
-  min-height: 74px;
-  max-height: 74px;
+  min-height: 96px;
+  max-height: none;
   padding: 7px 10px;
   box-shadow: 0 12px 30px rgba(69, 105, 132, 0.12);
 }
@@ -3370,10 +3386,6 @@ button.active-watch,
 
 .diagnostics-mode .control-inputs {
   grid-template-columns: minmax(124px, 1fr) minmax(84px, 0.6fr) minmax(136px, 0.82fr);
-}
-
-.diagnostics-mode .control-actions {
-  grid-template-columns: repeat(7, minmax(0, 1fr));
 }
 
 .diagnostics-mode .control-actions button,
@@ -3956,16 +3968,7 @@ button.active-watch,
   align-content: start;
 }
 
-/* Diagnostics hierarchy pass: fit controls, restore metric grids, and defer provenance detail. */
-.diagnostics-mode.app-shell {
-  grid-template-rows: 88px minmax(0, 1fr) !important;
-}
-
-.diagnostics-mode .topbar {
-  min-height: 88px !important;
-  max-height: 88px !important;
-}
-
+/* Diagnostics hierarchy pass: restore metric grids and defer provenance detail. */
 .diagnostics-mode .stage-metrics.diagnostics-only {
   display: grid !important;
 }
@@ -4025,17 +4028,6 @@ button.active-watch,
 .diagnostics-mode .diagnostic-subsection > .status-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   padding: 0 8px 8px;
-}
-
-@media (max-width: 1380px) {
-  .diagnostics-mode.app-shell {
-    grid-template-rows: 88px minmax(0, 1fr) !important;
-  }
-
-  .diagnostics-mode .topbar {
-    min-height: 88px !important;
-    max-height: 88px !important;
-  }
 }
 
 /* Compact display settings drawer and mutually exclusive workspace overlays. */
@@ -6712,7 +6704,6 @@ button.active-watch,
     height: 100vh !important;
     min-height: 0 !important;
     overflow: hidden !important;
-    grid-template-rows: 88px minmax(0, 1fr) !important;
   }
 
   .diagnostics-mode .twin-stage {
@@ -7879,10 +7870,10 @@ body.diagnostics-panel-resizing * {
 }
 
 /* Operator evidence rail: keep the spectrum readable without letting an empty
-   frame consume the full column. The remaining space carries three direct
-   operator values already produced by the current runtime. */
+   frame consume the full column. The final compact card is reserved for the
+   independent force-sensor reference; contact state stays in Surface Summary. */
 .operator-mode .left-panel {
-  grid-template-rows: 144px clamp(238px, 34vh, 310px) minmax(164px, 1fr) !important;
+  grid-template-rows: 144px clamp(238px, 34vh, 310px) minmax(108px, auto) !important;
   align-content: stretch !important;
 }
 
@@ -7898,10 +7889,10 @@ body.diagnostics-panel-resizing * {
 }
 
 .operator-mode .operator-current-hud {
-  min-height: 164px !important;
-  height: 100% !important;
+  min-height: 108px !important;
+  height: auto !important;
   display: grid !important;
-  grid-template-rows: auto auto auto !important;
+  grid-template-rows: auto auto !important;
   align-content: start !important;
   gap: 8px !important;
   overflow: hidden;
@@ -7911,53 +7902,12 @@ body.diagnostics-panel-resizing * {
   min-height: 20px;
 }
 
-.operator-mode .operator-current-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.operator-mode .operator-current-grid > div {
-  min-width: 0;
-  min-height: 52px;
-  display: grid;
-  align-content: center;
-  gap: 3px;
-  padding: 7px;
-  border: 1px solid #dbe6ed;
-  border-radius: 7px;
-  background: #fbfdff;
-}
-
-.operator-mode .operator-current-grid span,
 .operator-mode .operator-force-readout span {
   color: #677d90;
   font-size: 10px;
   line-height: 1.1;
   letter-spacing: 0;
   white-space: nowrap;
-}
-
-.operator-mode .operator-current-grid strong {
-  min-width: 0;
-  overflow: hidden;
-  color: #17354a;
-  font-size: 14px;
-  line-height: 1.15;
-  font-weight: 680;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.operator-mode #operatorContactValue[data-response-tone="no-contact"],
-.operator-mode #operatorContactValue[data-response-tone="idle"] {
-  color: #607487;
-}
-
-.operator-mode #operatorContactValue[data-response-tone="light"],
-.operator-mode #operatorContactValue[data-response-tone="normal"],
-.operator-mode #operatorContactValue[data-response-tone="hard"] {
-  color: #087fa7;
 }
 
 .operator-mode .operator-force-readout {
@@ -8262,4 +8212,113 @@ body.diagnostics-panel-resizing * {
   .finger-focus-control span {
     display: none;
   }
+}
+
+/* Responsive evidence-rail guard. Spectrum KPIs have a real two-row minimum;
+   never compress them into the following force card. When the restored
+   desktop window is short, the left rail scrolls as one continuous column. */
+.operator-mode .left-panel {
+  grid-template-rows: 144px minmax(264px, 1fr) auto !important;
+  align-content: stretch !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+
+.operator-mode .summary-hud {
+  height: auto !important;
+  min-height: 264px !important;
+  max-height: none !important;
+  grid-template-rows: auto minmax(105px, 1fr) auto !important;
+  overflow: hidden !important;
+}
+
+.operator-mode .summary-hud > .optical-kpi-grid {
+  min-height: 97px !important;
+  grid-template-rows: repeat(2, 46px) !important;
+  overflow: hidden !important;
+}
+
+.operator-mode .operator-current-hud {
+  height: auto !important;
+  min-height: 108px !important;
+}
+
+.operator-mode .left-panel::-webkit-scrollbar {
+  width: 6px;
+}
+
+.operator-mode .left-panel::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(111, 143, 165, 0.42);
+}
+
+.operator-mode .left-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (max-width: 1100px) {
+  .operator-mode .left-panel {
+    grid-template-rows: 138px minmax(238px, 1fr) auto !important;
+    align-content: stretch !important;
+  }
+
+  .operator-mode .summary-hud {
+    min-height: 238px !important;
+    grid-template-rows: auto minmax(82px, 1fr) auto !important;
+  }
+
+  .operator-mode .summary-hud > .optical-kpi-grid {
+    min-height: 89px !important;
+    grid-template-rows: repeat(2, 42px) !important;
+  }
+}
+
+/* Desktop information hierarchy: the native title bar owns the product name,
+   while the former brand column carries the three live status indicators. */
+body.pywebview-desktop .app-shell:not(.surface-fullscreen-active) .title-zone {
+  display: none !important;
+}
+
+body.pywebview-desktop .operator-mode .topbar {
+  grid-template-columns: minmax(360px, 430px) minmax(252px, 1fr) !important;
+}
+
+body.pywebview-desktop .operator-mode .status-strip {
+  justify-content: flex-start !important;
+}
+
+body.pywebview-desktop .diagnostics-mode .topbar {
+  grid-template-columns: minmax(350px, 0.82fr) minmax(520px, 1.18fr) !important;
+}
+
+/* Desktop viewport closure guard. The custom title bar occupies real viewport
+   height, so the application workspace must use only the remaining space.
+   Keep this final in the cascade because older Operator rules intentionally
+   use 100vh for the browser build. */
+body.pywebview-desktop {
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden !important;
+}
+
+body.pywebview-desktop .app-shell:not(.surface-fullscreen-active) {
+  position: fixed !important;
+  inset: var(--desktop-titlebar-height) 0 0 0 !important;
+  width: auto !important;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+}
+
+body.pywebview-desktop .app-shell:not(.surface-fullscreen-active) .dashboard,
+body.pywebview-desktop .app-shell:not(.surface-fullscreen-active) .left-panel,
+body.pywebview-desktop .app-shell:not(.surface-fullscreen-active) .twin-stage,
+body.pywebview-desktop .app-shell:not(.surface-fullscreen-active) .right-panel {
+  min-height: 0 !important;
+  max-height: 100% !important;
 }

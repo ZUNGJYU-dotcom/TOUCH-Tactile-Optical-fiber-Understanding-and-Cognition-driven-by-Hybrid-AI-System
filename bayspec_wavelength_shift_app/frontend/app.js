@@ -333,19 +333,6 @@ const ARRAY_SLIDE_STEPS = {
   tap: 10,
   release: 12,
 };
-const SCENARIO_LABELS = {
-  center_press: "center fingertip contact",
-  p21_contact: "P21 fingertip contact",
-  p12_contact: "P12 fingertip contact",
-  p32_contact: "P32 fingertip contact",
-  off_center_fingertip_contact: "off-center fingertip contact",
-  vertical_slide_p11_p12_p13: "vertical fingertip slide",
-  horizontal_slide_p11_p21_p31: "horizontal fingertip slide",
-  diagonal_slide_p11_p22_p33: "diagonal fingertip slide",
-  broad_fingertip_contact: "broad fingertip contact",
-  tap: "fingertip tap",
-  release: "release",
-};
 
 function normalizedDemoPlaybackRate(value) {
   if (value === null || value === undefined || value === "") return 1;
@@ -759,10 +746,6 @@ function suppressGlobalSpatialProxy(proxy = {}, reason = "response_not_allowed")
     secondaryEvidencePm: 0,
     responseSuppressedReason: reason,
   };
-}
-
-function scenarioLabel(value) {
-  return SCENARIO_LABELS[value] || value || "surface";
 }
 
 function isModelPositionLevelMode(mode) {
@@ -1600,13 +1583,6 @@ function formatNumber(value, digits = 3) {
   return Number(value).toFixed(digits);
 }
 
-function formatCounts(value) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) {
-    return "--";
-  }
-  return Math.round(Number(value)).toLocaleString();
-}
-
 function formatSeconds(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return "--";
@@ -2325,18 +2301,6 @@ function cloneSpectrumRecord(record) {
   }
   clone.intensity_counts = Number(record?.intensity_counts);
   return clone;
-}
-
-function spectrumCounts(record) {
-  if (Array.isArray(record?.intensity)) return record.intensity;
-  if (Array.isArray(record?.spectrum_counts)) return record.spectrum_counts;
-  return [];
-}
-
-function setSpectrumCounts(record, counts) {
-  if (!record) return;
-  if (Array.isArray(record.intensity)) record.intensity = counts.slice();
-  if (Array.isArray(record.spectrum_counts)) record.spectrum_counts = counts.slice();
 }
 
 function alignSmoothSpectrumRecord(previous, target) {
@@ -3246,90 +3210,6 @@ function drawHeatmap(arrayFrame) {
   ctx.fillText(`peak ${formatPercent(metrics.surface_peak, 1)} | active area ${formatPercent(metrics.surface_area_active, 1)}`, 12, height - 12);
 }
 
-function createOpenElastomerBodyGeometry(width, depth, thickness, widthSegments, depthSegments, sideSegments) {
-  const positions = [];
-  const colors = [];
-  const indices = [];
-  const halfW = width / 2;
-  const halfD = depth / 2;
-  const bottomY = thickness;
-
-  function vertex(x, y, z) {
-    const index = positions.length / 3;
-    positions.push(x, y, z);
-    colors.push(0.56, 0.80, 0.90);
-    return index;
-  }
-
-  function quad(a, b, c, d) {
-    indices.push(a, b, c, a, c, d);
-  }
-
-  const bottom = [];
-  for (let iz = 0; iz <= depthSegments; iz += 1) {
-    const row = [];
-    const z = -halfD + (depth * iz) / depthSegments;
-    for (let ix = 0; ix <= widthSegments; ix += 1) {
-      const x = -halfW + (width * ix) / widthSegments;
-      row.push(vertex(x, bottomY, z));
-    }
-    bottom.push(row);
-  }
-  for (let iz = 0; iz < depthSegments; iz += 1) {
-    for (let ix = 0; ix < widthSegments; ix += 1) {
-      quad(bottom[iz][ix], bottom[iz][ix + 1], bottom[iz + 1][ix + 1], bottom[iz + 1][ix]);
-    }
-  }
-
-  function sideAlongX(z) {
-    const grid = [];
-    for (let iy = 0; iy <= sideSegments; iy += 1) {
-      const row = [];
-      const y = -(thickness * iy) / sideSegments;
-      for (let ix = 0; ix <= widthSegments; ix += 1) {
-        const x = -halfW + (width * ix) / widthSegments;
-        row.push(vertex(x, y, z));
-      }
-      grid.push(row);
-    }
-    for (let iy = 0; iy < sideSegments; iy += 1) {
-      for (let ix = 0; ix < widthSegments; ix += 1) {
-        quad(grid[iy][ix], grid[iy + 1][ix], grid[iy + 1][ix + 1], grid[iy][ix + 1]);
-      }
-    }
-  }
-
-  function sideAlongZ(x) {
-    const grid = [];
-    for (let iy = 0; iy <= sideSegments; iy += 1) {
-      const row = [];
-      const y = -(thickness * iy) / sideSegments;
-      for (let iz = 0; iz <= depthSegments; iz += 1) {
-        const z = -halfD + (depth * iz) / depthSegments;
-        row.push(vertex(x, y, z));
-      }
-      grid.push(row);
-    }
-    for (let iy = 0; iy < sideSegments; iy += 1) {
-      for (let iz = 0; iz < depthSegments; iz += 1) {
-        quad(grid[iy][iz], grid[iy][iz + 1], grid[iy + 1][iz + 1], grid[iy + 1][iz]);
-      }
-    }
-  }
-
-  sideAlongX(-halfD);
-  sideAlongX(halfD);
-  sideAlongZ(-halfW);
-  sideAlongZ(halfW);
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setIndex(indices);
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-  geometry.computeVertexNormals();
-  return geometry;
-}
-
 const GROOVE_SUPERELLIPSE_POWER = 3.65;
 const DEFAULT_SLOT_BOUNDARY_PROFILE = [
   0.998, 0.986, 0.954, 0.931, 0.910, 0.895, 0.886, 0.879,
@@ -3639,36 +3519,6 @@ function bodyElasticShape(x, y, z, deformation, maxTopDepth) {
   };
 }
 
-function createBendingSurfaceGridGeometry(width, depth, columns, rows) {
-  const positions = [];
-  const halfW = width / 2;
-  const halfD = depth / 2;
-
-  function pushPoint(x, z) {
-    positions.push(x, 0, z);
-  }
-
-  for (let iz = 0; iz <= rows; iz += 1) {
-    const z = -halfD + (depth * iz) / rows;
-    for (let ix = 0; ix < columns; ix += 1) {
-      pushPoint(-halfW + (width * ix) / columns, z);
-      pushPoint(-halfW + (width * (ix + 1)) / columns, z);
-    }
-  }
-
-  for (let ix = 0; ix <= columns; ix += 1) {
-    const x = -halfW + (width * ix) / columns;
-    for (let iz = 0; iz < rows; iz += 1) {
-      pushPoint(x, -halfD + (depth * iz) / rows);
-      pushPoint(x, -halfD + (depth * (iz + 1)) / rows);
-    }
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  return geometry;
-}
-
 function vectorFromConfig(values, fallback = [0, 0, 0]) {
   if (!Array.isArray(values)) return fallback.slice();
   return [Number(values[0] ?? fallback[0]) || 0, Number(values[1] ?? fallback[1]) || 0, Number(values[2] ?? fallback[2]) || 0];
@@ -3712,7 +3562,9 @@ function selectedFingerLabel() {
 }
 
 function fingerConfig(fingerId) {
-  return state.thumbSceneConfig?.finger_sensor_array?.fingers?.[fingerId] || null;
+  const arrayConfig = state.thumbSceneConfig?.finger_sensor_array;
+  const geometryId = arrayConfig?.semantic_to_geometry_id?.[fingerId] || fingerId;
+  return arrayConfig?.fingers?.[geometryId] || null;
 }
 
 function ensureFingerInteractionProxy(group, fingerId) {
@@ -4146,6 +3998,13 @@ async function loadThumbSceneConfig() {
       demo_sync_mode: "synchronized_with_thumb",
       spectrum_scope_mode: "selected_finger",
       array_scope_mode: "selected_finger",
+      semantic_to_geometry_id: {
+        thumb: "thumb",
+        index: "little",
+        middle: "ring",
+        ring: "middle",
+        little: "index",
+      },
       source_asset_url: "/static/assets/models/robot_nano_hand_sensorized.glb",
       original_asset_url: "/static/assets/models/robot_nano_hand_body.glb",
       fingers: {
@@ -5190,6 +5049,10 @@ function fingerIdFromPointerEvent(event) {
 
 function handleFingerPointerDown(event) {
   if (event.button !== 0 || !event.isPrimary) return;
+  // WebView2 can intermittently render the CSS grab cursor as transparent.
+  // Keep a stable native arrow while rotating and use a hand only for a real
+  // fingertip hit target.
+  renderer.domElement.style.cursor = "default";
   fingerPointerDown = {
     pointerId: event.pointerId,
     x: event.clientX,
@@ -5204,6 +5067,7 @@ function handleFingerPointerUp(event) {
     event.clientY - fingerPointerDown.y
   );
   fingerPointerDown = null;
+  renderer.domElement.style.cursor = "default";
   if (movement > FINGER_CLICK_MAX_MOVEMENT_PX) return;
   const fingerId = fingerIdFromPointerEvent(event);
   if (fingerId) setSelectedFinger(fingerId, { focusCamera: true });
@@ -5211,7 +5075,7 @@ function handleFingerPointerUp(event) {
 
 function handleFingerPointerMove(event) {
   if (!renderer?.domElement || fingerPointerDown) return;
-  renderer.domElement.style.cursor = fingerIdFromPointerEvent(event) ? "pointer" : "grab";
+  renderer.domElement.style.cursor = fingerIdFromPointerEvent(event) ? "pointer" : "default";
 }
 
 function initThree() {
@@ -5238,7 +5102,7 @@ function initThree() {
   renderer.domElement.addEventListener("pointermove", handleFingerPointerMove);
   renderer.domElement.addEventListener("pointerleave", () => {
     fingerPointerDown = null;
-    renderer.domElement.style.cursor = "grab";
+    renderer.domElement.style.cursor = "default";
   });
 
   sceneAmbientLight = new THREE.AmbientLight("#ffffff", 2.2);
@@ -7348,12 +7212,6 @@ function updateUI(frame) {
   if (operatorSummaryCard) operatorSummaryCard.dataset.responseTone = surfaceResponseTone;
   const surfaceResponseLevelElement = document.getElementById("surfaceResponseLevel");
   if (surfaceResponseLevelElement) surfaceResponseLevelElement.dataset.responseTone = surfaceResponseTone;
-  const operatorContactValue = document.getElementById("operatorContactValue");
-  if (operatorContactValue) operatorContactValue.dataset.responseTone = surfaceResponseTone;
-  setText(
-    "operatorContactValue",
-    !measurementAvailable ? "Idle" : !responseAvailable ? "--" : surfaceHasActiveResponse ? "Contact" : "No contact"
-  );
   setText(
     "surfaceText",
     !measurementAvailable
@@ -7390,7 +7248,6 @@ function updateUI(frame) {
       : dominantChannel || surfaceMetrics.dominant_channel || "--"
     : "--";
   setText("surfaceDominantChannel", operatorPosition);
-  setText("operatorPositionValue", operatorPosition);
   const dominantChannelRecord = (arrayFrame?.channels || []).find((item) => item.channel_id === (surfaceMetrics.dominant_channel || dominantChannel));
   const surfacePeakShiftPm = Number(
     (globalRecognitionFrame ? globalEventShiftPm : null) ??

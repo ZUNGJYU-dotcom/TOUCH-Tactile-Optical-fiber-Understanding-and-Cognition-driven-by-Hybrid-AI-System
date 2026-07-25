@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TOUCH</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/styles.css?v=fullscreen-brand-v16" />
+    <link rel="stylesheet" href="/static/styles.css?v=desktop-brand-status-v20" />
     <script type="importmap">
       {
         "imports": {
@@ -24,6 +24,7 @@
     <div id="desktopTitlebar" class="desktop-titlebar" aria-label="Desktop window controls">
       <div class="desktop-titlebar-drag pywebview-drag-region" title="Drag window">
         <img class="desktop-titlebar-mark" src="/static/touch_system_icon.png" alt="" aria-hidden="true" />
+        <span class="desktop-titlebar-name">TOUCH</span>
       </div>
       <div class="desktop-window-controls">
         <button id="desktopMinimizeButton" type="button" aria-label="Minimize window" title="Minimize">
@@ -49,7 +50,6 @@
 
         <div class="status-strip" aria-label="Current system mode">
           <span class="status-item" title="Data source">
-            <i data-lucide="radio-tower" aria-hidden="true"></i>
             <small>Data source</small>
             <strong id="sourceChip">SDK idle</strong>
           </span>
@@ -273,23 +273,13 @@
             </div>
           </div>
 
-          <div class="hud-card operator-current-hud" aria-label="Current tactile state">
+          <div class="hud-card operator-current-hud" aria-label="Force sensor">
             <div class="hud-title-row">
-              <h2>Current</h2>
-            </div>
-            <div class="operator-current-grid">
-              <div>
-                <span>Contact</span>
-                <strong id="operatorContactValue">Idle</strong>
-              </div>
-              <div>
-                <span>Position</span>
-                <strong id="operatorPositionValue">--</strong>
-              </div>
+              <h2>Force Sensor</h2>
             </div>
             <div class="px6d-reference-row operator-force-readout" aria-label="Force sensor">
               <div>
-                <span>Force Sensor</span>
+                <span>Fz</span>
                 <strong id="px6dReferenceFz">-- N</strong>
               </div>
               <span id="px6dReferenceStatus" class="px6d-reference-status">connecting</span>
@@ -926,6 +916,6 @@
 
     </div>
     <script src="/static/vendor/lucide/lucide.min.js"></script>
-    <script type="module" src="/static/app.js?v=thumb-outer-contact-face-v16"></script>
+    <script type="module" src="/static/app.js?v=finger-semantic-order-v17"></script>
   </body>
 </html>

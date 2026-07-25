@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.15.2 - 2026-07-25
+
+### Code cleanup
+
+- Removed unreachable legacy frontend label, formatting, spectrum-copy, and
+  obsolete geometry helpers.
+- Consolidated duplicated Diagnostics command-grid and header-height rules into
+  one canonical layout definition.
+- Kept trained recognition, BaySpec demodulation, coupling behavior, and
+  five-finger geometry unchanged.
+
+### Desktop stability
+
+- Replaced the fixed Diagnostics header row with a content-sized row so wrapped
+  commands stay inside the header at compact widths.
+- Added regression coverage that prevents the removed helpers and duplicated
+  critical layout declarations from returning.
+- Validated the Operator and Diagnostics views at 1280 x 720 with no horizontal
+  overflow or browser-console errors.
+
 ## v0.15.0 - 2026-07-24
 
 ### Five-finger tactile geometry

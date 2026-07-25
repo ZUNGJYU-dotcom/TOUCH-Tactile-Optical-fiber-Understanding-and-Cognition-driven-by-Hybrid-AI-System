@@ -1,9 +1,9 @@
 {
   "product": "TOUCH System",
   "edition": "Ordinary FBG Trained Static Spectrum Twin",
-  "version": "0.15.0",
-  "build_id": "static-spectrum-v15-five-finger-max-area-slots",
-  "release_date": "2026-07-24",
+  "version": "0.15.2",
+  "build_id": "static-spectrum-v15-2-code-cleanup-ui-stability",
+  "release_date": "2026-07-25",
   "release_channel": "public_research",
   "primary_signal": "512_point_bayspec_full_spectrum",
   "primary_method": "hierarchical_static_spectral_classification",

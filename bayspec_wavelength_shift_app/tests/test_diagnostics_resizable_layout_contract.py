@@ -34,6 +34,35 @@ class DiagnosticsResizableLayoutContractTests(unittest.TestCase):
         self.assertIn('grid-template-columns: repeat(auto-fit, minmax(104px, 1fr))', self.css)
         self.assertIn('overflow-wrap: anywhere', self.css)
 
+    def test_diagnostics_command_row_keeps_bottom_breathing_room(self) -> None:
+        self.assertNotIn(
+            'grid-template-rows: 88px minmax(0, 1fr) !important;',
+            self.css,
+        )
+        self.assertEqual(
+            self.css.count(
+                'grid-template-rows: max-content minmax(0, 1fr) !important;'
+            ),
+            1,
+        )
+        self.assertEqual(self.css.count('min-height: 96px;'), 1)
+        topbar_rule = self.css.split('.diagnostics-mode .topbar {', 1)[1].split(
+            '}', 1
+        )[0]
+        self.assertIn('max-height: none;', topbar_rule)
+
+    def test_removed_frontend_helpers_do_not_return_as_dead_code(self) -> None:
+        for obsolete_symbol in (
+            "SCENARIO_LABELS",
+            "function scenarioLabel(",
+            "function formatCounts(",
+            "function spectrumCounts(",
+            "function setSpectrumCounts(",
+            "function createOpenElastomerBodyGeometry(",
+            "function createBendingSurfaceGridGeometry(",
+        ):
+            self.assertNotIn(obsolete_symbol, self.js)
+
     def test_recording_commands_are_short_and_do_not_repeat_context(self) -> None:
         self.assertIn('<summary><span>Data recording</span>', self.html)
         self.assertIn('<span>Start</span>', self.html)
@@ -197,19 +226,24 @@ class DiagnosticsResizableLayoutContractTests(unittest.TestCase):
         self.assertIn('id="px6dCaptureOutput"', self.html)
         self.assertIn('id="commandFeedbackText"', self.html)
 
-    def test_operator_spectrum_is_compact_and_freed_space_has_direct_readouts(self) -> None:
+    def test_operator_left_rail_keeps_only_unique_force_readout(self) -> None:
         self.assertIn('class="hud-card operator-current-hud"', self.html)
-        self.assertIn('<span>Contact</span>', self.html)
-        self.assertIn('id="operatorContactValue"', self.html)
-        self.assertIn('<span>Position</span>', self.html)
-        self.assertIn('id="operatorPositionValue"', self.html)
+        operator_force_card = self.html.split(
+            'class="hud-card operator-current-hud"', 1
+        )[1].split("</div>\n        </section>", 1)[0]
+        self.assertIn("<h2>Force Sensor</h2>", operator_force_card)
+        self.assertIn("<span>Fz</span>", operator_force_card)
+        self.assertNotIn("<span>Contact</span>", operator_force_card)
+        self.assertNotIn("<span>Position</span>", operator_force_card)
+        self.assertNotIn('id="operatorContactValue"', self.html)
+        self.assertNotIn('id="operatorPositionValue"', self.html)
         self.assertIn('aria-label="Force sensor"', self.html)
         self.assertIn('<span>Force Sensor</span>', self.html)
         self.assertEqual(self.html.count('id="px6dReferenceFz"'), 1)
         self.assertIn('grid-template-rows: 144px clamp(238px, 34vh, 310px)', self.css)
         self.assertIn('max-height: 310px !important', self.css)
-        self.assertIn('setText("operatorPositionValue", operatorPosition)', self.js)
-        self.assertIn('"operatorContactValue",', self.js)
+        self.assertNotIn('setText("operatorPositionValue", operatorPosition)', self.js)
+        self.assertNotIn('"operatorContactValue",', self.js)
 
     def test_fullscreen_summary_reuses_force_readout_without_clipping(self) -> None:
         self.assertEqual(self.html.count('id="px6dReferenceFz"'), 1)

@@ -1276,6 +1276,13 @@ def _default_thumb_scene_config() -> dict:
             "demo_sync_mode": "synchronized_with_thumb",
             "spectrum_scope_mode": "selected_finger",
             "array_scope_mode": "selected_finger",
+            "semantic_to_geometry_id": {
+                "thumb": "thumb",
+                "index": "little",
+                "middle": "ring",
+                "ring": "middle",
+                "little": "index",
+            },
             "source_asset_url": "/static/assets/models/robot_nano_hand_sensorized.glb",
             "original_asset_url": "/static/assets/models/robot_nano_hand_body.glb",
             "fingers": {

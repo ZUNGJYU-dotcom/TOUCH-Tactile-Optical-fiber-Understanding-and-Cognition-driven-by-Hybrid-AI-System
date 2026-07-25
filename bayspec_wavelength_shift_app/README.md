@@ -4,13 +4,13 @@ Standalone BaySpec desktop application for trained ordinary-FBG static
 spectrum recognition. It is separate from the PD-voltage, optical-intensity,
 and provisional wavelength-shift applications.
 
-## v0.15.1 Desktop Update
+## v0.15.2 Desktop Update
 
-The five-finger digital twin retains the fitted sensors on the index, middle,
-ring, and little fingertips. The thumb animation now drives the visible outer
-contact skin inward while the internal backing remains effectively fixed,
-matching the physical contact direction. Whole-hand framing and fingertip
-inspection transitions are retained.
+This release removes unreachable legacy frontend helpers and consolidates
+duplicated Diagnostics layout rules. The Diagnostics header now uses a
+content-sized first row, so wrapped commands remain inside the header at compact
+desktop widths. The trained model, BaySpec demodulation, coupling logic, thumb
+and four-finger geometry, and interaction behavior are unchanged.
 
 Diagnostics keeps its dedicated **Record** workspace immediately after
 **Signal**. The complete synchronized optical-force capture workflow remains in
@@ -72,7 +72,7 @@ run_desktop.bat
 
 ## Windows Portable Package
 
-Download `TOUCH-v0.15.1-windows-x64.zip`, extract the complete `TOUCH` folder,
+Download `TOUCH-v0.15.2-windows-x64.zip`, extract the complete `TOUCH` folder,
 and run:
 
 ```powershell

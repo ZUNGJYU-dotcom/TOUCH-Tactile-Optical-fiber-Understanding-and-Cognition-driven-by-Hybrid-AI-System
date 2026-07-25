@@ -11,20 +11,20 @@ fingerprint to estimate:
 It is a separate application. It does not replace or modify the retained PD
 voltage, optical-intensity, or provisional wavelength-shift editions.
 
-## Latest Update - v0.15.1
+## Latest Update - v0.15.2
 
-The whole-hand digital twin now preserves the existing modified TOUCH thumb and
-adds fitted sensing surfaces to the other four fingertips. The index, middle,
-ring, and little fingertip seats are generated from provisional SolidWorks CAD,
-aligned to each local fingertip plane, enlarged within a structural border, and
-cut to an equal fitted depth. Source STL seats, a geometry manifest, the
-integrated whole-hand GLB, and the reproducible integration tool are included.
+Version 0.15.2 is a conservative code-hygiene and desktop-stability release.
+Unreachable legacy frontend helpers and duplicated Diagnostics layout
+declarations were removed without changing the trained model, BaySpec
+demodulation, coupling logic, sensor geometry, or interaction contract. The
+Diagnostics header now grows with wrapped commands instead of clipping them at
+compact desktop widths.
 
-Version 0.15.1 corrects the thumb response animation so the visible outer
-contact skin deforms inward while the internal backing remains effectively
-fixed. The whole-hand camera framing and the four additional fingertip sensors
-are preserved. A complete Windows x64 portable package is published with the
-release.
+The release retains the v0.15.1 whole-hand digital twin: the modified TOUCH
+thumb, fitted sensing surfaces on the other four fingertips, corrected inward
+thumb contact-skin deformation, whole-hand framing, and fingertip inspection
+transitions. Source STL seats, the geometry manifest, integrated whole-hand
+GLB, and reproducible integration tool remain included.
 
 The current PX6D reconnect, synchronized optical-force recording, dedicated
 Record workspace, compact Operator UI, and trained static-spectrum runtime are
@@ -137,7 +137,7 @@ run_desktop.bat
 ```
 
 For the packaged Windows build, download
-`TOUCH-v0.15.1-windows-x64.zip` from the GitHub release, extract the complete
+`TOUCH-v0.15.2-windows-x64.zip` from the GitHub release, extract the complete
 `TOUCH` folder, and run `TOUCH\TOUCH.exe`. Do not move only the executable out
 of the extracted folder because its bundled runtime and assets are required.
 

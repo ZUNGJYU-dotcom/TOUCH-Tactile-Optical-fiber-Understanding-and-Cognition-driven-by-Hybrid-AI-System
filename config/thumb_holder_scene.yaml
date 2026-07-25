@@ -57,6 +57,15 @@ finger_sensor_array:
   demo_sync_mode: synchronized_with_thumb
   spectrum_scope_mode: selected_finger
   array_scope_mode: selected_finger
+  # The imported CAD component labels were assigned in the opposite lateral
+  # direction. Keep the audited geometry records intact and bind operator
+  # finger names to their anatomically correct fingertip components here.
+  semantic_to_geometry_id:
+    thumb: thumb
+    index: little
+    middle: ring
+    ring: middle
+    little: index
   source_asset_url: /static/assets/models/robot_nano_hand_sensorized.glb
   original_asset_url: /static/assets/models/robot_nano_hand_body.glb
   note: "The four non-thumb sensors follow the actual provisional CAD slot centers, axes, and depths. All five surfaces still share synchronized display data and do not claim five independent measured spectra or calibrated force."

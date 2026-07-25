@@ -32,6 +32,41 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
         self.assertIn("min-width: 0 !important", responsive_css)
         self.assertIn("overflow: hidden !important", responsive_css)
 
+    def test_narrow_operator_evidence_cards_cannot_overlap(self) -> None:
+        guard = self.css.index("/* Responsive evidence-rail guard.")
+        responsive_css = self.css[guard:]
+
+        left_panel_rule = responsive_css.split(".operator-mode .left-panel {", 1)[1].split(
+            "}", 1
+        )[0]
+        self.assertIn(
+            "grid-template-rows: 144px minmax(264px, 1fr) auto !important",
+            left_panel_rule,
+        )
+        self.assertIn("overflow-y: auto !important", left_panel_rule)
+        self.assertIn("overflow-x: hidden !important", left_panel_rule)
+
+        summary_rule = responsive_css.split(".operator-mode .summary-hud {", 1)[1].split(
+            "}", 1
+        )[0]
+        self.assertIn("height: auto !important", summary_rule)
+        self.assertIn("min-height: 264px !important", summary_rule)
+        self.assertIn("overflow: hidden !important", summary_rule)
+
+        kpi_rule = responsive_css.split(
+            ".operator-mode .summary-hud > .optical-kpi-grid {", 1
+        )[1].split("}", 1)[0]
+        self.assertIn("min-height: 97px !important", kpi_rule)
+        self.assertIn("grid-template-rows: repeat(2, 46px) !important", kpi_rule)
+
+        compact_css = responsive_css.split("@media (max-width: 1100px)", 1)[1]
+        self.assertIn(
+            "grid-template-rows: 138px minmax(238px, 1fr) auto !important",
+            compact_css,
+        )
+        self.assertIn("min-height: 238px !important", compact_css)
+        self.assertIn("grid-template-rows: repeat(2, 42px) !important", compact_css)
+
     def test_desktop_starts_restored_then_supports_true_fullscreen(self) -> None:
         self.assertIn("maximized=False", self.launcher)
         self.assertIn("window.toggle_fullscreen()", self.launcher)
@@ -147,6 +182,18 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
         coupling_block = self.app_js.split('"surfaceRuleSource"', 1)[1].split(");", 1)[0]
         self.assertNotIn('"coupled response"', coupling_block)
         self.assertGreaterEqual(coupling_block.count('? "coupled"'), 3)
+
+    def test_source_status_uses_only_state_dot_and_text(self) -> None:
+        source_status = self.html.split(
+            '<span class="status-item" title="Data source">', 1
+        )[1].split("</span>", 1)[0]
+        self.assertNotIn("data-lucide", source_status)
+        self.assertIn('<strong id="sourceChip">', source_status)
+
+        live_command = self.html.split('id="liveTwinButton"', 1)[1].split(
+            "</button>", 1
+        )[0]
+        self.assertIn('data-lucide="radio-tower"', live_command)
 
     def test_operator_response_gauge_is_continuous_not_categorical(self) -> None:
         band_markup = self.html.split('<div class="operator-band-card">', 1)[1].split(
