@@ -235,8 +235,19 @@ const THREE_MAX_DEVICE_PIXEL_RATIO = 1.25;
 const THREE_GEOMETRY_UPDATE_INTERVAL_MS = 33;
 const THREE_NORMAL_UPDATE_INTERVAL_MS = 100;
 const CHART_UPDATE_INTERVAL_MS = 50;
-const THREE_SLOT_MAX_LOCAL_DEPRESSION = 0.64;
-const THREE_SLOT_MAX_LOCAL_BODY_Y = 0.86;
+const THREE_SLOT_BODY_THICKNESS = 0.48;
+// The contact face carries the visible indentation. The elastomer sidewall
+// follows continuously, while the bottom only moves slightly inside the slot.
+const THREE_SLOT_BOTTOM_DEFORMATION_FOLLOW = 0.02;
+// Preserve a visible compressed core at maximum response. Without this limit
+// the contact face can pass through the bottom skin and appear hollow.
+const THREE_SLOT_MIN_COMPRESSED_THICKNESS = 0.12;
+const THREE_SLOT_MAX_LOCAL_DEPRESSION =
+  (THREE_SLOT_BODY_THICKNESS - THREE_SLOT_MIN_COMPRESSED_THICKNESS) /
+  (1 - THREE_SLOT_BOTTOM_DEFORMATION_FOLLOW);
+const THREE_SLOT_MAX_LOCAL_BODY_Y =
+  THREE_SLOT_BODY_THICKNESS +
+  THREE_SLOT_MAX_LOCAL_DEPRESSION * THREE_SLOT_BOTTOM_DEFORMATION_FOLLOW;
 const SURFACE_GRID_VISUAL_GAMMA = 0.68;
 const DEMO_SURFACE_VISUAL_PEAK_FLOORS = {
   off_center_fingertip_contact: 0.52,
@@ -270,6 +281,9 @@ const FINGER_CLOSEUP_DURATION_MS = 1050;
 const FINGER_OVERVIEW_DURATION_MS = 1250;
 const FINGER_CLOSEUP_FOV = 40;
 const FINGER_CLOSEUP_DISTANCE_SCALE = 4.0;
+const WHOLE_HAND_OVERVIEW_FOV = 40;
+const WHOLE_HAND_OVERVIEW_MARGIN = 0.88;
+const WHOLE_HAND_OVERVIEW_VERTICAL_BIAS = 0.13;
 const FINGER_CLICK_MAX_MOVEMENT_PX = 7;
 const FINGER_LABELS = {
   thumb: "Thumb",
@@ -3537,7 +3551,7 @@ function createOvalSurfaceGridGeometry(width, depth, radialSegments = 9, angular
 
 function createGrooveReferenceLineGeometry(slotTransform = {}) {
   const position = vectorFromConfig(slotTransform.position, [0.546, 0.674, -0.007]);
-  const scale = vectorFromConfig(slotTransform.surface_scene_scale, [0.482, -0.268, 0.460]);
+  const scale = vectorFromConfig(slotTransform.surface_scene_scale, [0.482, 0.268, 0.460]);
   const lift = Number(slotTransform.vertical_lift ?? 0.22);
   const points = currentSlotBoundaryPoints(7, 5, 96);
   const positions = [];
@@ -3587,6 +3601,14 @@ function safeSlotBodyY(value) {
 }
 
 function bodyElasticShape(x, y, z, deformation, maxTopDepth) {
+  const throughThickness = Math.max(
+    0,
+    Math.min(1, y / THREE_SLOT_BODY_THICKNESS)
+  );
+  const thicknessFollow =
+    1 -
+    (1 - THREE_SLOT_BOTTOM_DEFORMATION_FOLLOW) *
+      smootherStep(throughThickness);
   const surfaceValue = surfaceValueAtScene(x, z);
   if (surfaceValue !== null) {
     const patchValue = centroidContactPatchValueAtScene(x, z);
@@ -3594,9 +3616,10 @@ function bodyElasticShape(x, y, z, deformation, maxTopDepth) {
     const colorValue = patchValue === null ? surfaceValue : Math.max(patchValue, surfaceValue * 0.52);
     const peak = Math.max(0.05, currentSurfaceVisualPeak(), surfaceValue, deformationValue);
     const normalized = Math.max(0, Math.min(1, colorValue / peak));
-    const throughThickness = Math.max(0, Math.min(1, y / 0.48));
-    const thicknessFollow = 0.95 - 0.38 * throughThickness;
-    const localDepression = safeSlotDepression(maxTopDepth * Math.pow(Math.max(0, deformationValue), 0.78) * thicknessFollow);
+    const fullSurfaceDepression = safeSlotDepression(
+      maxTopDepth * Math.pow(Math.max(0, deformationValue), 0.78)
+    );
+    const localDepression = fullSurfaceDepression * thicknessFollow;
     return {
       centerBasin: normalized,
       localY: safeSlotBodyY(y + localDepression),
@@ -3606,9 +3629,10 @@ function bodyElasticShape(x, y, z, deformation, maxTopDepth) {
   const centerBasin = Math.exp(-1.18 * r2);
   const broadBending = Math.exp(-0.28 * r2);
   const profile = 0.62 * centerBasin + 0.38 * broadBending;
-  const throughThickness = Math.max(0, Math.min(1, y / 0.48));
-  const thicknessFollow = 0.95 - 0.38 * throughThickness;
-  const localDepression = safeSlotDepression(maxTopDepth * deformation * profile * thicknessFollow);
+  const fullSurfaceDepression = safeSlotDepression(
+    maxTopDepth * deformation * profile
+  );
+  const localDepression = fullSurfaceDepression * thicknessFollow;
   return {
     centerBasin,
     localY: safeSlotBodyY(y + localDepression),
@@ -4197,7 +4221,7 @@ async function loadThumbSceneConfig() {
       position: [0.546, 0.674, -0.007],
       rotation_deg: [0, 0, 90],
       vertical_lift: 0.22,
-      surface_scene_scale: [0.482, -0.268, 0.460],
+      surface_scene_scale: [0.482, 0.268, 0.460],
       boundary_profile: {
         source: "stl_diff_groove_faces",
         angular_samples: 64,
@@ -4263,7 +4287,7 @@ function populateThumbAlignmentPanel() {
   const modelScale = vectorFromConfig(model.scale, [1, 1, 1]);
   const slotPosition = vectorFromConfig(slot.position, [0.546, 0.674, -0.007]);
   const slotRotation = vectorFromConfig(slot.rotation_deg, [0, 0, 90]);
-  const slotScale = vectorFromConfig(slot.surface_scene_scale, [0.482, -0.268, 0.460]);
+  const slotScale = vectorFromConfig(slot.surface_scene_scale, [0.482, 0.268, 0.460]);
   [
     ["thumbModelVisible", model.visible !== false],
     ["thumbSurfaceVisible", slot.visible !== false],
@@ -4335,7 +4359,7 @@ function collectThumbAlignmentConfig() {
       position: [numberInputValue("thumbSlotPosX", 0.546), numberInputValue("thumbSlotPosY", 0.674), numberInputValue("thumbSlotPosZ", -0.007)],
       rotation_deg: [numberInputValue("thumbSlotRotX", 0), numberInputValue("thumbSlotRotY", 0), numberInputValue("thumbSlotRotZ", 90)],
       vertical_lift: Number(state.thumbSceneConfig?.sensor_slot_transform?.vertical_lift ?? 0.22),
-      surface_scene_scale: [numberInputValue("thumbSlotScaleX", 0.482), numberInputValue("thumbSlotScaleY", -0.268), numberInputValue("thumbSlotScaleZ", 0.460)],
+      surface_scene_scale: [numberInputValue("thumbSlotScaleX", 0.482), numberInputValue("thumbSlotScaleY", 0.268), numberInputValue("thumbSlotScaleZ", 0.460)],
       boundary_profile: state.thumbSceneConfig?.sensor_slot_transform?.boundary_profile || {
         source: "stl_diff_groove_faces",
         angular_samples: 64,
@@ -4379,7 +4403,7 @@ function resetThumbAlignmentConfig() {
       position: [0.546, 0.674, -0.007],
       rotation_deg: [0, 0, 90],
       vertical_lift: 0.22,
-      surface_scene_scale: [0.482, -0.268, 0.460],
+      surface_scene_scale: [0.482, 0.268, 0.460],
       boundary_profile: {
         source: "stl_diff_groove_faces",
         angular_samples: 64,
@@ -4490,7 +4514,7 @@ function applyThumbSceneLayout() {
       if (sensorSurfaceGroup.parent !== desiredParent) desiredParent.add(sensorSurfaceGroup);
       const position = vectorFromConfig(slotTransform.position, localToThumb ? [0.546, 0.674, -0.007] : [0, -1.52, -0.05]);
       const rotation = radiansFromDegrees(slotTransform.rotation_deg, localToThumb ? [0, 0, 90] : [0, 0, 0]);
-      const scale = vectorFromConfig(slotTransform.surface_scene_scale, localToThumb ? [0.482, -0.268, 0.460] : [0.34, 0.34, 0.24]);
+      const scale = vectorFromConfig(slotTransform.surface_scene_scale, localToThumb ? [0.482, 0.268, 0.460] : [0.34, 0.34, 0.24]);
       sensorSurfaceGroup.position.set(position[0], position[1], position[2]);
       if (localToThumb) {
         if (wholeHandMode) {
@@ -4539,6 +4563,104 @@ function applyThumbSceneLayout() {
   state.threeNeedsRefresh = true;
 }
 
+function wholeHandOverviewPose(configuredPose) {
+  if (!wholeHandRoot?.visible || !camera) return null;
+  const bounds = visibleObjectBounds(wholeHandRoot);
+  if (bounds.isEmpty()) return null;
+
+  const center = bounds.getCenter(new THREE.Vector3());
+  const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+  if (!Number.isFinite(sphere.radius) || sphere.radius <= 0) return null;
+
+  const viewDirection = configuredPose.position
+    .clone()
+    .sub(configuredPose.target);
+  if (viewDirection.lengthSq() < 1e-6) viewDirection.set(0.46, 0.22, -0.86);
+  viewDirection.normalize();
+
+  const verticalHalfFov = THREE.MathUtils.degToRad(
+    WHOLE_HAND_OVERVIEW_FOV * 0.5
+  );
+  const horizontalHalfFov = Math.atan(
+    Math.tan(verticalHalfFov) * Math.max(0.25, camera.aspect || 1)
+  );
+  const viewUp = configuredPose.up
+    .clone()
+    .addScaledVector(viewDirection, -configuredPose.up.dot(viewDirection));
+  if (viewUp.lengthSq() < 1e-6) viewUp.set(0, 1, 0);
+  viewUp.normalize();
+  const viewRight = new THREE.Vector3()
+    .crossVectors(viewUp, viewDirection)
+    .normalize();
+  const tanVertical = Math.max(0.08, Math.tan(verticalHalfFov));
+  const tanHorizontal = Math.max(0.08, Math.tan(horizontalHalfFov));
+  let distance = sphere.radius * 1.35;
+  const cornerOffsets = [];
+  for (const x of [bounds.min.x, bounds.max.x]) {
+    for (const y of [bounds.min.y, bounds.max.y]) {
+      for (const z of [bounds.min.z, bounds.max.z]) {
+        const offset = new THREE.Vector3(x, y, z).sub(center);
+        cornerOffsets.push(offset);
+        const depthOffset = offset.dot(viewDirection);
+        const verticalDistance =
+          depthOffset +
+          (Math.abs(offset.dot(viewUp)) * WHOLE_HAND_OVERVIEW_MARGIN) /
+            tanVertical;
+        const horizontalDistance =
+          depthOffset +
+          (Math.abs(offset.dot(viewRight)) * WHOLE_HAND_OVERVIEW_MARGIN) /
+            tanHorizontal;
+        distance = Math.max(
+          distance,
+          verticalDistance,
+          horizontalDistance
+        );
+      }
+    }
+  }
+  distance += sphere.radius * 0.06;
+
+  let minProjectedX = Number.POSITIVE_INFINITY;
+  let maxProjectedX = Number.NEGATIVE_INFINITY;
+  let minProjectedY = Number.POSITIVE_INFINITY;
+  let maxProjectedY = Number.NEGATIVE_INFINITY;
+  for (const offset of cornerOffsets) {
+    const depth = Math.max(
+      sphere.radius * 0.12,
+      distance - offset.dot(viewDirection)
+    );
+    const projectedX = offset.dot(viewRight) / (depth * tanHorizontal);
+    const projectedY = offset.dot(viewUp) / (depth * tanVertical);
+    minProjectedX = Math.min(minProjectedX, projectedX);
+    maxProjectedX = Math.max(maxProjectedX, projectedX);
+    minProjectedY = Math.min(minProjectedY, projectedY);
+    maxProjectedY = Math.max(maxProjectedY, projectedY);
+  }
+  const projectedMidX = (minProjectedX + maxProjectedX) * 0.5;
+  const projectedMidY = (minProjectedY + maxProjectedY) * 0.5;
+  const framedCenter = center
+    .clone()
+    .addScaledVector(
+      viewRight,
+      projectedMidX * distance * tanHorizontal
+    )
+    .addScaledVector(
+      viewUp,
+      (projectedMidY + WHOLE_HAND_OVERVIEW_VERTICAL_BIAS) *
+        distance *
+        tanVertical
+    );
+
+  return {
+    position: framedCenter.clone().addScaledVector(viewDirection, distance),
+    target: framedCenter,
+    up: configuredPose.up.clone(),
+    fov: WHOLE_HAND_OVERVIEW_FOV,
+    minDistance: Math.max(2.4, sphere.radius * 0.78),
+    maxDistance: Math.max(18, distance * 2.2),
+  };
+}
+
 function applyThumbCameraConfig({
   animated = false,
   keepFingerNavigation = false,
@@ -4548,28 +4670,40 @@ function applyThumbCameraConfig({
   const thumbMode = state.geometryDisplayMode === "thumb_holder";
   const cameraConfig = state.thumbSceneConfig?.scene_camera || {};
   const wholeHandCamera = state.thumbSceneConfig?.whole_hand_scene?.camera || {};
-  const position = wholeHandMode
+  const configuredPosition = wholeHandMode
     ? vectorFromConfig(wholeHandCamera.position, [4.7, 2.2, -8.8])
     : thumbMode
       ? vectorFromConfig(cameraConfig.position, [5.2, 2.7, 4.8])
       : [0, 9.3, 5.8];
-  const target = wholeHandMode
+  const configuredTarget = wholeHandMode
     ? vectorFromConfig(wholeHandCamera.target, [0, 0, 0])
     : thumbMode
       ? vectorFromConfig(cameraConfig.target, [0, -1.0, 0])
       : [0, -0.18, 0];
-  const pose = {
-    position: new THREE.Vector3(position[0], position[1], position[2]),
-    target: new THREE.Vector3(target[0], target[1], target[2]),
+  const configuredPose = {
+    position: new THREE.Vector3(
+      configuredPosition[0],
+      configuredPosition[1],
+      configuredPosition[2]
+    ),
+    target: new THREE.Vector3(
+      configuredTarget[0],
+      configuredTarget[1],
+      configuredTarget[2]
+    ),
     up: new THREE.Vector3(
       thumbMode || wholeHandMode ? 0 : -1,
       thumbMode || wholeHandMode ? 1 : 0,
       0
     ),
-    fov: wholeHandMode ? 40 : thumbMode ? 43 : 39,
+    fov: wholeHandMode ? WHOLE_HAND_OVERVIEW_FOV : thumbMode ? 43 : 39,
     minDistance: wholeHandMode ? 5.0 : thumbMode ? 4.0 : 7.2,
     maxDistance: wholeHandMode ? 18.0 : thumbMode ? 13.0 : 14.0,
   };
+  const pose =
+    wholeHandMode && state.selectedFinger === "all"
+      ? wholeHandOverviewPose(configuredPose) || configuredPose
+      : configuredPose;
   if (animated) {
     beginCameraTransition(pose, {
       closeup: false,
@@ -4589,8 +4723,8 @@ function applyThumbCameraConfig({
   camera.updateProjectionMatrix();
   controls.minDistance = pose.minDistance;
   controls.maxDistance = pose.maxDistance;
-  camera.position.set(position[0], position[1], position[2]);
-  controls.target.set(target[0], target[1], target[2]);
+  camera.position.copy(pose.position);
+  controls.target.copy(pose.target);
   camera.lookAt(controls.target);
   controls.update();
 }
@@ -4840,7 +4974,7 @@ function updateGeometryDisplayMode(mode) {
     surfaceMesh.material.needsUpdate = true;
   }
   if (bodyMesh?.material) {
-    bodyMesh.material.opacity = physicalMode ? 0.58 : 0.70;
+    bodyMesh.material.opacity = physicalMode ? 0.46 : 0.62;
     bodyMesh.material.needsUpdate = true;
   }
   if (settingsResetCameraButton) {
@@ -5162,7 +5296,14 @@ function initThree() {
   slotOutlineHelper.position.set(0, 0.035, 0);
   sensorSurfaceGroup.add(slotOutlineHelper);
 
-  const bodyGeometry = createOvalElastomerBodyGeometry(7, 5, 0.48, 26, 96, 5);
+  const bodyGeometry = createOvalElastomerBodyGeometry(
+    7,
+    5,
+    THREE_SLOT_BODY_THICKNESS,
+    26,
+    96,
+    5
+  );
   bodyBasePositions = bodyGeometry.attributes.position.array.slice();
   bodyMesh = new THREE.Mesh(
     bodyGeometry,
@@ -5170,7 +5311,7 @@ function initThree() {
       vertexColors: true,
       color: "#9bc8dd",
       transparent: true,
-      opacity: 0.58,
+      opacity: 0.46,
       roughness: 0.62,
       metalness: 0.02,
       side: THREE.DoubleSide,
@@ -5425,9 +5566,18 @@ function applyThreeGeometry(raw, deformation, { recomputeNormals = false } = {})
       const baseIndex = i * 3;
       const x = bottomGridBasePositions[baseIndex];
       const z = bottomGridBasePositions[baseIndex + 2];
-      const shape = bodyElasticShape(x, 0.48, z, deformation, maxTopDepth);
-      const bottomDeflection = shape.localY - 0.48;
-      const lowerY = physicalMode ? 0.48 + bottomDeflection * 0.74 - 0.010 : 0.48 - bottomDeflection * 0.50;
+      const shape = bodyElasticShape(
+        x,
+        THREE_SLOT_BODY_THICKNESS,
+        z,
+        deformation,
+        maxTopDepth
+      );
+      const bottomDeflection =
+        shape.localY - THREE_SLOT_BODY_THICKNESS;
+      const lowerY = physicalMode
+        ? THREE_SLOT_BODY_THICKNESS + bottomDeflection * 0.20 - 0.010
+        : THREE_SLOT_BODY_THICKNESS - bottomDeflection * 0.50;
       lowerPositionArray[baseIndex + 1] = lowerY;
     }
     lowerPositions.needsUpdate = true;

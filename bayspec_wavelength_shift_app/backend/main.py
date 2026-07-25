@@ -1359,7 +1359,7 @@ def _default_thumb_scene_config() -> dict:
             "height_mm": 7.0,
             "depth_mm": 1.0,
             "z_offset_mm": 0.08,
-            "surface_scene_scale": [0.482, -0.268, 0.460],
+            "surface_scene_scale": [0.482, 0.268, 0.460],
             "boundary_profile": {
                 "source": "stl_diff_groove_faces",
                 "angular_samples": 64,

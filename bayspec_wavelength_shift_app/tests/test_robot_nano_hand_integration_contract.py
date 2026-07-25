@@ -165,8 +165,30 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
 
         # The verified thumb slot is offset toward local +X in whole-hand mode.
         self.assertGreater(whole["sensor_local_lift"][0], 0)
-        # The elastomer thickness must extend into the recess, not over the heat surface.
-        self.assertLess(slot["surface_scene_scale"][1], 0)
+        # Positive local Y keeps the visible skin at the slot lip and extends
+        # the elastomer body into the thumb recess.
+        self.assertGreater(slot["surface_scene_scale"][1], 0)
+        self.assertIn("THREE_SLOT_BOTTOM_DEFORMATION_FOLLOW = 0.02", self.app_js)
+        self.assertIn("THREE_SLOT_MIN_COMPRESSED_THICKNESS = 0.12", self.app_js)
+        self.assertIn(
+            "THREE_SLOT_BODY_THICKNESS - THREE_SLOT_MIN_COMPRESSED_THICKNESS",
+            self.app_js,
+        )
+        self.assertIn(
+            "const localDepression = fullSurfaceDepression * thicknessFollow",
+            self.app_js,
+        )
+        self.assertIn("smootherStep(throughThickness)", self.app_js)
+
+    def test_all_fingers_overview_is_centered_from_live_hand_bounds(self) -> None:
+        self.assertIn("function wholeHandOverviewPose", self.app_js)
+        self.assertIn("visibleObjectBounds(wholeHandRoot)", self.app_js)
+        self.assertIn("WHOLE_HAND_OVERVIEW_MARGIN", self.app_js)
+        self.assertIn(
+            'wholeHandMode && state.selectedFinger === "all"',
+            self.app_js,
+        )
+        self.assertIn("target: center", self.app_js)
 
     def test_finger_selector_scopes_spectrum_and_array_views(self) -> None:
         self.assertIn('id="fingerFocusSelect"', self.html)
