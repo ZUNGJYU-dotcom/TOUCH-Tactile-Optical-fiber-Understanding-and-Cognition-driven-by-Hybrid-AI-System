@@ -223,6 +223,31 @@ body.surface-fullscreen-document {
   height: 100% !important;
 }
 
+.fullscreen-brand-mark {
+  display: none;
+}
+
+.app-shell.surface-fullscreen-active .fullscreen-brand-mark {
+  position: fixed !important;
+  top: clamp(18px, 2vw, 28px);
+  left: clamp(18px, 2vw, 28px);
+  z-index: 10004 !important;
+  display: block !important;
+  width: clamp(58px, 4.4vw, 76px);
+  height: auto;
+  margin: 0 !important;
+  padding: 0 !important;
+  pointer-events: none;
+  user-select: none;
+  filter: drop-shadow(0 7px 14px rgba(49, 104, 132, 0.16));
+}
+
+.app-shell.surface-fullscreen-active .fullscreen-brand-mark img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
 .app-shell.surface-fullscreen-active .right-panel {
   position: fixed !important;
   inset: 22px 22px auto auto !important;
