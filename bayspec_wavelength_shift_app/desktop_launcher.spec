@@ -22,6 +22,8 @@ hiddenimports = (
     + collect_submodules("websockets")
     + collect_submodules("serial")
     + [
+        "clr",
+        "System",
         "sklearn.pipeline",
         "sklearn.impute._base",
         "sklearn.preprocessing._data",

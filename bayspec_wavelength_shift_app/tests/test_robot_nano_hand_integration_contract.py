@@ -215,7 +215,14 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
         for element_id in ("previousFingerButton", "nextFingerButton"):
             self.assertIn(f'id="{element_id}"', self.html)
         self.assertIn("finger-closeup-nav", self.css)
-        self.assertIn("backdrop-filter: blur(14px)", self.css)
+        self.assertIn("background: transparent", self.css)
+        self.assertIn("color: rgba(23, 56, 79, 0.48)", self.css)
+        self.assertIn("backdrop-filter: none", self.css)
+        self.assertIn(".operator-mode button.finger-closeup-nav", self.css)
+        self.assertIn("background: transparent !important", self.css)
+        self.assertIn("height: 80px !important", self.css)
+        self.assertIn("outline: none !important", self.css)
+        self.assertNotIn("backdrop-filter: blur(14px) saturate(145%)", self.css)
         self.assertIn("function fingerCloseupPose", self.app_js)
         self.assertIn("FINGER_CLOSEUP_DISTANCE_SCALE", self.app_js)
         self.assertIn("sensorBackNormal", self.app_js)
@@ -240,7 +247,24 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
         )
         self.assertIn("cycleFingerCloseup(-1)", self.app_js)
         self.assertIn("cycleFingerCloseup(1)", self.app_js)
-        self.assertIn('const FINGER_NAVIGATION_ORDER = [...FINGER_ORDER, "all"]', self.app_js)
+        self.assertIn("const FINGER_RIGHT_NAVIGATION_SEQUENCE = [", self.app_js)
+        self.assertIn(
+            '"all",\n  "thumb",\n  "little",\n  "ring",\n  "middle",\n  "index",\n  "thumb",\n  "all",',
+            self.app_js,
+        )
+        self.assertIn("fingerNavigationIndex: 1", self.app_js)
+        self.assertIn(
+            "? currentIndex >= lastIndex",
+            self.app_js,
+        )
+        self.assertIn("navigationIndex: nextIndex", self.app_js)
+        self.assertNotIn("FINGER_VIEW_CYCLE", self.app_js)
+        self.assertNotIn("calc(-50% + 0.2px)", self.css)
+        self.assertNotIn("translate(-0.4px, -50%)", self.css)
+        self.assertNotIn("translate(0.4px, -50%)", self.css)
+        self.assertIn("margin-top: -40px !important", self.css)
+        self.assertIn("transform: none !important", self.css)
+        self.assertNotIn("translateY(-50%)", self.css)
         self.assertIn("FINGER_OVERVIEW_DURATION_MS", self.app_js)
         self.assertIn("navigationVisible: keepFingerNavigation && wholeHandMode", self.app_js)
         self.assertIn("controls.enabled = false", self.app_js)

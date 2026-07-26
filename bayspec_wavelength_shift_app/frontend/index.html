@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TOUCH</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/styles.css?v=desktop-brand-status-v20" />
+    <link rel="stylesheet" href="/static/styles.css?v=taskbar-zoom-finger-cycle-v23" />
     <script type="importmap">
       {
         "imports": {
@@ -229,7 +229,6 @@
             <div class="hud-title-row">
               <div>
                 <h2>Response Trace</h2>
-              <p id="signalQaSummary" class="explanatory-copy" hidden aria-hidden="true"></p>
               </div>
               <span id="traceChip" class="chip" aria-live="polite" hidden>PAUSED</span>
             </div>
@@ -253,7 +252,6 @@
             <div class="hud-title-row">
               <div>
                 <h2>Spectrum</h2>
-                <p id="opticalSummaryState">No spectrum frame</p>
               </div>
               <span class="chip spectrum-open-chip icon-chip" aria-hidden="true"><i data-lucide="chart-spline"></i></span>
             </div>
@@ -333,9 +331,9 @@
                 id="previousFingerButton"
                 class="finger-closeup-nav finger-closeup-nav-previous"
                 type="button"
-                aria-label="Previous fingertip"
-                data-tooltip="Previous fingertip"
-                title="Previous fingertip"
+                aria-label="Move focus left"
+                data-tooltip="Move focus left"
+                title="Move focus left"
                 hidden
               >
                 <i data-lucide="chevron-left" aria-hidden="true"></i>
@@ -344,9 +342,9 @@
                 id="nextFingerButton"
                 class="finger-closeup-nav finger-closeup-nav-next"
                 type="button"
-                aria-label="Next fingertip"
-                data-tooltip="Next fingertip"
-                title="Next fingertip"
+                aria-label="Move focus right"
+                data-tooltip="Move focus right"
+                title="Move focus right"
                 hidden
               >
                 <i data-lucide="chevron-right" aria-hidden="true"></i>
@@ -916,6 +914,6 @@
 
     </div>
     <script src="/static/vendor/lucide/lucide.min.js"></script>
-    <script type="module" src="/static/app.js?v=finger-semantic-order-v17"></script>
+    <script type="module" src="/static/app.js?v=taskbar-zoom-finger-cycle-v20"></script>
   </body>
 </html>

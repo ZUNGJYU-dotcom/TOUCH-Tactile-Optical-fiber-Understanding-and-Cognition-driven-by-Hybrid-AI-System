@@ -122,6 +122,8 @@ async function invokeDesktopWindowCommand(commandName) {
 window.addEventListener("pywebviewready", activateDesktopChrome);
 
 desktopMinimizeButton?.addEventListener("click", () => {
+  // The native shell animates a cached window snapshot, so WebGL does not
+  // reflow or repaint while the complete window travels to the taskbar.
   void invokeDesktopWindowCommand("minimize_window");
 });
 
@@ -276,7 +278,16 @@ const ARRAY_DISPLAY_ROWS = [
 ];
 const ARRAY_DISPLAY_ORDER = ARRAY_DISPLAY_ROWS.flat();
 const FINGER_ORDER = ["thumb", "index", "middle", "ring", "little"];
-const FINGER_NAVIGATION_ORDER = [...FINGER_ORDER, "all"];
+const FINGER_RIGHT_NAVIGATION_SEQUENCE = [
+  "all",
+  "thumb",
+  "little",
+  "ring",
+  "middle",
+  "index",
+  "thumb",
+  "all",
+];
 const FINGER_CLOSEUP_DURATION_MS = 1050;
 const FINGER_OVERVIEW_DURATION_MS = 1250;
 const FINGER_CLOSEUP_FOV = 40;
@@ -1018,6 +1029,7 @@ const state = {
   surfaceRenderMode: "physical_proxy",
   geometryDisplayMode: "thumb_holder",
   selectedFinger: "thumb",
+  fingerNavigationIndex: 1,
   fingerCloseupActive: false,
   surfaceFullscreenActive: false,
   surfaceNativeFullscreenEntered: false,
@@ -1798,12 +1810,6 @@ function updateOperatorStreamSummary() {
     traceChip.textContent = state.paused ? "PAUSED" : "";
     traceChip.dataset.streamTone = state.paused ? "paused" : "idle";
     traceChip.title = state.paused ? "Display paused" : "";
-  }
-  const signalSummary = document.getElementById("signalQaSummary");
-  if (signalSummary) {
-    signalSummary.textContent = "";
-    signalSummary.hidden = true;
-    signalSummary.setAttribute("aria-hidden", "true");
   }
 }
 
@@ -3927,22 +3933,43 @@ function focusFingerCloseup(fingerId, { durationMs = FINGER_CLOSEUP_DURATION_MS 
   return beginCameraTransition(pose, { closeup: true, durationMs });
 }
 
-function cycleFingerCloseup(direction) {
-  const currentIndex = Math.max(
-    0,
-    FINGER_NAVIGATION_ORDER.indexOf(state.selectedFinger)
-  );
+function cycleFingerCloseup(horizontalDirection) {
+  const lastIndex = FINGER_RIGHT_NAVIGATION_SEQUENCE.length - 1;
+  const currentIndex = Number.isInteger(state.fingerNavigationIndex)
+    ? Math.max(0, Math.min(lastIndex, state.fingerNavigationIndex))
+    : defaultFingerNavigationIndex(state.selectedFinger);
   const nextIndex =
-    (currentIndex +
-      (direction < 0 ? -1 : 1) +
-      FINGER_NAVIGATION_ORDER.length) %
-    FINGER_NAVIGATION_ORDER.length;
-  setSelectedFinger(FINGER_NAVIGATION_ORDER[nextIndex], { focusCamera: true });
+    horizontalDirection > 0
+      ? currentIndex >= lastIndex
+        ? 1
+        : currentIndex + 1
+      : currentIndex <= 0
+        ? lastIndex - 1
+        : currentIndex - 1;
+  setSelectedFinger(FINGER_RIGHT_NAVIGATION_SEQUENCE[nextIndex], {
+    focusCamera: true,
+    navigationIndex: nextIndex,
+  });
 }
 
-function setSelectedFinger(fingerId, { focusCamera = false } = {}) {
+function defaultFingerNavigationIndex(fingerId) {
+  const normalized = String(fingerId || "thumb").toLowerCase();
+  const index = FINGER_RIGHT_NAVIGATION_SEQUENCE.indexOf(normalized);
+  return index >= 0 ? index : 1;
+}
+
+function setSelectedFinger(
+  fingerId,
+  { focusCamera = false, navigationIndex = null } = {}
+) {
   const normalized = String(fingerId || "thumb").toLowerCase();
   state.selectedFinger = [...FINGER_ORDER, "all"].includes(normalized) ? normalized : "thumb";
+  state.fingerNavigationIndex = Number.isInteger(navigationIndex)
+    ? Math.max(
+        0,
+        Math.min(FINGER_RIGHT_NAVIGATION_SEQUENCE.length - 1, navigationIndex)
+      )
+    : defaultFingerNavigationIndex(state.selectedFinger);
   updateFingerSensorFocusStyles();
   updateFingerScopeLabels();
   if (focusCamera) {
@@ -4123,6 +4150,7 @@ async function loadThumbSceneConfig() {
   state.selectedFinger = [...FINGER_ORDER, "all"].includes(configuredFinger)
     ? configuredFinger
     : "thumb";
+  state.fingerNavigationIndex = defaultFingerNavigationIndex(state.selectedFinger);
   if (fingerFocusSelect) fingerFocusSelect.value = state.selectedFinger;
   state.thumbModelMessage = "using local STL thumb holder fallback";
   const configuredMode = state.thumbSceneConfig?.thumb_holder_scene?.default_geometry_mode;
@@ -4669,9 +4697,7 @@ function exposeThreeDebugHandle() {
       return focusFingerCloseup(normalized, { durationMs });
     },
     showWholeHandOverview(animated = true) {
-      state.selectedFinger = "all";
-      updateFingerSensorFocusStyles();
-      updateFingerScopeLabels();
+      setSelectedFinger("all");
       applyThumbCameraConfig({
         animated,
         keepFingerNavigation: true,
@@ -6777,17 +6803,6 @@ function updateUI(frame) {
   const heldMeasurement = measurementAvailable && sourceDisplayState.tone === "idle" && !state.demoModeActive;
   const displayRecord = measurementAvailable ? record : null;
   const measurementState = !measurementAvailable ? "no_data" : heldMeasurement ? "held" : state.demoModeActive ? "demo" : "current";
-  const opticalSummaryLabel =
-    measurementState === "no_data"
-      ? "No wavelength frame"
-      : measurementState === "held"
-        ? "Last frame · held"
-        : measurementState === "demo"
-          ? state.displayMode === "operator" ? "Local Δλ response" : "Simulated Δλ · fixed peak height"
-          : hybridSpectrumEvidence
-            ? "Live full spectrum · λ + intensity"
-            : "Live wavelength response";
-  setText("opticalSummaryState", opticalSummaryLabel);
   if (opticalSummaryCard) opticalSummaryCard.dataset.measurementState = measurementState;
   updateOperatorAlert({ record, sourceState: sourceDisplayState, operatorQa, measurementAvailable });
   setText("topQaStatus", operatorQa);
