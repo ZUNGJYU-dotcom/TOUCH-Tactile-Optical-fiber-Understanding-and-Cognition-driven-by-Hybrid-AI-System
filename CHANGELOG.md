@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.15.3 - 2026-07-26
+
+### Five-finger navigation
+
+- Corrected right navigation to follow
+  `All -> Thumb -> Little -> Ring -> Middle -> Index -> Thumb -> All`.
+- Kept left navigation as the reverse traversal of the same physical order.
+- Replaced framed navigation buttons with translucent stationary arrows and
+  reduced pressed-state movement so the controls no longer jump.
+
+### Desktop transition and compact layout
+
+- Added lightweight native-window snapshot transitions for minimize and restore
+  without repeatedly resizing the live WebGL scene.
+- Kept compact Operator and Diagnostics labels, commands, and summary content
+  inside their panels at reduced window sizes.
+- Preserved the trained model, BaySpec demodulation, coupling logic, PX6D
+  synchronization, and five-finger geometry without behavioral changes.
+
+### Validation
+
+- Python test suite passed: 260 tests and 13 subtests.
+- Python compilation and JavaScript syntax checks passed.
+- Packaged Windows self-test completed successfully.
+
 ## v0.15.2 - 2026-07-25
 
 ### Code cleanup
