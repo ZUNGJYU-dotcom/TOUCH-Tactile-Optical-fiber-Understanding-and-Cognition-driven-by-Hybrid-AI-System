@@ -17,6 +17,8 @@ import urllib.request
 import uvicorn
 import webview
 
+from desktop_window_zoom import MacStyleTaskbarZoom
+
 
 APP_TITLE = "TOUCH"
 DEFAULT_PORT = 8640
@@ -319,12 +321,21 @@ class DesktopApi:
 
     def __init__(self, *, initially_maximized: bool = False) -> None:
         self._is_maximized = bool(initially_maximized)
+        self._window_zoom = MacStyleTaskbarZoom(
+            app_title=APP_TITLE,
+            logger=write_log,
+        )
+
+    def attach_window(self, window: Any) -> None:
+        enable_borderless_taskbar_toggle(window)
+        self._window_zoom.attach(window)
 
     def note_window_maximized(self) -> None:
         self._is_maximized = True
 
     def note_window_restored(self) -> None:
         self._is_maximized = False
+        self._window_zoom.note_restored()
 
     @staticmethod
     def _desktop_window() -> Any | None:
@@ -335,7 +346,8 @@ class DesktopApi:
         if window is None:
             return {"ok": False, "status": "desktop_window_not_ready"}
         write_log("Desktop command: minimize")
-        window.minimize()
+        if not self._window_zoom.minimize(window):
+            window.minimize()
         return {"ok": True, "status": "window_minimized"}
 
     def toggle_maximize_window(self) -> dict[str, object]:
@@ -368,6 +380,7 @@ class DesktopApi:
         window = self._desktop_window()
         if window is None:
             return {"ok": False, "status": "desktop_window_not_ready"}
+        self._window_zoom.detach()
         window.destroy()
         return {"ok": True, "status": "window_closed"}
 
@@ -446,9 +459,10 @@ def main() -> int:
 
         window.events.maximized += desktop_api.note_window_maximized
         window.events.restored += desktop_api.note_window_restored
-        window.events.shown += enable_borderless_taskbar_toggle
+        window.events.shown += desktop_api.attach_window
 
         def on_closed() -> None:
+            desktop_api._window_zoom.detach()
             if owns_backend:
                 request_backend_shutdown(server_holder)
 

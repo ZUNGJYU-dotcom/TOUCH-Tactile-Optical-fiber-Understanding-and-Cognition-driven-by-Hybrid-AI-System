@@ -903,27 +903,25 @@ button.active-watch,
 .finger-closeup-nav {
   position: absolute;
   top: 50%;
+  margin-top: -40px;
   z-index: 12;
   display: inline-grid;
-  width: 48px;
-  height: 48px;
+  width: 64px;
+  height: 80px;
   padding: 0;
   place-items: center;
-  border: 1px solid rgba(171, 197, 215, 0.76);
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.72);
-  color: #17384f;
-  box-shadow:
-    0 10px 28px rgba(56, 91, 116, 0.16),
-    inset 0 1px 0 rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(14px) saturate(145%);
-  -webkit-backdrop-filter: blur(14px) saturate(145%);
-  transform: translateY(-50%);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: rgba(23, 56, 79, 0.48);
+  opacity: 0.72;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  transform: none;
   transition:
-    background-color 180ms ease,
-    border-color 180ms ease,
-    box-shadow 180ms ease,
-    transform 180ms ease;
+    color 180ms ease,
+    opacity 180ms ease;
 }
 
 .finger-closeup-nav[hidden] {
@@ -931,22 +929,23 @@ button.active-watch,
 }
 
 .finger-closeup-nav svg {
-  width: 24px;
-  height: 24px;
-  stroke-width: 1.8;
+  width: 34px;
+  height: 34px;
+  stroke-width: 1.7;
+  filter: drop-shadow(0 2px 4px rgba(40, 79, 105, 0.12));
 }
 
 .finger-closeup-nav:hover {
-  border-color: rgba(70, 157, 197, 0.78);
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow:
-    0 13px 32px rgba(51, 94, 123, 0.21),
-    inset 0 1px 0 #ffffff;
+  border-color: transparent;
+  background: transparent;
+  color: rgba(23, 56, 79, 0.82);
+  opacity: 1;
+  box-shadow: none;
 }
 
 .finger-closeup-nav:focus-visible {
-  outline: 3px solid rgba(24, 143, 184, 0.25);
-  outline-offset: 3px;
+  outline: none;
+  color: rgba(23, 56, 79, 0.82);
 }
 
 .finger-closeup-nav-previous {
@@ -957,12 +956,13 @@ button.active-watch,
   right: 18px;
 }
 
-.finger-closeup-nav-previous:hover {
-  transform: translate(-2px, -50%);
+.finger-closeup-nav:hover,
+.finger-closeup-nav:active {
+  transform: none;
 }
 
-.finger-closeup-nav-next:hover {
-  transform: translate(2px, -50%);
+.finger-closeup-nav:active {
+  opacity: 0.84;
 }
 
 .app-shell.surface-fullscreen-active .finger-closeup-nav-previous {
@@ -8321,4 +8321,99 @@ body.pywebview-desktop .app-shell:not(.surface-fullscreen-active) .twin-stage,
 body.pywebview-desktop .app-shell:not(.surface-fullscreen-active) .right-panel {
   min-height: 0 !important;
   max-height: 100% !important;
+}
+
+/* Camera navigation is a spatial overlay, not an Operator toolbar button.
+   Keep the hit target generous while rendering only the translucent chevron. */
+.operator-mode button.finger-closeup-nav {
+  top: 50% !important;
+  margin-top: -40px !important;
+  width: 64px !important;
+  min-height: 80px !important;
+  height: 80px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: rgba(23, 56, 79, 0.48) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  outline: none !important;
+  transform: none !important;
+}
+
+.operator-mode button.finger-closeup-nav:hover,
+.operator-mode button.finger-closeup-nav:active {
+  border-color: transparent !important;
+  background: transparent !important;
+  color: rgba(23, 56, 79, 0.82) !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+/* Compact spectrum-card integrity. The title no longer carries a subtitle,
+   and every remaining row owns a bounded part of the card. This protects the
+   force card below it at the 1024 x 680 desktop minimum. */
+.response-hud #traceChip[hidden] {
+  display: none !important;
+}
+
+.operator-mode .summary-hud,
+.diagnostics-mode .summary-hud {
+  box-sizing: border-box;
+  contain: layout paint;
+  isolation: isolate;
+}
+
+.operator-mode .summary-hud > .hud-title-row {
+  min-height: 30px;
+}
+
+.operator-mode .summary-hud > .optical-preview-shell,
+.operator-mode .summary-hud > .optical-kpi-grid {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.operator-mode .summary-hud > .optical-kpi-grid {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+}
+
+.diagnostics-mode .left-panel {
+  grid-template-rows: 210px minmax(224px, auto) auto !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  scrollbar-gutter: stable;
+}
+
+.diagnostics-mode .summary-hud {
+  height: auto !important;
+  min-height: 224px !important;
+  max-height: none !important;
+  overflow: hidden !important;
+}
+
+.diagnostics-mode .summary-hud > div.optical-kpi-grid {
+  min-height: 142px !important;
+  grid-template-rows: repeat(2, minmax(65px, 1fr)) !important;
+  overflow: hidden !important;
+}
+
+@media (max-width: 1100px), (max-height: 720px) {
+  .operator-mode .left-panel {
+    grid-template-rows: 138px minmax(238px, auto) auto !important;
+  }
+
+  .operator-mode .summary-hud {
+    min-height: 238px !important;
+    grid-template-rows: auto minmax(78px, 1fr) auto !important;
+  }
+
+  .operator-mode .summary-hud > .optical-kpi-grid {
+    min-height: 89px !important;
+    grid-template-rows: repeat(2, 42px) !important;
+  }
 }

@@ -13,6 +13,16 @@ from desktop_launcher import (
     DesktopApi,
     enable_borderless_taskbar_toggle,
 )
+from desktop_window_zoom import (
+    MAX_SNAPSHOT_HEIGHT,
+    MAX_SNAPSHOT_WIDTH,
+    ZoomRect,
+    interpolate_zoom_rect,
+    scaled_snapshot_size,
+    smootherstep,
+    thumbnail_rect_for_taskbar,
+    union_zoom_rect,
+)
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +40,7 @@ def test_desktop_window_uses_light_frameless_chrome() -> None:
     assert "maximized=False" in launcher
     assert "window.events.maximized += desktop_api.note_window_maximized" in launcher
     assert "window.events.restored += desktop_api.note_window_restored" in launcher
-    assert "window.events.shown += enable_borderless_taskbar_toggle" in launcher
+    assert "window.events.shown += desktop_api.attach_window" in launcher
 
 
 def test_borderless_window_restores_native_taskbar_toggle_contract() -> None:
@@ -72,6 +82,41 @@ def test_taskbar_toggle_setup_is_idempotent() -> None:
 
     user32.SetWindowLongPtrW.assert_not_called()
     user32.SetWindowPos.assert_not_called()
+
+
+def test_taskbar_thumbnail_preserves_the_window_aspect_ratio() -> None:
+    source = ZoomRect(0.0, 0.0, 1280.0, 800.0)
+    taskbar_button = ZoomRect(1633.0, 1504.0, 88.0, 96.0)
+    target = thumbnail_rect_for_taskbar(source, taskbar_button)
+
+    assert target.width / target.height == source.width / source.height
+    assert target.center_x == taskbar_button.center_x
+    assert target.center_y == taskbar_button.center_y
+
+
+def test_snapshot_zoom_uses_zero_velocity_endpoints() -> None:
+    source = ZoomRect(0.0, 0.0, 1280.0, 800.0)
+    target = ZoomRect(1646.0, 1532.0, 62.0, 39.0)
+
+    assert smootherstep(0.0) == 0.0
+    assert smootherstep(1.0) == 1.0
+    assert interpolate_zoom_rect(source, target, 0.0) == source
+    assert interpolate_zoom_rect(source, target, 1.0) == target
+
+
+def test_snapshot_zoom_caps_the_animated_bitmap_and_uses_fixed_overlay_bounds() -> None:
+    width, height = scaled_snapshot_size(2048, 1280)
+    source = ZoomRect(100.0, 80.0, 1200.0, 800.0)
+    target = ZoomRect(900.0, 1040.0, 80.0, 52.0)
+    overlay = union_zoom_rect(source, target)
+
+    assert (width, height) == (896, 560)
+    assert width <= MAX_SNAPSHOT_WIDTH
+    assert height <= MAX_SNAPSHOT_HEIGHT
+    assert overlay.x < source.x
+    assert overlay.y < source.y
+    assert overlay.x + overlay.width > target.x + target.width
+    assert overlay.y + overlay.height > target.y + target.height
 
 
 def test_custom_titlebar_carries_touch_and_keeps_native_window_commands() -> None:
@@ -165,6 +210,8 @@ def test_window_resize_defers_expensive_canvas_reflow() -> None:
 def test_desktop_window_commands_call_the_native_window() -> None:
     window = Mock()
     api = DesktopApi(initially_maximized=True)
+    api._window_zoom = Mock()
+    api._window_zoom.minimize.return_value = False
     with patch("desktop_launcher.webview.windows", [window]):
         assert api.minimize_window()["ok"] is True
         restored = api.toggle_maximize_window()
@@ -176,6 +223,7 @@ def test_desktop_window_commands_call_the_native_window() -> None:
     window.restore.assert_not_called()
     window.maximize.assert_not_called()
     window.destroy.assert_called_once_with()
+    api._window_zoom.detach.assert_called_once_with()
     assert restored == {
         "ok": True,
         "status": "window_restored",
@@ -186,6 +234,44 @@ def test_desktop_window_commands_call_the_native_window() -> None:
         "status": "window_maximized",
         "maximized": True,
     }
+
+
+def test_minimize_uses_snapshot_transition_without_scaling_the_webgl_workspace() -> None:
+    launcher = (APP_ROOT / "desktop_launcher.py").read_text(encoding="utf-8")
+    zoom = (APP_ROOT / "desktop_window_zoom.py").read_text(encoding="utf-8")
+    app_js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+    css = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
+    minimize_handler = app_js.split(
+        'desktopMinimizeButton?.addEventListener("click"',
+        1,
+    )[1].split("desktopMaximizeButton?.addEventListener", 1)[0]
+    assert 'invokeDesktopWindowCommand("minimize_window")' in minimize_handler
+    assert "setTimeout" not in minimize_handler
+    assert "DESKTOP_MINIMIZE_ANIMATION_MS" not in app_js
+    assert "__touchDesktopWindowState" not in app_js
+    assert "desktop-window-minimizing" not in css
+    assert "desktop-window-restoring" not in css
+    assert "touch-desktop-window-restore" not in css
+    assert "MacStyleTaskbarZoom" in launcher
+    assert "CopyFromScreen" in zoom
+    assert "Taskbar.TaskListButtonAutomationPeer" in zoom
+    assert "WM_SYSCOMMAND" in zoom
+    assert "SC_MINIMIZE" in zoom
+    assert "SC_RESTORE" in zoom
+    assert "scaled_snapshot_size" in zoom
+    assert 'Assembly.LoadFile(str(wpf_root / assembly_name))' in zoom
+    assert '"DoubleAnimation": DoubleAnimation' in zoom
+    assert "BeginAnimation(" in zoom
+    assert '"ScaleTransform": ScaleTransform' in zoom
+    assert '"TranslateTransform": TranslateTransform' in zoom
+    transition = zoom.split("def _start_transition", 1)[1].split(
+        "def _complete_minimize",
+        1,
+    )[0]
+    assert "self._overlay.Opacity =" not in transition
+    assert "self._overlay.Bounds =" not in transition
+    assert "timer.Interval" not in transition
+    assert "ShowWindowAsync" not in launcher
 
 
 def test_native_window_events_keep_the_toggle_state_synchronized() -> None:

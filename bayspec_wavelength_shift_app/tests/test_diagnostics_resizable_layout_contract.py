@@ -310,10 +310,7 @@ class DiagnosticsResizableLayoutContractTests(unittest.TestCase):
         )
 
     def test_response_trace_header_only_shows_a_plain_paused_state(self) -> None:
-        self.assertIn(
-            'id="signalQaSummary" class="explanatory-copy" hidden aria-hidden="true"',
-            self.html,
-        )
+        self.assertNotIn('id="signalQaSummary"', self.html)
         self.assertIn(
             'id="traceChip" class="chip" aria-live="polite" hidden>PAUSED</span>',
             self.html,
@@ -325,11 +322,11 @@ class DiagnosticsResizableLayoutContractTests(unittest.TestCase):
         self.assertIn('.operator-mode .response-hud #traceChip:not([hidden])', self.css)
         self.assertIn('.response-hud #traceChip:not([hidden])', self.css)
         self.assertIn('position: absolute', self.css)
-        diagnostics_summary = self.css.index('.diagnostics-mode .response-hud #signalQaSummary')
-        diagnostics_summary_block = self.css[
-            diagnostics_summary : self.css.index('}', diagnostics_summary) + 1
-        ]
-        self.assertIn('display: none !important', diagnostics_summary_block)
+        self.assertNotIn('document.getElementById("signalQaSummary")', self.js)
+
+    def test_spectrum_header_has_no_redundant_state_sentence(self) -> None:
+        self.assertNotIn('id="opticalSummaryState"', self.html)
+        self.assertNotIn('setText("opticalSummaryState"', self.js)
 
 
 if __name__ == "__main__":
