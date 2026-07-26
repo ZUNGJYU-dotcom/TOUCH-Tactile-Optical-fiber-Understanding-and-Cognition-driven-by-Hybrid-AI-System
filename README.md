@@ -11,24 +11,22 @@ fingerprint to estimate:
 It is a separate application. It does not replace or modify the retained PD
 voltage, optical-intensity, or provisional wavelength-shift editions.
 
-## Latest Update - v0.15.2
+## Latest Update - v0.15.3
 
-Version 0.15.2 is a conservative code-hygiene and desktop-stability release.
-Unreachable legacy frontend helpers and duplicated Diagnostics layout
-declarations were removed without changing the trained model, BaySpec
-demodulation, coupling logic, sensor geometry, or interaction contract. The
-Diagnostics header now grows with wrapped commands instead of clipping them at
-compact desktop widths.
+Version 0.15.3 polishes the five-finger inspection flow and native desktop
+transitions. Right navigation now follows the physical sequence
+`All -> Thumb -> Little -> Ring -> Middle -> Index -> Thumb -> All`; left
+navigation traverses the same sequence in reverse. The previous/next controls
+are translucent stationary arrows and no longer jump downward when pressed.
 
-The release retains the v0.15.1 whole-hand digital twin: the modified TOUCH
-thumb, fitted sensing surfaces on the other four fingertips, corrected inward
-thumb contact-skin deformation, whole-hand framing, and fingertip inspection
-transitions. Source STL seats, the geometry manifest, integrated whole-hand
-GLB, and reproducible integration tool remain included.
+Minimize and restore now use a lightweight native-window snapshot transition
+instead of resizing the live WebGL view. Compact Operator and Diagnostics
+layouts also keep labels and commands inside their panels at reduced window
+sizes.
 
-The current PX6D reconnect, synchronized optical-force recording, dedicated
-Record workspace, compact Operator UI, and trained static-spectrum runtime are
-unchanged. See [CHANGELOG.md](CHANGELOG.md) for the release summary.
+The trained model, BaySpec demodulation, coupling logic, PX6D synchronization,
+five-finger geometry, and scientific interpretation are unchanged. See
+[CHANGELOG.md](CHANGELOG.md) for the complete release summary.
 
 ## Recognition Contract
 
@@ -137,7 +135,7 @@ run_desktop.bat
 ```
 
 For the packaged Windows build, download
-`TOUCH-v0.15.2-windows-x64.zip` from the GitHub release, extract the complete
+`TOUCH-v0.15.3-windows-x64.zip` from the GitHub release, extract the complete
 `TOUCH` folder, and run `TOUCH\TOUCH.exe`. Do not move only the executable out
 of the extracted folder because its bundled runtime and assets are required.
 
