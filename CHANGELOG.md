@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.15.4 - 2026-07-27
+
+### Faster visible startup
+
+- Show the native TOUCH window before importing and starting the local API.
+- Use a lightweight startup view while the backend initializes, then navigate
+  the same window to the complete application after its health check succeeds.
+- Load Uvicorn lazily in the backend worker instead of blocking first paint.
+- Add explicit startup timing logs and a readable startup failure state.
+
+### Validation
+
+- Python test suite passed: 263 tests and 13 subtests.
+- Packaged Windows self-test completed successfully.
+- Packaged startup displayed the native window in about 1.8 seconds and reached
+  the full application in about 5.1 seconds on the development machine.
+
 ## v0.15.3 - 2026-07-26
 
 ### Five-finger navigation

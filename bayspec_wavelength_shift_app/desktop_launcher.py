@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+from html import escape
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,6 @@ import traceback
 from typing import Any
 import urllib.request
 
-import uvicorn
 import webview
 
 from desktop_window_zoom import MacStyleTaskbarZoom
@@ -34,6 +34,95 @@ SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
+
+
+def startup_document(app_root: Path, *, failed: bool = False) -> str:
+    """Return the lightweight page shown while the backend initializes."""
+
+    logo_path = app_root / "frontend" / "touch_system_icon.png"
+    logo_uri = logo_path.resolve().as_uri() if logo_path.is_file() else ""
+    title = "Unable to start" if failed else "Starting"
+    detail = "Close TOUCH and try again" if failed else "Preparing workspace"
+    activity = "" if failed else """
+      <div class="activity" aria-hidden="true">
+        <i></i><i></i><i></i>
+      </div>
+    """
+    close_action = (
+        """
+      <button class="close-action" type="button"
+        onclick="window.pywebview?.api?.close_window()">Close</button>
+        """
+        if failed
+        else ""
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{escape(APP_TITLE)}</title>
+  <style>
+    :root {{ color-scheme: light; font-family: "Segoe UI Variable", "Segoe UI", sans-serif; }}
+    * {{ box-sizing: border-box; }}
+    html, body {{ width: 100%; height: 100%; margin: 0; overflow: hidden; }}
+    body {{ background: #f4f7fa; color: #102236; }}
+    .titlebar {{
+      height: 48px; display: flex; align-items: center; gap: 10px;
+      padding: 0 18px; border-bottom: 1px solid #d8e3ec;
+      background: rgba(255, 255, 255, 0.94);
+    }}
+    .pywebview-drag-region {{ -webkit-app-region: drag; }}
+    .titlebar img {{ width: 25px; height: 25px; object-fit: contain; }}
+    .titlebar strong {{ font-size: 15px; letter-spacing: 0; }}
+    main {{
+      height: calc(100% - 48px); display: grid; place-items: center;
+      padding: 32px;
+    }}
+    .startup {{ display: grid; justify-items: center; gap: 14px; text-align: center; }}
+    .startup > img {{
+      width: 68px; height: 68px; object-fit: contain;
+      filter: drop-shadow(0 10px 18px rgba(50, 112, 140, 0.14));
+    }}
+    h1 {{ margin: 4px 0 0; font-size: 25px; font-weight: 700; letter-spacing: 0; }}
+    p {{ margin: 0; color: #607487; font-size: 15px; }}
+    .activity {{ display: flex; gap: 6px; height: 20px; align-items: center; margin-top: 4px; }}
+    .activity i {{
+      width: 7px; height: 7px; border-radius: 50%; background: #1598c2;
+      animation: pulse 1s ease-in-out infinite;
+    }}
+    .activity i:nth-child(2) {{ animation-delay: 0.14s; }}
+    .activity i:nth-child(3) {{ animation-delay: 0.28s; }}
+    .close-action {{
+      margin-top: 8px; min-width: 92px; height: 38px; border-radius: 6px;
+      border: 1px solid #a9c4d6; background: #fff; color: #15364c;
+      font: inherit; font-weight: 600; cursor: pointer;
+    }}
+    @keyframes pulse {{
+      0%, 70%, 100% {{ opacity: 0.25; transform: translateY(0); }}
+      35% {{ opacity: 1; transform: translateY(-4px); }}
+    }}
+    @media (prefers-reduced-motion: reduce) {{
+      .activity i {{ animation: none; opacity: 0.65; }}
+    }}
+  </style>
+</head>
+<body>
+  <header class="titlebar pywebview-drag-region">
+    {f'<img src="{escape(logo_uri)}" alt="">' if logo_uri else ""}
+    <strong>{escape(APP_TITLE)}</strong>
+  </header>
+  <main>
+    <section class="startup" aria-live="polite">
+      {f'<img src="{escape(logo_uri)}" alt="">' if logo_uri else ""}
+      <h1>{escape(title)}</h1>
+      <p>{escape(detail)}</p>
+      {activity}
+      {close_action}
+    </section>
+  </main>
+</body>
+</html>"""
 
 
 def is_frozen() -> bool:
@@ -266,8 +355,17 @@ def wait_until_ready(
     raise RuntimeError(f"Backend did not become ready: {last_error}")
 
 
+def load_uvicorn_module() -> Any:
+    """Import Uvicorn inside the backend worker instead of blocking first paint."""
+
+    import uvicorn
+
+    return uvicorn
+
+
 def run_backend(port: int, server_holder: dict[str, Any]) -> None:
     try:
+        uvicorn = load_uvicorn_module()
         from backend.main import app
 
         config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", access_log=False)
@@ -279,6 +377,43 @@ def run_backend(port: int, server_holder: dict[str, Any]) -> None:
         server_holder["startup_error"] = error
         server_holder["startup_traceback"] = traceback.format_exc()
         write_log(server_holder["startup_traceback"])
+
+
+def load_application_when_ready(
+    window: Any,
+    *,
+    app_root: Path,
+    app_url: str,
+    health_url: str,
+    backend_thread: threading.Thread | None,
+    server_holder: dict[str, Any],
+    ownership: dict[str, bool],
+    started_at: float,
+) -> None:
+    """Navigate the already-visible startup window once the backend is ready."""
+
+    try:
+        wait_until_ready(
+            health_url,
+            backend_thread=backend_thread,
+            server_holder=server_holder,
+        )
+        if backend_thread is not None and not backend_thread.is_alive():
+            ownership["owns_backend"] = False
+            write_log(
+                "Backend start lost the port race; reusing expected backend "
+                f"on port {DEFAULT_PORT}"
+            )
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        write_log(f"STARTUP_TIMING stage=backend_ready elapsed_ms={elapsed_ms:.1f}")
+        window.load_url(app_url)
+        write_log(
+            "STARTUP_TIMING stage=application_navigation "
+            f"elapsed_ms={(time.perf_counter() - started_at) * 1000.0:.1f}"
+        )
+    except Exception:
+        write_log(traceback.format_exc())
+        window.load_html(startup_document(app_root, failed=True))
 
 
 def request_backend_shutdown(server_holder: dict[str, Any]) -> bool:
@@ -409,34 +544,20 @@ class DesktopApi:
 
 
 def main() -> int:
+    started_at = time.perf_counter()
     app_root = configure_runtime_paths()
     write_log(f"Starting {APP_TITLE}; app_root={app_root}")
     port = DEFAULT_PORT
     server_holder: dict[str, Any] = {}
     health_url = f"http://127.0.0.1:{port}/api/health"
     app_url = f"http://127.0.0.1:{port}/?desktop=1"
-    owns_backend = False
+    ownership = {"owns_backend": False}
     backend_thread: threading.Thread | None = None
+    start_backend_after_window = False
     try:
         if port_is_free(port):
-            backend_thread = threading.Thread(
-                target=run_backend,
-                args=(port, server_holder),
-                name="touch-uvicorn-backend",
-                daemon=True,
-            )
-            backend_thread.start()
-            owns_backend = True
-            wait_until_ready(
-                health_url,
-                backend_thread=backend_thread,
-                server_holder=server_holder,
-            )
-            if not backend_thread.is_alive():
-                owns_backend = False
-                write_log(
-                    f"Backend start lost the port race; reusing expected backend on port {port}"
-                )
+            start_backend_after_window = True
+            ownership["owns_backend"] = True
         elif backend_is_ready(health_url, timeout_s=1.2):
             write_log(f"Reusing existing trained static-spectrum backend on port {port}")
         else:
@@ -445,7 +566,7 @@ def main() -> int:
         desktop_api = DesktopApi(initially_maximized=False)
         window = webview.create_window(
             APP_TITLE,
-            app_url,
+            html=startup_document(app_root),
             width=1180,
             height=760,
             min_size=(1024, 680),
@@ -459,18 +580,50 @@ def main() -> int:
 
         window.events.maximized += desktop_api.note_window_maximized
         window.events.restored += desktop_api.note_window_restored
-        window.events.shown += desktop_api.attach_window
+
+        def on_shown(window: Any) -> None:
+            desktop_api.attach_window(window)
+            write_log(
+                "STARTUP_TIMING stage=window_shown "
+                f"elapsed_ms={(time.perf_counter() - started_at) * 1000.0:.1f}"
+            )
+
+        window.events.shown += on_shown
 
         def on_closed() -> None:
             desktop_api._window_zoom.detach()
-            if owns_backend:
+            if ownership["owns_backend"]:
                 request_backend_shutdown(server_holder)
 
+        def finish_startup() -> None:
+            nonlocal backend_thread
+            if start_backend_after_window:
+                backend_thread = threading.Thread(
+                    target=run_backend,
+                    args=(port, server_holder),
+                    name="touch-uvicorn-backend",
+                    daemon=True,
+                )
+                backend_thread.start()
+            load_application_when_ready(
+                window,
+                app_root=app_root,
+                app_url=app_url,
+                health_url=health_url,
+                backend_thread=backend_thread,
+                server_holder=server_holder,
+                ownership=ownership,
+                started_at=started_at,
+            )
+
         window.events.closed += on_closed
-        webview.start(debug=False)
+        webview.start(finish_startup, debug=False)
         return 0
     finally:
-        if owns_backend and not stop_owned_backend(server_holder, backend_thread):
+        if ownership["owns_backend"] and not stop_owned_backend(
+            server_holder,
+            backend_thread,
+        ):
             write_log(
                 "Owned backend did not exit after graceful and forced shutdown waits"
             )

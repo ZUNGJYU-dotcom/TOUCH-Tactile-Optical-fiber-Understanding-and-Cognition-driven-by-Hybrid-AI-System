@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -19,8 +20,10 @@ from backend.main import SenseExportWatcher, _model_display_source_gate
 from bridge import BaySpecWavelengthShiftBridge
 from desktop_launcher import (
     health_payload_is_expected,
+    load_application_when_ready,
     run_backend,
     run_self_test,
+    startup_document,
     stop_owned_backend,
     wait_until_ready,
 )
@@ -177,8 +180,13 @@ class DesktopBackendShutdownTests(unittest.TestCase):
                 raise SystemExit(1)
 
         holder: dict[str, object] = {}
-        with patch("desktop_launcher.uvicorn.Config", return_value=object()), patch(
-            "desktop_launcher.uvicorn.Server", FailingServer
+        fake_uvicorn = SimpleNamespace(
+            Config=lambda *_args, **_kwargs: object(),
+            Server=FailingServer,
+        )
+        with patch(
+            "desktop_launcher.load_uvicorn_module",
+            return_value=fake_uvicorn,
         ), patch("desktop_launcher.write_log") as write_log:
             run_backend(8640, holder)
 
@@ -223,6 +231,78 @@ class DesktopBackendShutdownTests(unittest.TestCase):
                 backend_thread=DeadThread(),  # type: ignore[arg-type]
                 server_holder={"startup_error": "SystemExit: 1"},
             )
+
+    def test_startup_document_is_lightweight_and_operator_facing(self) -> None:
+        document = startup_document(Path(__file__).resolve().parents[1])
+
+        self.assertIn("<strong>TOUCH</strong>", document)
+        self.assertIn("<h1>Starting</h1>", document)
+        self.assertIn("Preparing workspace", document)
+        self.assertNotIn("uvicorn", document)
+        self.assertNotIn("model bundle", document)
+
+    def test_visible_startup_window_navigates_after_backend_is_ready(self) -> None:
+        class AliveThread:
+            @staticmethod
+            def is_alive() -> bool:
+                return True
+
+        class Window:
+            loaded_url: str | None = None
+
+            def load_url(self, url: str) -> None:
+                self.loaded_url = url
+
+            def load_html(self, _html: str) -> None:
+                raise AssertionError("successful startup must not load the error page")
+
+        window = Window()
+        ownership = {"owns_backend": True}
+        with patch("desktop_launcher.wait_until_ready"), patch(
+            "desktop_launcher.write_log"
+        ):
+            load_application_when_ready(
+                window,
+                app_root=Path(__file__).resolve().parents[1],
+                app_url="http://127.0.0.1:8640/?desktop=1",
+                health_url="http://127.0.0.1:8640/api/health",
+                backend_thread=AliveThread(),  # type: ignore[arg-type]
+                server_holder={},
+                ownership=ownership,
+                started_at=time.perf_counter(),
+            )
+
+        self.assertEqual(window.loaded_url, "http://127.0.0.1:8640/?desktop=1")
+        self.assertTrue(ownership["owns_backend"])
+
+    def test_startup_failure_stays_visible_with_a_close_action(self) -> None:
+        class Window:
+            loaded_html = ""
+
+            def load_url(self, _url: str) -> None:
+                raise AssertionError("failed startup must not navigate to the app")
+
+            def load_html(self, html: str) -> None:
+                self.loaded_html = html
+
+        window = Window()
+        with patch(
+            "desktop_launcher.wait_until_ready",
+            side_effect=RuntimeError("backend failed"),
+        ), patch("desktop_launcher.write_log"):
+            load_application_when_ready(
+                window,
+                app_root=Path(__file__).resolve().parents[1],
+                app_url="http://127.0.0.1:8640/?desktop=1",
+                health_url="http://127.0.0.1:8640/api/health",
+                backend_thread=None,
+                server_holder={},
+                ownership={"owns_backend": False},
+                started_at=time.perf_counter(),
+            )
+
+        self.assertIn("Unable to start", window.loaded_html)
+        self.assertIn("close_window", window.loaded_html)
 
 
 class RuntimeResponsivenessConfigTests(unittest.TestCase):

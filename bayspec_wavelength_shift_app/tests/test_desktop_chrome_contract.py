@@ -40,7 +40,10 @@ def test_desktop_window_uses_light_frameless_chrome() -> None:
     assert "maximized=False" in launcher
     assert "window.events.maximized += desktop_api.note_window_maximized" in launcher
     assert "window.events.restored += desktop_api.note_window_restored" in launcher
-    assert "window.events.shown += desktop_api.attach_window" in launcher
+    assert "window.events.shown += on_shown" in launcher
+    assert "desktop_api.attach_window(window)" in launcher
+    assert "html=startup_document(app_root)" in launcher
+    assert "webview.start(finish_startup, debug=False)" in launcher
 
 
 def test_borderless_window_restores_native_taskbar_toggle_contract() -> None:
