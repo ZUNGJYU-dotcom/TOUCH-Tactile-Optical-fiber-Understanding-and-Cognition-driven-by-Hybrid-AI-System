@@ -11,18 +11,18 @@ fingerprint to estimate:
 It is a separate application. It does not replace or modify the retained PD
 voltage, optical-intensity, or provisional wavelength-shift editions.
 
-## Latest Update - v0.15.3
+## Latest Update - v0.15.4
 
-Version 0.15.3 polishes the five-finger inspection flow and native desktop
-transitions. Right navigation now follows the physical sequence
-`All -> Thumb -> Little -> Ring -> Middle -> Index -> Thumb -> All`; left
-navigation traverses the same sequence in reverse. The previous/next controls
-are translucent stationary arrows and no longer jump downward when pressed.
+Version 0.15.4 improves perceived desktop startup without changing sensing,
+recognition, or visualization behavior. The native window now appears first
+with a lightweight TOUCH startup view while the local API and scientific
+runtime initialize in the background. The full workspace replaces that startup
+view as soon as the backend health check succeeds.
 
-Minimize and restore now use a lightweight native-window snapshot transition
-instead of resizing the live WebGL view. Compact Operator and Diagnostics
-layouts also keep labels and commands inside their panels at reduced window
-sizes.
+The packaged build displayed its startup window in about 1.8 seconds and
+navigated to the complete application in about 5.1 seconds on the development
+machine. These timings are indicative rather than a hardware-independent
+guarantee.
 
 The trained model, BaySpec demodulation, coupling logic, PX6D synchronization,
 five-finger geometry, and scientific interpretation are unchanged. See
@@ -135,7 +135,7 @@ run_desktop.bat
 ```
 
 For the packaged Windows build, download
-`TOUCH-v0.15.3-windows-x64.zip` from the GitHub release, extract the complete
+`TOUCH-v0.15.4-windows-x64.zip` from the GitHub release, extract the complete
 `TOUCH` folder, and run `TOUCH\TOUCH.exe`. Do not move only the executable out
 of the extracted folder because its bundled runtime and assets are required.
 

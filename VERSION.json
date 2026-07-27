@@ -1,9 +1,9 @@
 {
   "product": "TOUCH System",
   "edition": "Ordinary FBG Trained Static Spectrum Twin",
-  "version": "0.15.3",
-  "build_id": "static-spectrum-v15-3-navigation-desktop-transition",
-  "release_date": "2026-07-26",
+  "version": "0.15.4",
+  "build_id": "static-spectrum-v15-4-fast-visible-startup",
+  "release_date": "2026-07-27",
   "release_channel": "public_research",
   "primary_signal": "512_point_bayspec_full_spectrum",
   "primary_method": "hierarchical_static_spectral_classification",
