@@ -1,0 +1,80 @@
+schema_version: ordinary_fbg_px6d_training_v1
+
+data:
+  dataset_id: ordinary_fbg_px6d_20260731_latest_primary_v1
+  source_policy: strict_single_capture_root
+  required_capture_root_name: "new data"
+  required_session_id_prefix: "20260731_"
+  require_qa_for_every_session: true
+  provenance_hash_algorithm: sha256
+  provenance_files:
+    - session_metadata.json
+    - frame_summary.csv
+    - spectrum_timeseries.csv
+  expected_spectrum_points: 512
+  force_target_field: force_fz_n
+  position_source: session_metadata.position_label
+  formal_group_field: session_id
+  split_strategy: grouped_by_session_id
+  random_frame_split_allowed: false
+  primary_selection:
+    mode: latest_n_by_position
+    timestamp_field: started_at_epoch_sec
+    latest_n_by_position:
+      P11: 5
+      P12: 5
+      P21: 5
+    include_all_other_positions: true
+    non_primary_role: quarantine_suspected_label_position_error
+    non_primary_note: >-
+      Earlier P11, P12, and P21 sessions may contain position-selection or
+      labeling errors. Keep them immutable and available for manual audit,
+      but do not use them for fitting, model selection, or generalization
+      claims.
+
+baseline:
+  search_fraction: 0.20
+  maximum_force_n: 0.03
+  minimum_frames: 5
+  fallback_lowest_force_frames: 10
+
+labels:
+  no_contact_max_force_n: 0.03
+  contact_min_force_n: 0.10
+  position_min_force_n: 0.25
+  position_order: [P11, P21, P31, P12, P22, P32, P13, P23, P33]
+
+quality:
+  release_tail_warning_code: release_recovery_residual
+  release_tail_exclusion_fraction: 0.15
+  minimum_frames_per_session: 20
+  maximum_sync_offset_ms: 250.0
+
+features:
+  downsample_bins: 64
+  feature_sets:
+    baseline_relative_192:
+      include_derivative: false
+      include_global_summary: false
+    baseline_relative_264:
+      include_derivative: true
+      include_global_summary: true
+
+evaluation:
+  folds: 5
+  random_seed: 42
+  session_level_position_voting: true
+  training_weight_strategy: equal_session_mass
+  classification_class_weight: balanced
+
+models:
+  candidate_model_types:
+    - extra_trees
+    - random_forest
+    - lightgbm
+    - hist_gradient_boosting
+  cross_validation_tree_estimators: 120
+  final_tree_estimators: 240
+  minimum_leaf_samples: 2
+  candidate_only: true
+  deployment_status: candidate_not_deployed_pending_live_validation

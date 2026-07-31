@@ -24,11 +24,67 @@ class DiagnosticsWorkspaceSimplificationContractTests(unittest.TestCase):
                 re.S,
             ),
         )
-        self.assertIn("flex: 1 0 56px", self.css)
+        self.assertIn("flex: 1 0 52px", self.css)
+        self.assertIn("min-width: 52px", self.css)
         self.assertIn('button.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" })', self.js)
 
+    def test_compact_diagnostics_rail_keeps_all_workspace_tabs_visible(self) -> None:
+        pass5 = self.css.index("/* iOS clarity pass 5:")
+        compact_css = self.css[pass5:]
+        self.assertIn("@container diagnostics-rail (max-width: 359px)", compact_css)
+        self.assertIn("flex: 1 1 36px", compact_css)
+        self.assertIn("min-width: 36px", compact_css)
+        self.assertIn("font-size: 8.5px", compact_css)
+
+    def test_diagnostics_evidence_rail_uses_compact_single_line_titles(self) -> None:
+        pass20 = self.css.index("/* iOS clarity pass 20:")
+        compact_css = self.css[pass20:]
+        self.assertIn(
+            "container: diagnostics-left-evidence-rail / inline-size",
+            compact_css,
+        )
+        title_rule = compact_css.split(
+            ".diagnostics-mode .left-panel .hud-title-row h2 {", 1
+        )[1].split("}", 1)[0]
+        self.assertIn("font-size: 14px !important", title_rule)
+        self.assertIn("text-overflow: ellipsis", title_rule)
+        self.assertIn("white-space: nowrap", title_rule)
+        self.assertIn(
+            "@container diagnostics-left-evidence-rail (max-width: 185px)",
+            compact_css,
+        )
+
+    def test_diagnostics_spectrum_kpis_have_complete_line_boxes(self) -> None:
+        pass20 = self.css.index("/* iOS clarity pass 20:")
+        compact_css = self.css[pass20:]
+        grid_rule = compact_css.split(
+            ".diagnostics-mode .summary-hud > div.optical-kpi-grid {", 1
+        )[1].split("}", 1)[0]
+        self.assertIn("min-height: 146px !important", grid_rule)
+        self.assertIn(
+            "grid-template-rows: repeat(2, minmax(67px, 1fr)) !important",
+            grid_rule,
+        )
+        self.assertIn("overflow: visible !important", grid_rule)
+        label_rule = compact_css.split(
+            ".diagnostics-mode .optical-kpi-grid span {", 1
+        )[1].split("}", 1)[0]
+        self.assertIn("font-size: 10px !important", label_rule)
+        self.assertIn("text-overflow: ellipsis", label_rule)
+        self.assertIn("white-space: nowrap", label_rule)
+
+    def test_operator_camera_navigation_does_not_clutter_diagnostics(self) -> None:
+        self.assertRegex(
+            self.css,
+            re.compile(
+                r"\.diagnostics-mode \.finger-closeup-nav\s*\{[^}]*"
+                r"display:\s*none\s*!important",
+                re.S,
+            ),
+        )
+
     def test_workspace_tabs_use_compact_labels_with_accessible_full_names(self) -> None:
-        for visible_label in ("Signal", "Record", "Surface", "Demo", "Input", "Force", "Geometry"):
+        for visible_label in ("Signal", "Record", "Surface", "Demo", "Input", "Force", "3D"):
             self.assertIn(f"<span>{visible_label}</span>", self.html)
         for accessible_name in (
             "Signal diagnostics",

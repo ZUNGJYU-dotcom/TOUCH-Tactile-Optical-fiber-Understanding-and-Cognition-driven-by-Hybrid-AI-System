@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TOUCH</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/styles.css?v=taskbar-zoom-finger-cycle-v23" />
+    <link rel="stylesheet" href="/static/styles.css?v=ios-clarity-pass20-v41" />
     <script type="importmap">
       {
         "imports": {
@@ -53,10 +53,13 @@
             <small>Data source</small>
             <strong id="sourceChip">SDK idle</strong>
           </span>
-          <span class="status-item" title="Recognition mode">
-            <i data-lucide="activity" aria-hidden="true"></i>
-            <small>Mode</small>
-            <strong id="surfaceModeChip">Temporal validation</strong>
+          <span
+            id="sensorProfileStatusItem"
+            class="status-item"
+            title="Active profile: Ordinary FBG. mFBG intensity profile is integrated and awaiting real calibration."
+          >
+            <small>Profile</small>
+            <strong id="surfaceModeChip">Ordinary FBG</strong>
           </span>
           <span class="status-item qa-status-item" title="Quality status; details are available in Diagnostics">
             <i data-lucide="shield-check" aria-hidden="true"></i>
@@ -175,7 +178,7 @@
             </div>
             <canvas id="spectrumCanvas" class="spectrum-canvas"></canvas>
             <div class="spectrum-legend" aria-label="Spectrum marker legend">
-              <span><i class="target"></i>preliminary target</span>
+              <span><i class="target"></i><span id="spectrumReferenceLegend">preliminary target</span></span>
               <span><i class="detected"></i><span class="operator-only">detected peak</span><span class="diagnostics-only">detected / simulated peak</span></span>
               <span><i class="dominant"></i>dominant channel</span>
             </div>
@@ -204,8 +207,8 @@
       >
         <div class="settings-header">
           <div>
-            <strong id="settingsPanelTitle">View</strong>
-            <span class="explanatory-copy">Surface presentation</span>
+            <strong id="settingsPanelTitle">Settings</strong>
+            <span class="explanatory-copy">View and spectrum</span>
           </div>
           <button id="settingsCloseButton" class="ui-icon-button icon-only-button" type="button" aria-label="Close settings" data-tooltip="Close" title="Close settings">
             <i data-lucide="x" aria-hidden="true"></i>
@@ -221,6 +224,47 @@
           </div>
           <button id="settingsResetCameraButton" class="settings-wide-button" type="button">Reset 3D view</button>
         </section>
+
+        <section class="settings-section spectrum-processing-settings">
+          <div class="section-label">SPECTRUM DISPLAY</div>
+          <label class="settings-select-row" for="spectrumIntegrationSelect">
+            <span>Exposure</span>
+            <select id="spectrumIntegrationSelect">
+              <option value="5000">5 ms</option>
+              <option value="10000">10 ms</option>
+              <option value="20000">20 ms</option>
+              <option value="40000">40 ms</option>
+            </select>
+          </label>
+          <label class="settings-toggle-row">
+            <span>Update overlay</span>
+            <input id="spectrumOverlayToggle" type="checkbox" checked />
+          </label>
+          <label class="settings-toggle-row">
+            <span>Subtract background</span>
+            <input id="spectrumBackgroundToggle" type="checkbox" />
+          </label>
+          <label class="settings-toggle-row">
+            <span>Baseline correction</span>
+            <input id="spectrumBaselineToggle" type="checkbox" checked />
+          </label>
+          <label class="settings-toggle-row">
+            <span>Spectrum smoothing</span>
+            <input id="spectrumSmoothingToggle" type="checkbox" checked />
+          </label>
+          <label class="settings-toggle-row">
+            <span>Normalize to I0</span>
+            <input id="spectrumNormalizationToggle" type="checkbox" checked />
+          </label>
+          <div class="settings-button-grid">
+            <button id="spectrumCaptureBackgroundButton" type="button">Capture dark</button>
+            <button id="spectrumClearBackgroundButton" type="button">Clear dark</button>
+          </div>
+          <div class="spectrum-processing-state">
+            <span id="spectrumProcessingStatus">Display: raw</span>
+            <span id="spectrumBackgroundStatus">Dark: none</span>
+          </div>
+        </section>
       </aside>
 
       <main class="dashboard">
@@ -233,8 +277,8 @@
               <span id="traceChip" class="chip" aria-live="polite" hidden>PAUSED</span>
             </div>
             <div class="trace-kpi-strip" aria-label="Response trace summary">
-              <span><small id="traceCurrentLabel">Now · pm</small><strong id="traceCurrentValue">--</strong></span>
-              <span><small id="tracePeakLabel">Peak · pm</small><strong id="tracePeakValue">--</strong></span>
+              <span><small id="traceCurrentLabel">Now</small><strong id="traceCurrentValue">--</strong></span>
+              <span><small id="tracePeakLabel">Peak</small><strong id="tracePeakValue">--</strong></span>
               <span><small>History</small><strong id="traceHistoryValue">--</strong></span>
             </div>
             <canvas id="traceCanvas" class="chart-canvas"></canvas>
@@ -253,14 +297,11 @@
               <div>
                 <h2>Spectrum</h2>
               </div>
-              <span class="chip spectrum-open-chip icon-chip" aria-hidden="true"><i data-lucide="chart-spline"></i></span>
             </div>
             <div class="optical-preview-shell" aria-label="Current optical spectrum preview">
               <canvas id="opticalPreviewCanvas" class="optical-preview-canvas"></canvas>
               <div class="optical-preview-empty-state" aria-hidden="true">
-                <i data-lucide="chart-spline"></i>
                 <strong>No spectrum frame</strong>
-                <span>IDLE</span>
               </div>
             </div>
             <div class="optical-kpi-grid" aria-label="Full spectrum evidence summary values">
@@ -271,11 +312,11 @@
             </div>
           </div>
 
-          <div class="hud-card operator-current-hud" aria-label="Force sensor">
+          <div class="hud-card operator-current-hud" aria-label="Force sensor" aria-hidden="true" hidden>
             <div class="hud-title-row">
               <h2>Force Sensor</h2>
             </div>
-            <div class="px6d-reference-row operator-force-readout" aria-label="Force sensor">
+            <div class="px6d-reference-row operator-force-readout" aria-label="Force sensor" aria-hidden="true" hidden>
               <div>
                 <span>Fz</span>
                 <strong id="px6dReferenceFz">-- N</strong>
@@ -289,19 +330,19 @@
         <section class="twin-stage">
           <div class="stage-header">
             <div>
-              <h2 id="tactileSurfaceTitle">Thumb Tactile Surface</h2>
-              <span id="surfaceProxyCaption" class="explanatory-copy">Sensor slot response surface</span>
+              <h2 id="tactileSurfaceTitle">Five-Finger Tactile Surface</h2>
+              <span id="surfaceProxyCaption" class="explanatory-copy">Shared response proxy across five fingertip views</span>
             </div>
             <div class="stage-actions">
               <label id="fingerFocusControl" class="finger-focus-control" title="Select the fingertip used by the spectrum and 3x3 response views">
-                <span>Finger</span>
-                <select id="fingerFocusSelect" aria-label="Select tactile finger">
+                <span>View</span>
+                <select id="fingerFocusSelect" aria-label="Select fingertip inspection view">
                   <option value="thumb">Thumb</option>
                   <option value="index">Index</option>
                   <option value="middle">Middle</option>
                   <option value="ring">Ring</option>
                   <option value="little">Little</option>
-                  <option value="all">All</option>
+                  <option value="all" selected>All</option>
                 </select>
               </label>
               <button id="wholeHandModeButton" type="button">Whole hand</button>
@@ -418,13 +459,14 @@
               <div><span>Active area</span><strong id="surfaceActiveArea">--</strong></div>
               <div><span>Center position</span><strong id="surfaceCenter">--</strong></div>
               <div><span>Dominant channel</span><strong id="surfaceDominantChannel">--</strong></div>
-              <div><span>Coupling status</span><strong id="surfaceRuleSource">coupled</strong></div>
+              <div><span>Coupling status</span><strong id="surfaceRuleSource">--</strong></div>
               <div class="fullscreen-hidden-summary-field"><span>Frame state</span><strong id="surfaceFrameState">IDLE</strong></div>
+              <div id="opticalForceEstimateField" hidden><span>Estimated Force</span><strong id="opticalForceEstimate">-- N</strong></div>
             </div>
           </div>
 
           <div class="operator-footprint-card">
-            <div id="footprintTitle" class="section-label">Global FBG Fingerprint</div>
+            <div id="footprintTitle" class="section-label">Shared 3x3 Contact Map</div>
             <div class="mini-array-grid" aria-label="Nine FBG wavelength-order fingerprint">
               <div id="footprintP11" class="mini-pixel"><strong>FBG01</strong><span>--</span></div>
               <div id="footprintP21" class="mini-pixel"><strong>FBG02</strong><span>--</span></div>
@@ -436,13 +478,13 @@
               <div id="footprintP23" class="mini-pixel"><strong>FBG08</strong><span>--</span></div>
               <div id="footprintP33" class="mini-pixel"><strong>FBG09</strong><span>--</span></div>
             </div>
-            <p id="footprintNote" class="explanatory-copy">Wavelength-order candidates; physical P11-P33 mapping pending</p>
+            <p id="footprintNote" class="explanatory-copy">One response is mirrored across the five fingertip views</p>
           </div>
 
           <div class="operator-band-card">
-            <div class="section-label">Optical Response</div>
+            <div id="responseBandTitle" class="section-label">Optical Response</div>
             <div class="response-band-track" aria-label="Continuous normalized optical response from 0 to 100 percent">
-              <span id="responseBandMarker"></span>
+              <span id="responseBandMarker" role="meter" aria-valuemin="0" aria-valuemax="100">--</span>
             </div>
             <div class="response-band-labels">
               <span>0%</span>
@@ -474,7 +516,7 @@
               <i data-lucide="gauge" aria-hidden="true"></i><span>Force</span>
             </button>
             <button data-diagnostic-tab="geometry" data-tooltip="Geometry diagnostics" type="button" role="tab" aria-label="Geometry diagnostics" aria-selected="false">
-              <i data-lucide="boxes" aria-hidden="true"></i><span>Geometry</span>
+              <i data-lucide="boxes" aria-hidden="true"></i><span>3D</span>
             </button>
           </nav>
 
@@ -595,6 +637,16 @@
                 <div><span>Peak source</span><strong id="p22PeakSource">--</strong></div>
               </div>
             </details>
+          </details>
+
+          <details class="prediction-card diagnostics-only diagnostic-card diagnostic-profile-card" data-diagnostic-group="signal" open>
+            <summary class="section-label">SENSOR PROFILES</summary>
+            <div class="status-grid diagnostic-health-grid">
+              <div><span>Current runtime</span><strong id="mfbgCurrentRuntime" data-health-tone="ok">Ordinary FBG</strong></div>
+              <div><span>Future primary</span><strong id="mfbgFuturePrimary" data-health-tone="demo">mFBG 3x3</strong></div>
+              <div><span>mFBG signal</span><strong id="mfbgSignalMode" data-health-tone="neutral">Optical intensity</strong></div>
+              <div><span>Real mFBG array</span><strong id="mfbgRealArrayStatus" data-health-tone="warning">Disabled</strong></div>
+            </div>
           </details>
 
           <details class="prediction-card diagnostics-only diagnostic-card diagnostic-frame-card" data-diagnostic-group="acquisition">
@@ -891,7 +943,7 @@
                 <input id="demoSpeedControl" type="range" min="0.1" max="2" step="0.1" value="1" aria-label="Playback speed" />
                 <output id="demoSpeedValue" for="demoSpeedControl">1.0x</output>
               </div>
-              <button class="demo-step" data-demo-level="no_contact" type="button">Legacy P22 fallback</button>
+              <button class="demo-step" data-demo-level="no_contact" type="button">No contact</button>
               <button class="array-demo-step" data-array-scenario="center_press" type="button">Center contact</button>
               <button class="array-demo-step" data-array-scenario="p21_contact" type="button">P21 contact</button>
               <button class="array-demo-step" data-array-scenario="p12_contact" type="button">P12 contact</button>
@@ -914,6 +966,6 @@
 
     </div>
     <script src="/static/vendor/lucide/lucide.min.js"></script>
-    <script type="module" src="/static/app.js?v=taskbar-zoom-finger-cycle-v20"></script>
+    <script type="module" src="/static/app.js?v=acceptance-remediation-v16-1"></script>
   </body>
 </html>

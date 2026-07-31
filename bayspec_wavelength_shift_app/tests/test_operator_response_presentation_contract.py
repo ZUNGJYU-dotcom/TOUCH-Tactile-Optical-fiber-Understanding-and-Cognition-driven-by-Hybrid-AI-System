@@ -58,6 +58,51 @@ class OperatorResponsePresentationContractTests(unittest.TestCase):
         self.assertIn("responseBandValue.setAttribute(", app_js)
         self.assertIn('"aria-label"', app_js)
 
+    def test_beta_force_gauge_uses_optical_estimate_and_numeric_cursor(self) -> None:
+        html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        app_js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+        styles = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
+
+        helper = app_js.split("function opticalForcePresentation", 1)[1].split(
+            "function activeModelDisplayName", 1
+        )[0]
+        gauge = app_js.split("const forcePresentation = opticalForcePresentation", 1)[1].split(
+            'let note = "raw coupled response";', 1
+        )[0]
+
+        self.assertIn("runtimeFrame?.all_source_beta_model", helper)
+        self.assertIn("state.betaForceDisplayEnabled === true", helper)
+        self.assertIn('"/api/health"', app_js)
+        self.assertIn("loadRuntimeCapabilities()", app_js)
+        self.assertIn("prediction?.estimated_force_fz_n", helper)
+        self.assertIn("OPTICAL_FORCE_DISPLAY_MAX_N = 5", app_js)
+        self.assertIn('"Estimated Force"', gauge)
+        self.assertIn("marker.textContent = allSourceBeta", gauge)
+        self.assertIn("estimatedForceN.toFixed(2)", gauge)
+        self.assertIn('marker.setAttribute("role", "meter")', gauge)
+        self.assertIn('marker.setAttribute("aria-valuenow"', gauge)
+        self.assertIn("Estimated Force", html)
+        self.assertIn(".operator-band-card.force-estimate-mode", styles)
+
+    def test_px6d_reference_is_hidden_from_operator_but_kept_in_diagnostics(self) -> None:
+        html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        styles = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'class="hud-card operator-current-hud" aria-label="Force sensor" '
+            'aria-hidden="true" hidden',
+            html,
+        )
+        self.assertIn(
+            'class="px6d-reference-row operator-force-readout" aria-label="Force sensor" '
+            'aria-hidden="true" hidden',
+            html,
+        )
+        self.assertIn('id="diagnosticPx6dFz"', html)
+        self.assertIn('id="diagnosticPx6dTareButton"', html)
+        self.assertIn("html body .operator-current-hud[hidden]", styles)
+        self.assertIn("html body .operator-force-readout[hidden]", styles)
+
     def test_contact_footprint_separates_contact_from_coupled_neighbors(self) -> None:
         app_js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
         styles = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")

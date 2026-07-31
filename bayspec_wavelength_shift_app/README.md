@@ -1,28 +1,52 @@
-# TOUCH System - Trained Static Spectrum Twin
+# TOUCH
 
-Standalone BaySpec desktop application for trained ordinary-FBG static
-spectrum recognition. It is separate from the PD-voltage, optical-intensity,
-and provisional wavelength-shift applications.
+Standalone BaySpec desktop application for ordinary-FBG all-data optical
+recognition and experimental `Fz` estimation. It is separate from the
+PD-voltage, optical-intensity, and provisional wavelength-shift applications.
 
-## v0.15.3 Desktop Update
+## Future mFBG Profile
 
-This release polishes the five-finger inspection flow and native desktop
-transitions. Right navigation now follows
-`All -> Thumb -> Little -> Ring -> Middle -> Index -> Thumb -> All`, with left
-navigation traversing the same physical sequence in reverse. Previous/next
-controls are translucent stationary arrows and no longer shift downward when
-pressed.
+The ordinary-FBG model remains the active application profile. TOUCH also
+loads an isolated future `mfbg_intensity_3x3` profile for nine-channel
+spectral-window optical-intensity demodulation. Diagnostics shows this profile
+boundary, while the Operator view and existing ordinary-FBG inference remain
+unchanged.
 
-Minimize and restore use a lightweight native-window snapshot transition
-instead of resizing the live WebGL scene. Compact Operator and Diagnostics
-layouts keep labels and controls within their panels. The trained model,
-BaySpec demodulation, coupling logic, PX6D synchronization, and five-finger
-geometry are unchanged.
+Real mFBG 3x3 mode is disabled until measured wavelengths, a real baseline,
+and new mFBG calibration data are available. The profile does not output
+calibrated force or pressure.
 
-Diagnostics keeps its dedicated **Record** workspace immediately after
-**Signal**. The complete synchronized optical-force capture workflow remains in
-that workspace, and the diagnostic navigation scrolls horizontally when the
-panel is narrow.
+## v0.18.5 Beta
+
+The Beta package contains only the latest optical all-data model. Temporal
+optical context drives contact and nine-position recognition; a current-frame
+optical model estimates `Fz` in the current 0-5 N research range. PX6D force is
+training and validation supervision, never a runtime model feature.
+
+The demonstration replays synchronized real 512-point BaySpec frames. Its nine
+peaks are automatically discovered from the no-contact median spectrum and
+tracked locally. P11-P33 labels follow provisional ascending wavelength order,
+not the 3x3 spatial rendering order and not a final physical channel map.
+
+The automated suite passes with 467 tests and 172 subtests.
+
+## Full-Spectrum Normalization
+
+The spectrum display can use a wavelength-aligned no-contact ratio:
+
+```text
+I_normalized(lambda,t) = I(lambda,t) / I0(lambda)
+```
+
+`I0` is accepted only from the existing stable multi-frame post-release
+no-contact baseline. Until that reference is ready, the UI falls back to the
+processed or raw spectrum and reports `I/I0 waiting`. The recognition model
+continues to use raw intensity; the display switch cannot redirect model input.
+
+When Spectrum is selected for synchronized recording, each wavelength row
+contains raw counts and, when available, aligned baseline counts plus the
+normalized ratio. Low or missing reference regions are guarded, and no
+per-frame min-max scaling is performed.
 
 ## Five-Finger Robot Hand Scene
 
@@ -45,9 +69,9 @@ transition. Geometry mode can be changed in Settings or Diagnostics.
 
 ## Input and Output
 
-Input is one synchronized 512-point full spectrum plus a stable current-session
-baseline. The model outputs contact state, approximate manual contact position
-`P11`-`P33`, and approximate `light`/`normal`/`hard` response level.
+Input is one synchronized 512-point full spectrum, trailing optical context,
+and a stable current-session baseline. The model outputs contact state,
+approximate manual contact position `P11`-`P33`, and experimental optical `Fz`.
 
 Manual pressing is the deployment domain: position is approximate and the
 fingertip contact area is broad. Push-pull-gauge captures are small-tip exact
@@ -79,7 +103,7 @@ run_desktop.bat
 
 ## Windows Portable Package
 
-Download `TOUCH-v0.15.3-windows-x64.zip`, extract the complete `TOUCH` folder,
+Download `TOUCH-v0.18.5-beta-windows-x64.zip`, extract the complete `TOUCH` folder,
 and run:
 
 ```powershell
@@ -112,6 +136,11 @@ The process exits with code `0` when every check passes. Details are written to
 
 - `GET /api/health`
 - `GET /api/global_spectrum_frame`
+- `GET /api/mfbg-intensity/profiles`
+- `GET /api/mfbg-intensity/profile`
+- `POST /api/mfbg-intensity/baseline`
+- `POST /api/mfbg-intensity/analyze-spectrum`
+- `GET /api/mfbg-intensity/recording-preview`
 - `POST /api/global_candidate_baseline?minimum_frames=30`
 - `POST /api/ingest`
 - `POST /api/sdk/start`
@@ -163,8 +192,8 @@ The former coarse action selector has been replaced by the live continuous
 `PX6D Fz (N)` reference. **Stop** finalizes the selected primary files:
 
 - `spectrum_timeseries.csv`: full wavelength/intensity samples for every frame;
-- `tactile_response_timeseries.csv`: contact, position, and light/normal/hard
-  temporal-model outputs and probabilities;
+- `tactile_response_timeseries.csv`: contact, position, optical-force estimate,
+  and retained compatibility fields for model auditing;
 - `force_timeseries.csv`: raw, software-zeroed, and filtered six-axis PX6D reference data.
 
 The force CSV includes `fx_filtered_n` through `mz_filtered_nm` and additionally
@@ -182,20 +211,21 @@ are not created. `synchronized_frames.jsonl`, `frame_summary.csv`, and
 streams and verifies cross-file timeline equality.
 
 The desktop app's **Browse** control opens a native Windows folder chooser. If
-no custom path is chosen, `data/px6d_synchronized/` is created beside the
-portable executable. Browser-only development mode accepts a manually entered
-absolute path.
+no custom path is chosen, a frozen build stores captures under
+`Documents/TOUCH/captures`. Browser-only development mode accepts a manually
+entered absolute path.
 
-This force is an independent ground-truth measurement used to synchronize and
-label BaySpec optical fingerprints. It is not a force estimate produced by the
-optical model.
+The PX6D stream is an independent ground-truth measurement used to synchronize
+and label BaySpec optical fingerprints. The Beta Operator force value is a
+separate optical estimate and does not use PX6D as a runtime feature.
 
 ## Limitations
 
-- Current evaluation is within one acquisition session.
-- Static snapshots cannot train tap, slide, or release dynamics.
-- `light`, `normal`, and `hard` are approximate manual response levels.
-- The optical model does not produce calibrated strain, displacement,
-  pressure, or force. PX6D Fz is displayed separately as reference truth.
+- Current grouped evaluation is not yet a cross-device or cross-fabrication
+  generalization result.
+- The optical `Fz` estimate is a research calibration against synchronized
+  PX6D labels, not a certified force measurement.
+- The optical model does not produce calibrated strain, displacement, or
+  pressure. Diagnostics retains PX6D as an independent reference when present.
 - The visual surface is model-driven and is not a measured pressure map.
 - Cross-session collection and validation are still required.

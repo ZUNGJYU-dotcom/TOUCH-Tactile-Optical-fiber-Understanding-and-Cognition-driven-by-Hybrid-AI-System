@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -31,11 +32,21 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from bridge import bridge
-from bridge import BAYSPEC_CHANNEL_CONFIG, CHANNEL_ORDER
+from bridge import (
+    BAYSPEC_CHANNEL_CONFIG,
+    CHANNEL_CONFIG_PATH,
+    CHANNEL_ORDER,
+    normalize_spectrum_to_baseline_ratio,
+)
 from backend.optical_force_capture import OpticalForceCaptureManager
+from backend.mfbg_intensity_api import router as mfbg_intensity_router
 from backend.px6d_reader import Px6dReader
-from sdk_live import BaySpecSdkLiveReader
+from backend.recorded_demo import RecordedDemoLibrary
+from sdk_live import DEFAULT_INTEGRATION_US, BaySpecSdkLiveReader
 from src.array_surface.surface_mapper import SurfaceConfig, map_surface, matrices_from_channels
+from src.hybrid_spectrum.all_source_runtime_adapter import (
+    AllSourceOpticalForceAdapter,
+)
 from src.hybrid_spectrum.dynamic_shadow_adapter import DynamicTemporalShadowAdapter
 from src.hybrid_spectrum.static_model_adapter import StaticSpectralPredictor
 from src.hybrid_spectrum.session_level_calibration import (
@@ -79,6 +90,10 @@ async def _read_limited_ingest_body(request: Request) -> bytes:
             raise IngestRequestTooLarge("manual ingest request exceeds 8 MiB")
     return bytes(body)
 PROJECT_ROOT = APP_ROOT if getattr(sys, "frozen", False) else APP_ROOT.parent
+ALL_SOURCE_BETA_ENABLED = (
+    os.environ.get("TOUCH_BETA_ALL_DATA_MODEL", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 THUMB_SCENE_CONFIG_PATH = PROJECT_ROOT / "config" / "thumb_holder_scene.yaml"
 STATIC_SPECTRAL_MODEL_PATH = PROJECT_ROOT / "models" / "static_spectral_recognition_bundle.joblib"
 STATIC_SPECTRAL_CANDIDATE_MODEL_PATH = (
@@ -97,10 +112,17 @@ DYNAMIC_TEMPORAL_SHADOW_INFERENCE_STRIDE = 1
 DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH = (
     PROJECT_ROOT / "config" / "hybrid_spectrum_channels.yaml"
 )
+ALL_SOURCE_BETA_MODEL_PATH = (
+    PROJECT_ROOT
+    / "models"
+    / "candidates"
+    / "ordinary_fbg_optical_only_force_candidate.joblib"
+)
 RUNTIME_CONTACT_STATE_CONFIG_PATH = (
     PROJECT_ROOT / "config" / "runtime_contact_state.yaml"
 )
 PX6D_REFERENCE_CONFIG_PATH = PROJECT_ROOT / "config" / "px6d_reference.yaml"
+VERSION_PATH = PROJECT_ROOT / "VERSION.json"
 STATIC_SPECTRAL_MODEL_LOCK = threading.Lock()
 STATIC_SPECTRAL_MODEL_CACHE_KEY: tuple | None = None
 STATIC_SPECTRAL_MODEL_CACHE_VALUE: dict | None = None
@@ -123,6 +145,111 @@ DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD: dict[str, Any] | None = None
 DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC: float | None = None
 DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM: np.ndarray | None = None
 DYNAMIC_TEMPORAL_SHADOW_MAX_RESAMPLE_STEPS = 12
+ALL_SOURCE_BETA_LOCK = threading.Lock()
+ALL_SOURCE_BETA_BASELINE_TOKEN: str | None = None
+ALL_SOURCE_BETA_LAST_FRAME_KEY: tuple[Any, ...] | None = None
+ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT = 0
+ALL_SOURCE_BETA_LAST_PAYLOAD: dict[str, Any] | None = None
+GLOBAL_BASELINE_ATTESTATION: dict[str, Any] = {
+    "confirmed": False,
+    "attested_at_epoch_sec": None,
+    "attested_by": None,
+    "force_evidence": None,
+    "status": "not_attested",
+}
+
+
+def _sha256_file(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _artifact_identity(path: Path) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "exists": path.is_file(),
+        "sha256": _sha256_file(path),
+    }
+
+
+def _release_identity() -> dict[str, Any]:
+    try:
+        version_payload = json.loads(VERSION_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        version_payload = {}
+
+    source_commit = str(
+        version_payload.get("source_commit")
+        or os.environ.get("TOUCH_SOURCE_COMMIT")
+        or ""
+    ).strip()
+    source_branch = str(
+        version_payload.get("source_branch")
+        or os.environ.get("TOUCH_SOURCE_BRANCH")
+        or ""
+    ).strip()
+    if not source_commit and not getattr(sys, "frozen", False):
+        try:
+            source_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(PROJECT_ROOT),
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            source_commit = ""
+    if not source_branch and not getattr(sys, "frozen", False):
+        try:
+            source_branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=str(PROJECT_ROOT),
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            source_branch = ""
+
+    return {
+        "product": version_payload.get("product") or "TOUCH",
+        "edition": version_payload.get("edition"),
+        "version": version_payload.get("version") or "unknown",
+        "build_id": version_payload.get("build_id") or "unknown",
+        "release_date": version_payload.get("release_date"),
+        "release_channel": version_payload.get("release_channel"),
+        "source_commit": source_commit or None,
+        "source_branch": source_branch or None,
+        "source_worktree_state": version_payload.get("source_worktree_state")
+        or ("packaged" if getattr(sys, "frozen", False) else "runtime_source_checkout"),
+        "operator_recognition_model": version_payload.get(
+            "operator_recognition_model"
+        ),
+        "temporal_candidate_role": version_payload.get("temporal_candidate_role"),
+        "baseline_policy": version_payload.get("baseline_policy"),
+        "capture_schema": version_payload.get("capture_schema"),
+        "default_capture_directory": version_payload.get(
+            "default_capture_directory"
+        ),
+        "hardware_validation_status": version_payload.get(
+            "hardware_validation_status"
+        ),
+        "version_manifest": _artifact_identity(VERSION_PATH),
+        "frozen_executable": bool(getattr(sys, "frozen", False)),
+    }
+
+
+RELEASE_IDENTITY = _release_identity()
 
 
 def _optional_environment_bool(name: str) -> bool | None:
@@ -155,11 +282,25 @@ def _load_px6d_reference_config() -> dict[str, Any]:
         "enabled": True,
         "auto_start": True,
         "port": "COM3",
+        "auto_detect_port": True,
+        "usb_vid": 0x1A86,
+        "usb_pid": 0x55D3,
+        "usb_serial_number": "5C7B025505",
+        "port_description_contains": "CH343",
         "baud_rate": 921600,
         "device_id": 127,
         "poll_hz": 50.0,
         "read_timeout_sec": 0.20,
         "reconnect_interval_sec": 1.0,
+        "reconnect_max_interval_sec": 8.0,
+        "reconnect_backoff_multiplier": 2.0,
+        "port_busy_backoff_sec": 5.0,
+        "isolate_process": True,
+        "worker_watchdog_sec": 1.5,
+        "worker_stop_timeout_sec": 0.50,
+        "device_settle_sec": 0.20,
+        "handshake_timeout_sec": 0.40,
+        "handshake_attempts": 3,
         "history_seconds": 300.0,
         "compression_sign": -1,
         "filter_alpha": 0.25,
@@ -175,11 +316,11 @@ def _load_px6d_reference_config() -> dict[str, Any]:
         "auto_zero_release_reacquire_limit_n": 0.30,
         "auto_zero_alpha": 0.015,
         "maximum_drift_offset_n": 0.50,
-        "auto_tare_on_start": True,
+        "auto_tare_on_start": False,
         "auto_tare_duration_sec": 1.0,
         "auto_tare_max_std_n": 0.12,
         "sync_window_sec": 0.25,
-        "sync_max_age_sec": 1.0,
+        "sync_max_age_sec": 0.25,
         "force_full_scale_per_axis_n": 50.0,
         "moment_full_scale_per_axis_nm": 2.0,
         "warning_utilization_percent": 90.0,
@@ -209,6 +350,22 @@ def _load_px6d_reference_config() -> dict[str, Any]:
             "enabled": bool(payload.get("enabled", defaults["enabled"])),
             "auto_start": bool(payload.get("auto_start", defaults["auto_start"])),
             "port": serial_config.get("port", defaults["port"]),
+            "auto_detect_port": serial_config.get(
+                "auto_detect_port", defaults["auto_detect_port"]
+            ),
+            "usb_vid": serial_config.get("usb_vid", defaults["usb_vid"]),
+            "usb_pid": serial_config.get("usb_pid", defaults["usb_pid"]),
+            "usb_serial_number": serial_config.get(
+                "usb_serial_number",
+                serial_config.get("serial_number", defaults["usb_serial_number"]),
+            ),
+            "port_description_contains": serial_config.get(
+                "port_description_contains",
+                serial_config.get(
+                    "description_contains",
+                    defaults["port_description_contains"],
+                ),
+            ),
             "baud_rate": serial_config.get("baud_rate", defaults["baud_rate"]),
             "device_id": serial_config.get("device_id", defaults["device_id"]),
             "poll_hz": serial_config.get("poll_hz", defaults["poll_hz"]),
@@ -217,6 +374,37 @@ def _load_px6d_reference_config() -> dict[str, Any]:
             ),
             "reconnect_interval_sec": serial_config.get(
                 "reconnect_interval_sec", defaults["reconnect_interval_sec"]
+            ),
+            "reconnect_max_interval_sec": serial_config.get(
+                "reconnect_max_interval_sec",
+                defaults["reconnect_max_interval_sec"],
+            ),
+            "reconnect_backoff_multiplier": serial_config.get(
+                "reconnect_backoff_multiplier",
+                defaults["reconnect_backoff_multiplier"],
+            ),
+            "port_busy_backoff_sec": serial_config.get(
+                "port_busy_backoff_sec",
+                defaults["port_busy_backoff_sec"],
+            ),
+            "isolate_process": serial_config.get(
+                "isolate_process", defaults["isolate_process"]
+            ),
+            "worker_watchdog_sec": serial_config.get(
+                "worker_watchdog_sec", defaults["worker_watchdog_sec"]
+            ),
+            "worker_stop_timeout_sec": serial_config.get(
+                "worker_stop_timeout_sec",
+                defaults["worker_stop_timeout_sec"],
+            ),
+            "device_settle_sec": serial_config.get(
+                "device_settle_sec", defaults["device_settle_sec"]
+            ),
+            "handshake_timeout_sec": serial_config.get(
+                "handshake_timeout_sec", defaults["handshake_timeout_sec"]
+            ),
+            "handshake_attempts": serial_config.get(
+                "handshake_attempts", defaults["handshake_attempts"]
             ),
             "history_seconds": signal_config.get(
                 "history_seconds", defaults["history_seconds"]
@@ -461,31 +649,59 @@ def _load_response_level_postprocess_config() -> dict[str, Any]:
     return dict(section) if isinstance(section, dict) else {}
 
 
-try:
-    STATIC_SPECTRAL_PREDICTOR = StaticSpectralPredictor(STATIC_SPECTRAL_MODEL_PATH)
-    STATIC_SPECTRAL_MODEL_ERROR = None
-except Exception as exc:  # pragma: no cover - exposed through diagnostics
+if ALL_SOURCE_BETA_ENABLED:
+    # The Beta package intentionally ships one model only. Keep old model
+    # branches out of memory and fail explicitly if the latest artifact cannot
+    # be loaded; silently falling back would make the displayed calibration
+    # semantics ambiguous.
     STATIC_SPECTRAL_PREDICTOR = None
-    STATIC_SPECTRAL_MODEL_ERROR = f"{type(exc).__name__}: {exc}"
-try:
-    STATIC_SPECTRAL_CANDIDATE_PREDICTOR = StaticSpectralPredictor(
-        STATIC_SPECTRAL_CANDIDATE_MODEL_PATH
-    )
-    STATIC_SPECTRAL_CANDIDATE_ERROR = None
-except Exception as exc:  # pragma: no cover - exposed through diagnostics
+    STATIC_SPECTRAL_MODEL_ERROR = "disabled_in_beta_latest_model_only"
     STATIC_SPECTRAL_CANDIDATE_PREDICTOR = None
-    STATIC_SPECTRAL_CANDIDATE_ERROR = f"{type(exc).__name__}: {exc}"
-try:
-    DYNAMIC_TEMPORAL_SHADOW_ADAPTER = DynamicTemporalShadowAdapter.from_paths(
-        DYNAMIC_TEMPORAL_SHADOW_MODEL_PATH,
-        DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH,
-        runtime_recovery_config=_load_runtime_baseline_recovery_config(),
-        response_level_config=_load_response_level_postprocess_config(),
-    )
-    DYNAMIC_TEMPORAL_SHADOW_ERROR = None
-except Exception as exc:  # pragma: no cover - exposed through diagnostics
+    STATIC_SPECTRAL_CANDIDATE_ERROR = "disabled_in_beta_latest_model_only"
     DYNAMIC_TEMPORAL_SHADOW_ADAPTER = None
-    DYNAMIC_TEMPORAL_SHADOW_ERROR = f"{type(exc).__name__}: {exc}"
+    DYNAMIC_TEMPORAL_SHADOW_ERROR = "disabled_in_beta_latest_model_only"
+else:
+    try:
+        STATIC_SPECTRAL_PREDICTOR = StaticSpectralPredictor(
+            STATIC_SPECTRAL_MODEL_PATH
+        )
+        STATIC_SPECTRAL_MODEL_ERROR = None
+    except Exception as exc:  # pragma: no cover - exposed through diagnostics
+        STATIC_SPECTRAL_PREDICTOR = None
+        STATIC_SPECTRAL_MODEL_ERROR = f"{type(exc).__name__}: {exc}"
+    try:
+        STATIC_SPECTRAL_CANDIDATE_PREDICTOR = StaticSpectralPredictor(
+            STATIC_SPECTRAL_CANDIDATE_MODEL_PATH
+        )
+        STATIC_SPECTRAL_CANDIDATE_ERROR = None
+    except Exception as exc:  # pragma: no cover - exposed through diagnostics
+        STATIC_SPECTRAL_CANDIDATE_PREDICTOR = None
+        STATIC_SPECTRAL_CANDIDATE_ERROR = f"{type(exc).__name__}: {exc}"
+    try:
+        DYNAMIC_TEMPORAL_SHADOW_ADAPTER = DynamicTemporalShadowAdapter.from_paths(
+            DYNAMIC_TEMPORAL_SHADOW_MODEL_PATH,
+            DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH,
+            runtime_recovery_config=_load_runtime_baseline_recovery_config(),
+            response_level_config=_load_response_level_postprocess_config(),
+        )
+        DYNAMIC_TEMPORAL_SHADOW_ERROR = None
+    except Exception as exc:  # pragma: no cover - exposed through diagnostics
+        DYNAMIC_TEMPORAL_SHADOW_ADAPTER = None
+        DYNAMIC_TEMPORAL_SHADOW_ERROR = f"{type(exc).__name__}: {exc}"
+
+if ALL_SOURCE_BETA_ENABLED:
+    try:
+        ALL_SOURCE_BETA_ADAPTER = AllSourceOpticalForceAdapter.from_paths(
+            ALL_SOURCE_BETA_MODEL_PATH,
+            DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH,
+        )
+        ALL_SOURCE_BETA_ERROR = None
+    except Exception as exc:  # pragma: no cover - exposed through diagnostics
+        ALL_SOURCE_BETA_ADAPTER = None
+        ALL_SOURCE_BETA_ERROR = f"{type(exc).__name__}: {exc}"
+else:
+    ALL_SOURCE_BETA_ADAPTER = None
+    ALL_SOURCE_BETA_ERROR = "beta_runtime_disabled"
 
 
 def _reset_dynamic_temporal_shadow(reason: str) -> dict[str, Any]:
@@ -546,6 +762,172 @@ def _dynamic_temporal_shadow_status() -> dict[str, Any]:
         ),
         "response_level_semantics": "approximate_manual_level_not_force_N",
     }
+
+
+def _reset_all_source_beta(reason: str) -> dict[str, Any]:
+    global ALL_SOURCE_BETA_BASELINE_TOKEN
+    global ALL_SOURCE_BETA_LAST_FRAME_KEY
+    global ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT
+    global ALL_SOURCE_BETA_LAST_PAYLOAD
+
+    with ALL_SOURCE_BETA_LOCK:
+        if ALL_SOURCE_BETA_ADAPTER is not None:
+            ALL_SOURCE_BETA_ADAPTER.clear()
+        ALL_SOURCE_BETA_BASELINE_TOKEN = None
+        ALL_SOURCE_BETA_LAST_FRAME_KEY = None
+        ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT = 0
+        ALL_SOURCE_BETA_LAST_PAYLOAD = None
+    return {
+        "ok": True,
+        "status": "all_source_beta_reset",
+        "reason": reason,
+        "runtime_role": "primary_beta_latest_model_only",
+    }
+
+
+def _all_source_beta_status() -> dict[str, Any]:
+    adapter = ALL_SOURCE_BETA_ADAPTER
+    bundle = adapter.bundle if adapter is not None else {}
+    return {
+        "enabled": ALL_SOURCE_BETA_ENABLED,
+        "loaded": adapter is not None,
+        "model_path": str(ALL_SOURCE_BETA_MODEL_PATH),
+        "model_error": ALL_SOURCE_BETA_ERROR,
+        "schema_version": bundle.get("schema_version"),
+        "feature_schema": bundle.get("feature_schema"),
+        "runtime_role": "primary_beta_latest_model_only",
+        "drives_operator_ui": ALL_SOURCE_BETA_ENABLED,
+        "drives_digital_twin": ALL_SOURCE_BETA_ENABLED,
+        "runtime_input": "optical_spectrum_time_series",
+        "force_sensor_is_runtime_model_input": False,
+        "estimated_force_output": "continuous_optical_fz_0_to_5_n",
+        "old_model_fallback_enabled": False,
+        "unique_frame_count": ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT,
+    }
+
+
+def _predict_all_source_beta(
+    latest_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the latest optical-only Beta model on each unique spectrum frame."""
+
+    global ALL_SOURCE_BETA_BASELINE_TOKEN
+    global ALL_SOURCE_BETA_LAST_FRAME_KEY
+    global ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT
+    global ALL_SOURCE_BETA_LAST_PAYLOAD
+
+    if not ALL_SOURCE_BETA_ENABLED:
+        return {
+            "ok": False,
+            "status": "beta_runtime_disabled",
+            "reason": "TOUCH_BETA_ALL_DATA_MODEL is not enabled",
+            "runtime_role": "not_active",
+        }
+    adapter = ALL_SOURCE_BETA_ADAPTER
+    if adapter is None:
+        return {
+            "ok": False,
+            "status": "latest_beta_model_unavailable",
+            "reason": ALL_SOURCE_BETA_ERROR,
+            "runtime_role": "primary_beta_latest_model_only",
+            "old_model_fallback_enabled": False,
+        }
+
+    pair = bridge.spectral_model_input(channel_id="P22")
+    if not pair.get("ok"):
+        return {
+            "ok": False,
+            "status": (
+                "baseline_required"
+                if pair.get("current_ready")
+                else "spectrum_required"
+            ),
+            "reason": pair.get("reason"),
+            "runtime_role": "primary_beta_latest_model_only",
+            "old_model_fallback_enabled": False,
+        }
+    latest = pair["latest"]
+    if (
+        isinstance(latest_override, dict)
+        and isinstance(latest_override.get("wavelength_nm"), list)
+        and isinstance(latest_override.get("intensity"), list)
+        and latest_override.get("wavelength_nm")
+        and len(latest_override["wavelength_nm"])
+        == len(latest_override["intensity"])
+    ):
+        latest = latest_override
+    baseline = pair["baseline"]
+    baseline_token = _spectrum_token(
+        baseline["wavelength_nm"],
+        baseline["intensity"],
+    )
+    frame_key = (
+        latest.get("frame_id"),
+        latest.get("timestamp"),
+        latest.get("source"),
+        _spectrum_fingerprint(
+            latest["wavelength_nm"],
+            latest["intensity"],
+        ),
+    )
+    started = time.perf_counter()
+    try:
+        with ALL_SOURCE_BETA_LOCK:
+            if baseline_token != ALL_SOURCE_BETA_BASELINE_TOKEN:
+                adapter.set_baseline(
+                    baseline["wavelength_nm"],
+                    baseline["intensity"],
+                )
+                ALL_SOURCE_BETA_BASELINE_TOKEN = baseline_token
+                ALL_SOURCE_BETA_LAST_FRAME_KEY = None
+                ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT = 0
+                ALL_SOURCE_BETA_LAST_PAYLOAD = None
+            if (
+                frame_key == ALL_SOURCE_BETA_LAST_FRAME_KEY
+                and ALL_SOURCE_BETA_LAST_PAYLOAD is not None
+            ):
+                cached = copy.deepcopy(ALL_SOURCE_BETA_LAST_PAYLOAD)
+                cached["duplicate_frame_ignored"] = True
+                cached["cache_lookup_latency_ms"] = (
+                    time.perf_counter() - started
+                ) * 1000.0
+                return cached
+
+            try:
+                source_timestamp_sec = float(latest.get("timestamp"))
+            except (TypeError, ValueError):
+                source_timestamp_sec = None
+            prediction = adapter.update(
+                latest["wavelength_nm"],
+                latest["intensity"],
+                source_timestamp_sec=source_timestamp_sec,
+            )
+            ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT += 1
+            payload = {
+                **prediction,
+                "runtime_role": "primary_beta_latest_model_only",
+                "drives_operator_ui": True,
+                "drives_digital_twin": True,
+                "old_model_fallback_enabled": False,
+                "unique_frame_count": ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT,
+                "backend_inference_latency_ms": (
+                    time.perf_counter() - started
+                )
+                * 1000.0,
+                "duplicate_frame_ignored": False,
+                "cache_lookup_latency_ms": 0.0,
+            }
+            ALL_SOURCE_BETA_LAST_FRAME_KEY = frame_key
+            ALL_SOURCE_BETA_LAST_PAYLOAD = copy.deepcopy(payload)
+            return payload
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "latest_beta_model_inference_error",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "runtime_role": "primary_beta_latest_model_only",
+            "old_model_fallback_enabled": False,
+        }
 
 
 def _predict_dynamic_temporal_shadow(
@@ -639,6 +1021,24 @@ def _predict_dynamic_temporal_shadow(
                 current_timestamp_sec = float(latest.get("timestamp"))
             except (TypeError, ValueError):
                 current_timestamp_sec = None
+            if (
+                current_timestamp_sec is not None
+                and DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC is not None
+                and current_timestamp_sec
+                < DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC
+            ):
+                return {
+                    "ok": False,
+                    "status": "out_of_order_temporal_frame_rejected",
+                    "reason": "source_timestamp_moved_backwards",
+                    "source_timestamp_sec": current_timestamp_sec,
+                    "last_source_timestamp_sec": (
+                        DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC
+                    ),
+                    "runtime_role": "shadow_only_not_driving_digital_twin",
+                    "drives_operator_ui": False,
+                    "drives_digital_twin": False,
+                }
             expected_interval_sec = max(
                 0.01,
                 float(adapter.bundle.get("frame_interval_sec_estimated") or 0.04),
@@ -788,12 +1188,10 @@ def _predict_dynamic_temporal_shadow(
 def _dynamic_temporal_display_prediction(
     dynamic_payload: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Adapt the validated temporal candidate to the existing twin contract.
+    """Adapt the pre-review temporal model to the existing twin contract.
 
-    The saved artifact keeps its shadow-only safety metadata.  This adapter is
-    only exposed when the caller explicitly requests temporal validation mode,
-    so the runtime can be tested without relabelling the candidate as a final
-    deployment or a calibrated-force model.
+    The artifact retains its validation metadata, while an explicitly selected
+    temporal mode may drive the Operator view and digital twin.
     """
 
     payload = dynamic_payload if isinstance(dynamic_payload, dict) else {}
@@ -1177,14 +1575,40 @@ def _model_display_source_gate(
     watcher_active = bool(watcher_status.get("active"))
     live_source_active = sdk_active or watcher_active
     source = str((latest or {}).get("source") or "").strip().lower()
+    qa_status = str((latest or {}).get("qa_status") or "").strip().lower()
+    qa_flags = {
+        str(flag).strip().lower()
+        for flag in ((latest or {}).get("qa_flags") or [])
+        if str(flag).strip()
+    }
+    peak_axis_type = str((latest or {}).get("peak_axis_type") or "").strip().lower()
+    hardware_config = BAYSPEC_CHANNEL_CONFIG.get("hardware", {}) or {}
+    require_wavelength_grid = bool(
+        hardware_config.get("require_wavelength_grid_for_formal_recognition", True)
+    )
+    wavelength_axis_blockers = {
+        "wavelength_grid_missing",
+        "using_pixel_index_fallback",
+        "pixel_peak_fallback",
+    }
+    wavelength_axis_valid = bool(
+        not require_wavelength_grid
+        or (
+            peak_axis_type != "pixel_index"
+            and not qa_flags.intersection(wavelength_axis_blockers)
+        )
+    )
 
     selected_live_source = None
     source_fresh = False
+    is_live_origin = False
     if "bayspec_direct" in source or "sdk" in source:
         selected_live_source = "sdk"
+        is_live_origin = True
         source_fresh = sdk_active and sdk_status.get("freshness") == "live"
     elif "sense" in source or "export" in source or "watch" in source:
         selected_live_source = "watcher"
+        is_live_origin = True
         source_fresh = watcher_active and watcher_status.get("freshness") in {
             "fresh",
             "live",
@@ -1194,17 +1618,43 @@ def _model_display_source_gate(
         # different source. Hold it for diagnostics and suppress deformation.
         selected_live_source = "unmatched_live_source"
 
-    model_input_source_allowed = not live_source_active or source_fresh
+    replay_or_http_allowed = bool(
+        latest
+        and not live_source_active
+        and not is_live_origin
+        and source not in {"", "operator_idle"}
+    )
+    model_input_source_allowed = bool(source_fresh or replay_or_http_allowed)
+    qa_valid = (
+        qa_status not in {"invalid", "error", "stale"}
+        and wavelength_axis_valid
+    )
+    formal_spectrum_input_allowed = bool(
+        model_input_source_allowed and qa_valid
+    )
+    operator_display_valid = bool(
+        latest and formal_spectrum_input_allowed
+    )
     return {
         "live_source_active": live_source_active,
         "selected_live_source": selected_live_source,
         "source_fresh": source_fresh,
+        "is_live_origin": is_live_origin,
+        "qa_valid": qa_valid,
+        "wavelength_axis_valid": wavelength_axis_valid,
+        "wavelength_axis_blockers": sorted(
+            qa_flags.intersection(wavelength_axis_blockers)
+        ),
+        "formal_spectrum_input_allowed": formal_spectrum_input_allowed,
+        "operator_display_valid": operator_display_valid,
         "model_input_source_allowed": model_input_source_allowed,
         "model_input_source_mode": (
             "fresh_live"
             if source_fresh
             else "held_replay_or_http"
-            if not live_source_active
+            if replay_or_http_allowed
+            else "stopped_live_source"
+            if is_live_origin and not live_source_active
             else "stale_or_mismatched_live"
         ),
     }
@@ -1272,7 +1722,7 @@ def _default_thumb_scene_config() -> dict:
             "enabled": True,
             "geometry_status": "five_finger_sensorized_prototype",
             "data_status": "synchronized_demo_only",
-            "default_selected_finger": "thumb",
+            "default_selected_finger": "all",
             "demo_sync_mode": "synchronized_with_thumb",
             "spectrum_scope_mode": "selected_finger",
             "array_scope_mode": "selected_finger",
@@ -2059,6 +2509,7 @@ sense_controller = SenseWindowController()
 sdk_live_reader = BaySpecSdkLiveReader(bridge=bridge, app_root=APP_ROOT)
 PX6D_REFERENCE_CONFIG = _load_px6d_reference_config()
 px6d_reader = Px6dReader(PX6D_REFERENCE_CONFIG)
+recorded_demo_library = RecordedDemoLibrary(APP_ROOT / "assets" / "demo")
 
 
 def _px6d_reference_for_record(record: dict[str, Any] | None) -> dict[str, Any]:
@@ -2079,27 +2530,136 @@ def _px6d_reference_for_record(record: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _capture_spectrum_frame() -> dict[str, Any]:
-    return bridge.frame(channel_id="P22", trace_limit=1, include_spectrum=True)
+    frame = bridge.frame(channel_id="P22", trace_limit=1, include_spectrum=True)
+    latest = frame.get("latest")
+    if not isinstance(latest, dict):
+        return frame
+
+    model_input = bridge.spectral_model_input("P22")
+    baseline = model_input.get("baseline")
+    if not model_input.get("baseline_ready") or not isinstance(baseline, dict):
+        return frame
+
+    normalization_config = dict(
+        BAYSPEC_CHANNEL_CONFIG.get("spectrum_normalization", {}) or {}
+    )
+    normalized = normalize_spectrum_to_baseline_ratio(
+        list(latest.get("wavelength_nm") or []),
+        list(latest.get("intensity") or []),
+        list(baseline.get("wavelength_nm") or []),
+        list(baseline.get("intensity") or []),
+        minimum_reference_counts=float(
+            normalization_config.get("minimum_reference_counts") or 100.0
+        ),
+        minimum_valid_fraction=float(
+            normalization_config.get("minimum_valid_fraction") or 0.80
+        ),
+    )
+    if normalized.get("ok"):
+        latest["normalized_intensity_ratio"] = list(
+            normalized["normalized_intensity_ratio"]
+        )
+        latest["normalization_reference_intensity_counts"] = list(
+            normalized["normalization_reference_intensity_counts"]
+        )
+    latest["spectrum_normalization"] = {
+        **dict(latest.get("spectrum_normalization") or {}),
+        **{
+            key: value
+            for key, value in normalized.items()
+            if key
+            not in {
+                "normalized_intensity_ratio",
+                "normalization_reference_intensity_counts",
+            }
+        },
+        "raw_retained": True,
+        "model_input_source": "raw_intensity",
+        "applied_to_model_input": False,
+    }
+    return frame
 
 
 def _capture_temporal_response(latest: dict[str, Any]) -> dict[str, Any]:
-    payload = _predict_dynamic_temporal_shadow(latest_override=latest)
+    if ALL_SOURCE_BETA_ENABLED:
+        prediction = _predict_all_source_beta(latest_override=latest)
+        return {
+            "model_source": "ordinary_fbg_all_data_beta_v1",
+            "model_status": prediction.get("status"),
+            "model_ready": bool(
+                prediction.get("ok")
+                and prediction.get("status") == "ready"
+            ),
+            "inference_latency_ms": prediction.get(
+                "backend_inference_latency_ms",
+                prediction.get("inference_latency_ms"),
+            ),
+            "estimated_force_fz_n": prediction.get(
+                "estimated_force_fz_n"
+            ),
+            "force_sensor_is_runtime_input": False,
+            "runtime_input": "optical_spectrum_time_series",
+            "drives_operator_ui": True,
+            "drives_digital_twin": True,
+            **prediction,
+        }
+
+    wavelength = latest.get("wavelength_nm")
+    intensity = latest.get("intensity")
+    if (
+        not isinstance(wavelength, list)
+        or not isinstance(intensity, list)
+        or not wavelength
+        or len(wavelength) != len(intensity)
+    ):
+        return {
+            "model_source": "dynamic_temporal_v3_shadow",
+            "model_status": "invalid_temporal_spectrum",
+            "model_ready": False,
+            "reason": "wavelength_and_intensity_arrays_required",
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
+        }
+    frame_key = (
+        latest.get("frame_id"),
+        latest.get("timestamp"),
+        latest.get("source"),
+        _spectrum_fingerprint(wavelength, intensity),
+    )
+    with DYNAMIC_TEMPORAL_SHADOW_LOCK:
+        if (
+            frame_key != DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY
+            or DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD is None
+        ):
+            return {
+                "model_source": "dynamic_temporal_v3_shadow",
+                "model_status": "temporal_prediction_not_available_for_frame",
+                "model_ready": False,
+                "reason": "recorder_is_cache_consumer_not_temporal_state_producer",
+                "drives_operator_ui": False,
+                "drives_digital_twin": False,
+            }
+        payload = copy.deepcopy(DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD)
     prediction = payload.get("prediction")
     if not isinstance(prediction, dict):
         return {
-            "model_source": "dynamic_temporal_v3",
+            "model_source": "dynamic_temporal_v3_shadow",
             "model_status": payload.get("status") or "dynamic_temporal_unavailable",
             "model_ready": False,
             "reason": payload.get("reason"),
             "inference_latency_ms": payload.get("inference_latency_ms"),
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
         }
     return {
-        "model_source": "dynamic_temporal_v3",
+        "model_source": "dynamic_temporal_v3_shadow",
         "model_status": payload.get("status") or prediction.get("status"),
         "model_ready": bool(payload.get("ok") and prediction.get("ready")),
         "inference_latency_ms": payload.get("inference_latency_ms"),
         "inference_executed_this_frame": payload.get("inference_executed_this_frame"),
         "temporal_resample_steps": payload.get("temporal_resample_steps"),
+        "drives_operator_ui": False,
+        "drives_digital_twin": False,
         **prediction,
     }
 
@@ -2112,12 +2672,144 @@ def _resolve_capture_output_root() -> Path:
     return configured if configured.is_absolute() else PROJECT_ROOT / configured
 
 
+def _capture_provenance_snapshot() -> dict[str, Any]:
+    baseline_token, model_pair = _current_runtime_baseline_token()
+    model_status = _static_spectral_model_status()
+    sdk_status = sdk_live_reader.status()
+    force_status = px6d_reader.status()
+    attested_by = str(
+        GLOBAL_BASELINE_ATTESTATION.get("attested_by") or ""
+    ).strip()
+    configuration_paths = {
+        "bayspec_channel_config": Path(CHANNEL_CONFIG_PATH),
+        "runtime_contact_state": RUNTIME_CONTACT_STATE_CONFIG_PATH,
+        "px6d_reference": PX6D_REFERENCE_CONFIG_PATH,
+        "thumb_scene": THUMB_SCENE_CONFIG_PATH,
+        "mfbg_intensity_profile": PROJECT_ROOT / "config" / "mfbg_intensity_3x3.yaml",
+        "hybrid_spectrum_channels": DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH,
+    }
+    return {
+        "software": dict(RELEASE_IDENTITY),
+        "operator": {
+            "operator_id": attested_by or "not_provided",
+            "source": (
+                "baseline_no_contact_attestation"
+                if attested_by
+                else "not_recorded"
+            ),
+        },
+        "specimen": {
+            "specimen_id": os.environ.get("TOUCH_SPECIMEN_ID")
+            or "not_provided",
+            "fabrication_batch": os.environ.get("TOUCH_SPECIMEN_BATCH")
+            or "not_provided",
+            "mounting_state": os.environ.get("TOUCH_SPECIMEN_MOUNTING")
+            or "not_recorded",
+        },
+        "environment": {
+            "temperature_c": None,
+            "humidity_percent": None,
+            "status": "not_recorded",
+        },
+        "active_runtime_sensor_profile": "ordinary_fbg_hybrid_spectral",
+        "future_sensor_profile": {
+            "profile_id": "mfbg_intensity_3x3",
+            "real_3x3_enabled": False,
+        },
+        "model": {
+            "runtime_role": "primary_operator_and_digital_twin",
+            "model_path": model_status.get("model_path"),
+            "model_bundle_sha256": model_status.get("model_bundle_sha256"),
+            "loaded": model_status.get("loaded"),
+            "confidence_source": model_status.get("confidence_source"),
+            "evaluation_scope": model_status.get("evaluation_scope"),
+        },
+        "configuration_artifacts": {
+            name: _artifact_identity(path)
+            for name, path in configuration_paths.items()
+        },
+        "baseline": {
+            "ready": bool(model_pair.get("ok")),
+            "token": baseline_token,
+            "status": model_pair.get("baseline_spectrum_status")
+            or model_pair.get("reason"),
+            "operator_attestation": dict(GLOBAL_BASELINE_ATTESTATION),
+        },
+        "optical_device": {
+            "configured_device_id": bridge.configured_device_id(),
+            "configured_sense_export_root": str(
+                bridge.configured_sense_export_root()
+            ),
+            **{
+                key: sdk_status.get(key)
+                for key in (
+                    "source",
+                    "active",
+                    "channel_id",
+                    "integration",
+                    "interval_ms",
+                    "freshness",
+                    "acquisition_session_id",
+                    "frame_count",
+                    "helper_path",
+                )
+            },
+        },
+        "force_device": {
+            key: force_status.get(key)
+            for key in (
+                "connected",
+                "port",
+                "baud_rate",
+                "firmware_version",
+                "tare_ready",
+                "tare_timestamp_epoch_sec",
+                "compression_sign",
+                "primary_axis",
+                "sample_fresh",
+                "configured_poll_hz",
+            )
+        },
+        "force_calibration": {
+            "hardware_calibration_certificate_id": "not_provided",
+            "hardware_calibration_date": "not_provided",
+            "hardware_calibration_traceability": "not_recorded",
+            "software_tare_ready": force_status.get("tare_ready"),
+            "software_tare_timestamp_epoch_sec": force_status.get(
+                "tare_timestamp_epoch_sec"
+            ),
+            "hardware_calibration_command_used": force_status.get(
+                "hardware_calibration_command_used",
+                False,
+            ),
+        },
+        "channel_grid": {
+            "channel_order": list(CHANNEL_ORDER),
+            "display_rows": [
+                ["P11", "P21", "P31"],
+                ["P12", "P22", "P32"],
+                ["P13", "P23", "P33"],
+            ],
+            "physical_mapping_final": False,
+            "five_finger_view_semantics": (
+                "shared_3x3_response_visualization_not_five_independent_sensors"
+            ),
+        },
+        "recording_contract": {
+            "formal_spectrum_requires_physical_wavelength_axis": True,
+            "pixel_index_fallback_allowed_for_formal_recognition": False,
+            "real_five_finger_simultaneous_measurement_enabled": False,
+        },
+    }
+
+
 optical_force_capture = OpticalForceCaptureManager(
     output_root=_resolve_capture_output_root(),
     frame_provider=_capture_spectrum_frame,
     force_provider=_px6d_reference_for_record,
     force_status_provider=px6d_reader.status,
     model_provider=_capture_temporal_response,
+    provenance_provider=_capture_provenance_snapshot,
     poll_interval_sec=float(PX6D_REFERENCE_CONFIG.get("capture_poll_interval_sec") or 0.05),
     require_software_tare=bool(
         PX6D_REFERENCE_CONFIG.get("capture_require_software_tare", True)
@@ -2603,7 +3295,12 @@ def _coupled_observed_attenuation(local_by_channel: dict[str, float], coords: di
     return observed
 
 
-def _simulated_array_channels(scenario: str, step: int = 0, coupling_view: str = "raw_coupled_response") -> list[dict]:
+def _simulated_array_channels(
+    scenario: str,
+    step: int = 0,
+    coupling_view: str = "raw_coupled_response",
+    response_amplitude: float | None = None,
+) -> list[dict]:
     coords = {
         channel: (
             float((BAYSPEC_CHANNEL_CONFIG.get("channels", {}).get(channel, {}) or {}).get("x", 0)),
@@ -2620,13 +3317,17 @@ def _simulated_array_channels(scenario: str, step: int = 0, coupling_view: str =
     }
     scenario = aliases.get(scenario, scenario)
     envelope = _demo_envelope(scenario, step)
+    if response_amplitude is not None:
+        envelope = max(0.0, min(1.0, float(response_amplitude)))
     if scenario == "no_contact":
         centers = [(0.0, 0.0, 0.0, 0.52)]
     elif scenario in _STAGED_POINT_CONTACT_CENTERS:
         cx, cy = _STAGED_POINT_CONTACT_CENTERS[scenario]
         centers = [(cx, cy, envelope, 0.52)]
     elif scenario == "off_center_fingertip_contact":
-        centers = [(0.52, 0.28, 0.84 * envelope, 0.58)]
+        # The recorded reference for this scenario is P23. Keep the visual
+        # contact center aligned with that measured position.
+        centers = [(0.0, -0.72, 0.84 * envelope, 0.58)]
     elif scenario == "vertical_slide_p11_p12_p13":
         path = [(-1.0, 1.0), (-1.0, 0.0), (-1.0, -1.0)]
         x, y = _path_point(path, step, cycle_length=12)
@@ -2932,10 +3633,28 @@ def simulated_array_frame(scenario: str, step: int = 0, coupling_view: str = "ra
     timestamp = time.time()
     frame_id = int(timestamp * 1000)
     cfg = _coupling_config()
-    channels = _simulated_array_channels(scenario, step=step, coupling_view=coupling_view)
+    desired_force_n = 5.0 * _demo_envelope(scenario, step)
+    recorded_reference = recorded_demo_library.reference_frame(
+        scenario=scenario,
+        step=step,
+        desired_force_n=desired_force_n,
+    )
+    recorded_force_n = float(recorded_reference["reference_force_fz_n"])
+    recorded_response_ratio = float(recorded_reference["response_ratio"])
+    channels = _simulated_array_channels(
+        scenario,
+        step=step,
+        coupling_view=coupling_view,
+        response_amplitude=recorded_response_ratio,
+    )
     surface = map_surface(channels, config=config)
     matrices = matrices_from_channels(channels)
-    spectrum = _generate_synthetic_9fbg_spectrum(channels, frame_id=frame_id, timestamp=timestamp)
+    spectrum = recorded_demo_library.spectrum_payload(
+        recorded_reference,
+        channels=channels,
+        frame_id=frame_id,
+        timestamp=timestamp,
+    )
     dominant_channel = spectrum.get("dominant_channel") or surface["surface_metrics"].get("dominant_channel") or "P22"
     selected = next((channel for channel in channels if channel.get("channel_id") == dominant_channel), channels[0])
     display_label = scenario_labels.get(scenario, scenario)
@@ -3027,8 +3746,27 @@ def simulated_array_frame(scenario: str, step: int = 0, coupling_view: str = "ra
         "spectrum_frame_id": frame_id,
         "trace_frame_id": frame_id,
         "frame_sync_status": "synced",
+        "recorded_source_sync_status": "same_frame_spectrum_and_px6d_fz",
         "last_update_timestamp": timestamp,
         "mode": "simulated_array_demo",
+        "demo_data_mode": "recorded_real_spectrum_reference",
+        "demo_reference_kind": recorded_reference.get("demo_reference_kind"),
+        "demo_source_session_id": recorded_reference.get("source_session_id"),
+        "demo_source_capture_index": recorded_reference.get("source_capture_index"),
+        "demo_source_elapsed_time_sec": recorded_reference.get(
+            "source_elapsed_time_sec"
+        ),
+        "demo_source_position": recorded_reference.get("source_position"),
+        "demo_dataset_id": recorded_reference.get("dataset_id"),
+        "demo_capture_date": recorded_reference.get("capture_date"),
+        "recorded_reference_force_fz_n": recorded_force_n,
+        "estimated_force_fz_n": recorded_force_n,
+        "optical_force_estimate": {
+            "estimated_n": recorded_force_n,
+            "source": "recorded_synchronized_px6d_reference_for_demo",
+            "calibrated_force_output": False,
+        },
+        "active_spectral_model_source": "recorded_demo_reference",
         "scenario": scenario,
         "scenario_label": display_label,
         "display_label": display_label,
@@ -3056,8 +3794,8 @@ def simulated_array_frame(scenario: str, step: int = 0, coupling_view: str = "ra
         "secondary_coupling_paths": secondary_coupling_paths,
         "max_coupling_hop_depth": max_coupling_hop_depth,
         "local_response_estimate_available": local_estimate_available,
-        "array_mode": "simulated_demo_only",
-        "array_status": "simulated only, not real data",
+        "array_mode": "recorded_spectrum_visual_proxy_demo",
+        "array_status": "recorded real spectrum with visual surface proxy",
         "wavelength_plan": _array_wavelength_plan_payload(),
         "dominant_channel": dominant_channel,
         "peak_attenuation": peak_shift_response,
@@ -3095,11 +3833,13 @@ def simulated_array_frame(scenario: str, step: int = 0, coupling_view: str = "ra
         "surface_metrics": surface["surface_metrics"],
         "response_band_thresholds": _operator_response_band_thresholds(),
         "surface_note": (
-            "simulated mechanically coupled wavelength-shift response, not real measured array data"
+            "Visual surface proxy driven by the synchronized recorded Fz reference; "
+            "the displayed 512-point spectrum is recorded real BaySpec data."
         ),
         "surface_title": "Raw coupled Bragg wavelength-shift surface",
         "surface_subtitle": (
-            "Simulated uncalibrated wavelength displacement. Strain and temperature are not decoupled."
+            "Recorded spectrum reference with force-scaled visual deformation. "
+            "Not a measured pressure field."
         ),
     }
 
@@ -3111,9 +3851,24 @@ def startup_reference_sources() -> None:
         px6d_reader.start()
 
 
+def _px6d_runtime_status() -> dict[str, Any]:
+    status_payload = px6d_reader.status()
+    should_self_heal = bool(
+        PX6D_REFERENCE_CONFIG.get("enabled", True)
+        and PX6D_REFERENCE_CONFIG.get("auto_start", True)
+        and not status_payload.get("worker_alive")
+        and not status_payload.get("stop_requested")
+        and status_payload.get("lifecycle_status") == "worker_exited"
+    )
+    if should_self_heal:
+        return px6d_reader.start()
+    return status_payload
+
+
 def shutdown_live_sources() -> None:
     with LIVE_SOURCE_CONTROL_LOCK:
         optical_force_capture.stop()
+        px6d_reader.set_auto_zero_frozen(False)
         sdk_live_reader.stop()
         export_watcher.stop()
         px6d_reader.stop()
@@ -3130,7 +3885,7 @@ async def application_lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="TOUCH System Trained Static Spectrum Twin",
-    version="0.2.0",
+    version=str(RELEASE_IDENTITY.get("version") or "unknown"),
     lifespan=application_lifespan,
 )
 app.add_middleware(
@@ -3139,6 +3894,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(mfbg_intensity_router)
 app.mount("/static", StaticFiles(directory=FRONTEND_ROOT), name="static")
 
 
@@ -3149,14 +3905,18 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {
+    payload = {
         "ok": True,
         "app": "TOUCH System Trained Static Spectrum Twin",
+        "version": RELEASE_IDENTITY.get("version"),
+        "build_id": RELEASE_IDENTITY.get("build_id"),
+        "source_commit": RELEASE_IDENTITY.get("source_commit"),
+        "release": dict(RELEASE_IDENTITY),
         "mode": "standalone_bayspec_trained_static_spectrum_twin",
         "backend_contract_version": "trained_static_spectrum_api_v2",
         "previous_p22_pd_voltage_app": "kept_separate",
         "optical_intensity_edition": "kept_separate",
-        "demodulation_mode": "trained_static_full_spectrum_classifier",
+        "demodulation_mode": "dynamic_temporal_full_spectrum_classifier",
         "recognition_scope": "manual_fingertip_static_spectrum_position_and_level",
         "primary_signal": "512_point_bayspec_full_spectrum_plus_stable_recovery_baseline",
         "diagnostic_spectrum_scope": "global_9fbg_wavelength_intensity_area_shape",
@@ -3166,10 +3926,15 @@ def health() -> dict:
         "array_mode": "global_spectrum_unmapped",
         "physical_channel_mapping_final": False,
         "real_3x3_enabled": False,
-        "trained_static_model_primary": True,
+        "trained_static_model_primary": False,
         "default_operator_recognition": "dynamic_temporal_v3_validation",
         "dynamic_temporal_validation_primary": True,
+        "dynamic_temporal_validation_diagnostics_only": False,
         "static_spectral_fallback_available": STATIC_SPECTRAL_PREDICTOR is not None,
+        "mfbg_intensity_profile_available": True,
+        "future_primary_sensor_profile": "mfbg_intensity_3x3",
+        "active_runtime_sensor_profile": "ordinary_fbg_hybrid_spectral",
+        "sensor_profile_isolation": True,
         "position_output_semantics": "approximate_manual_fingertip_contact_region",
         "response_level_semantics": "approximate_manual_light_normal_hard_not_force_N",
         "response_band_thresholds": _operator_response_band_thresholds(),
@@ -3183,22 +3948,55 @@ def health() -> dict:
         "export_watcher": export_watcher.status(),
         "sdk_live": sdk_live_reader.status(),
         "sense_control": sense_controller.status(),
-        "px6d_reference": px6d_reader.status(),
+        "px6d_reference": _px6d_runtime_status(),
         "optical_force_capture": optical_force_capture.status(),
+        "recorded_demo": recorded_demo_library.status(),
     }
+    if ALL_SOURCE_BETA_ENABLED:
+        payload.update(
+            {
+                "demodulation_mode": "all_source_optical_force_beta",
+                "recognition_scope": (
+                    "optical_contact_position_and_continuous_fz_estimation"
+                ),
+                "primary_signal": "bayspec_full_spectrum_time_series",
+                "trained_static_model_primary": False,
+                "default_operator_recognition": (
+                    "ordinary_fbg_all_data_beta_v1"
+                ),
+                "dynamic_temporal_validation_primary": False,
+                "dynamic_temporal_validation_diagnostics_only": False,
+                "static_spectral_fallback_available": False,
+                "all_source_beta_primary": True,
+                "all_source_beta_model": _all_source_beta_status(),
+                "response_level_semantics": (
+                    "continuous_optical_fz_estimate_0_to_5_n"
+                ),
+                "force_sensor_is_runtime_model_input": False,
+                "old_model_fallback_enabled": False,
+            }
+        )
+    else:
+        payload.update(
+            {
+                "all_source_beta_primary": False,
+                "all_source_beta_model": _all_source_beta_status(),
+            }
+        )
+    return payload
 
 
 @app.get("/api/status")
 def status() -> dict:
     result = bridge.status()
-    result["px6d_reference"] = px6d_reader.status()
+    result["px6d_reference"] = _px6d_runtime_status()
     result["optical_force_capture"] = optical_force_capture.status()
     return result
 
 
 @app.get("/api/px6d/status")
 def px6d_status() -> dict:
-    return {"ok": True, "mode": "px6d_reference_force", **px6d_reader.status()}
+    return {"ok": True, "mode": "px6d_reference_force", **_px6d_runtime_status()}
 
 
 @app.post("/api/px6d/start")
@@ -3211,6 +4009,28 @@ def px6d_start() -> dict:
 def px6d_stop() -> dict:
     status_payload = px6d_reader.stop()
     return {"ok": True, "mode": "px6d_reference_force", **status_payload}
+
+
+@app.post("/api/px6d/reconnect")
+def px6d_reconnect() -> dict:
+    stop_payload = px6d_reader.stop()
+    if not stop_payload.get("ok", False):
+        return {
+            "ok": False,
+            "mode": "px6d_reference_force",
+            "operation_status": "reconnect_stop_failed",
+            **stop_payload,
+        }
+    start_payload = px6d_reader.start()
+    return {
+        "mode": "px6d_reference_force",
+        "operation_status": (
+            "reconnect_started"
+            if start_payload.get("ok", False)
+            else "reconnect_start_failed"
+        ),
+        **start_payload,
+    }
 
 
 @app.post("/api/px6d/tare")
@@ -3227,6 +4047,7 @@ def px6d_tare(duration_sec: float = Query(default=1.0, ge=0.25, le=5.0)) -> dict
 
 @app.get("/api/px6d/latest")
 def px6d_latest() -> dict:
+    _px6d_runtime_status()
     result = px6d_reader.latest()
     sample_present = bool(result.pop("ok", False))
     sample_fresh = bool((result.get("status") or {}).get("sample_fresh"))
@@ -3240,6 +4061,7 @@ def px6d_latest() -> dict:
 
 @app.get("/api/px6d/trace")
 def px6d_trace(limit: int = Query(default=500, ge=1, le=20000)) -> dict:
+    _px6d_runtime_status()
     result = px6d_reader.trace(limit=limit)
     result["mode"] = "px6d_reference_force_trace"
     return result
@@ -3247,7 +4069,20 @@ def px6d_trace(limit: int = Query(default=500, ge=1, le=20000)) -> dict:
 
 @app.get("/api/px6d_capture/status")
 def px6d_capture_status() -> dict:
-    return {"ok": True, "mode": "optical_px6d_synchronized_capture", **optical_force_capture.status()}
+    capture_status = optical_force_capture.status()
+    force_status = _px6d_runtime_status()
+    if (
+        not capture_status.get("running")
+        and not capture_status.get("start_in_progress")
+        and force_status.get("auto_zero_frozen")
+        and force_status.get("auto_zero_freeze_reason") == "synchronized_recording"
+    ):
+        px6d_reader.set_auto_zero_frozen(False)
+    return {
+        "ok": True,
+        "mode": "optical_px6d_synchronized_capture",
+        **capture_status,
+    }
 
 
 @app.post("/api/px6d_capture/start")
@@ -3268,21 +4103,38 @@ async def px6d_capture_start(request: Request) -> dict:
             "status": "capture_request_invalid",
             "reason": "request body must be a JSON object",
         }
-    result = await asyncio.to_thread(
-        optical_force_capture.start,
-        position_label=str(payload.get("position_label") or "unlabeled"),
-        action_label=str(payload.get("action_label") or "unlabeled"),
-        trial_id=str(payload.get("trial_id") or "trial_001"),
-        operator_note=str(payload.get("operator_note") or ""),
-        output_root=payload.get("output_root"),
-        selected_outputs=payload.get("selected_outputs"),
+    px6d_reader.set_auto_zero_frozen(
+        True,
+        reason="synchronized_recording",
     )
+    try:
+        result = await asyncio.to_thread(
+            optical_force_capture.start,
+            position_label=str(payload.get("position_label") or "unlabeled"),
+            action_label=str(payload.get("action_label") or "unlabeled"),
+            trial_id=str(payload.get("trial_id") or "trial_001"),
+            operator_note=str(payload.get("operator_note") or ""),
+            output_root=payload.get("output_root"),
+            selected_outputs=payload.get("selected_outputs"),
+        )
+    except Exception:
+        px6d_reader.set_auto_zero_frozen(False)
+        raise
+    if not result.get("ok"):
+        px6d_reader.set_auto_zero_frozen(False)
     return {"mode": "optical_px6d_synchronized_capture", **result}
 
 
 @app.post("/api/px6d_capture/stop")
 def px6d_capture_stop() -> dict:
-    result = optical_force_capture.stop()
+    try:
+        result = optical_force_capture.stop()
+    except Exception:
+        if not optical_force_capture.status().get("running"):
+            px6d_reader.set_auto_zero_frozen(False)
+        raise
+    if not result.get("running"):
+        px6d_reader.set_auto_zero_frozen(False)
     return {"mode": "optical_px6d_synchronized_capture", **result}
 
 
@@ -3372,6 +4224,7 @@ def reset(keep_baseline: bool = Query(default=True)) -> dict:
         result["dynamic_temporal_shadow_reset"] = _reset_dynamic_temporal_shadow(
             "api_reset"
         )
+        result["all_source_beta_reset"] = _reset_all_source_beta("api_reset")
         if not keep_baseline:
             result["session_level_calibration_reset"] = (
                 _clear_session_level_calibration("baseline_reset")
@@ -3410,7 +4263,7 @@ async def ingest(request: Request) -> Any:
 async def ingest_csv(
     request: Request,
     channel_id: str = Query(default="P22"),
-    device_id: str = Query(default="F1871328"),
+    device_id: str | None = Query(default=None),
 ) -> Any:
     try:
         body = await _read_limited_ingest_body(request)
@@ -3429,7 +4282,11 @@ async def ingest_csv(
         conflict = _manual_ingest_source_conflict()
         if conflict is not None:
             return conflict
-        result = bridge.ingest_csv_text(text, channel_id=channel_id, device_id=device_id)
+        result = bridge.ingest_csv_text(
+            text,
+            channel_id=channel_id,
+            device_id=device_id,
+        )
         result.update({"mode": "bayspec_wavelength_shift_csv_ingest"})
         return result
 
@@ -3463,6 +4320,9 @@ def _begin_acquisition_session() -> dict:
     dynamic_shadow_reset = _reset_dynamic_temporal_shadow(
         "new_acquisition_session"
     )
+    all_source_beta_reset = _reset_all_source_beta(
+        "new_acquisition_session"
+    )
     result = bridge.reset(keep_baseline=False)
     return {
         **result,
@@ -3470,6 +4330,7 @@ def _begin_acquisition_session() -> dict:
         "baseline_requirement": "stable_current_session_post_release_recovery",
         "session_level_calibration_reset": calibration_reset,
         "dynamic_temporal_shadow_reset": dynamic_shadow_reset,
+        "all_source_beta_reset": all_source_beta_reset,
     }
 
 
@@ -3681,7 +4542,7 @@ def export_watch_status() -> dict:
 def sdk_start(
     channel_id: str = Query(default="P22"),
     interval_ms: int = Query(default=100, ge=20, le=2000),
-    integration: int = Query(default=40000, ge=1, le=10000000),
+    integration: int = Query(default=DEFAULT_INTEGRATION_US, ge=1, le=10000000),
 ) -> dict:
     existing_status = sdk_live_reader.status()
     requested_interval_ms = max(20, min(int(interval_ms), 2000))
@@ -3745,6 +4606,52 @@ def sdk_status() -> dict:
     return {"ok": True, "mode": "bayspec_direct_sdk_status", "sdk_live": sdk_live_reader.status()}
 
 
+@app.get("/api/spectrum_processing/status")
+def spectrum_processing_status() -> dict:
+    return {
+        "ok": True,
+        "mode": "display_only_spectrum_processing",
+        "spectrum_processing": sdk_live_reader.processing_status(),
+    }
+
+
+@app.patch("/api/spectrum_processing/settings")
+async def spectrum_processing_settings(request: Request) -> dict:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "status": "invalid_settings_payload",
+            "message": "Spectrum processing settings must be a JSON object.",
+        }
+    status = sdk_live_reader.update_processing_settings(payload)
+    return {
+        "ok": True,
+        "mode": "display_only_spectrum_processing",
+        "spectrum_processing": status,
+    }
+
+
+@app.post("/api/spectrum_processing/background/capture")
+def spectrum_processing_capture_background() -> dict:
+    result = sdk_live_reader.capture_background()
+    return {
+        **result,
+        "mode": "display_only_spectrum_processing",
+        "spectrum_processing": sdk_live_reader.processing_status(),
+    }
+
+
+@app.post("/api/spectrum_processing/background/clear")
+def spectrum_processing_clear_background() -> dict:
+    result = sdk_live_reader.clear_background()
+    return {
+        **result,
+        "mode": "display_only_spectrum_processing",
+        "spectrum_processing": sdk_live_reader.processing_status(),
+    }
+
+
 @app.get("/api/sense/status")
 def sense_status() -> dict:
     return {"ok": True, "mode": "sense_window_control_status", "sense_control": sense_controller.status()}
@@ -3767,17 +4674,19 @@ def live_start(
     channel_id: str = Query(default="P22"),
     export_root: str | None = Query(default=None),
     interval_sec: float = Query(default=0.1, ge=0.1, le=5.0),
+    integration: int = DEFAULT_INTEGRATION_US,
     control_sense: bool = Query(default=True),
     source: str = Query(default="direct_sdk"),
 ) -> dict:
     if source == "direct_sdk":
         requested_interval_ms = max(20, min(int(interval_sec * 1000), 2000))
+        requested_integration = max(1000, min(int(integration), 1000000))
         existing_status = sdk_live_reader.status()
         if _sdk_session_matches(
             existing_status,
             channel_id=channel_id,
             interval_ms=requested_interval_ms,
-            integration=40000,
+            integration=requested_integration,
         ):
             return {
                 "ok": True,
@@ -3806,7 +4715,7 @@ def live_start(
         sdk_status = sdk_live_reader.start(
             channel_id=channel_id,
             interval_ms=requested_interval_ms,
-            integration=40000,
+            integration=requested_integration,
         )
         return {
             "ok": bool(
@@ -3910,6 +4819,9 @@ async def set_baseline(request: Request) -> dict:
             result["dynamic_temporal_shadow_reset"] = _reset_dynamic_temporal_shadow(
                 "runtime_baseline_replaced"
             )
+            result["all_source_beta_reset"] = _reset_all_source_beta(
+                "runtime_baseline_replaced"
+            )
         result.update({"mode": "bayspec_wavelength_baseline_set"})
         return result
 
@@ -3918,7 +4830,76 @@ async def set_baseline(request: Request) -> dict:
 @_serialized_live_source_control
 def set_global_candidate_baseline(
     minimum_frames: int = Query(default=30, ge=3, le=500),
+    no_contact_attested: bool = False,
+    attested_by: str | None = None,
 ) -> dict:
+    global GLOBAL_BASELINE_ATTESTATION
+
+    force_status = px6d_reader.status()
+    force_evidence = _px6d_reference_for_record(bridge.latest(channel_id="P22"))
+    force_connected = bool(force_status.get("connected"))
+    force_tare_ready = bool(
+        force_status.get("tare_ready") and force_evidence.get("tare_ready")
+    )
+    force_sample_fresh = bool(
+        force_status.get("sample_fresh")
+        and force_evidence.get("sample_fresh", True)
+    )
+    force_reference_enforced = bool(
+        force_connected and force_tare_ready and force_sample_fresh
+    )
+    force_fz_n = force_evidence.get("force_fz_n")
+    try:
+        force_near_zero = abs(float(force_fz_n)) <= 0.10
+    except (TypeError, ValueError):
+        force_near_zero = False
+    if not no_contact_attested:
+        GLOBAL_BASELINE_ATTESTATION = {
+            "confirmed": False,
+            "attested_at_epoch_sec": None,
+            "attested_by": None,
+            "force_evidence": force_evidence,
+            "status": "operator_no_contact_attestation_required",
+        }
+        return {
+            "ok": False,
+            "status": "operator_no_contact_attestation_required",
+            "reason": "operator_no_contact_attestation_required",
+            "message": "Confirm that the tactile surface is released before setting baseline.",
+            "baseline_unchanged": True,
+            "no_contact_attestation": copy.deepcopy(GLOBAL_BASELINE_ATTESTATION),
+        }
+    if force_reference_enforced and not force_near_zero:
+        GLOBAL_BASELINE_ATTESTATION = {
+            "confirmed": False,
+            "attested_at_epoch_sec": time.time(),
+            "attested_by": str(attested_by or "operator"),
+            "force_evidence": force_evidence,
+            "status": "force_reference_not_released",
+        }
+        return {
+            "ok": False,
+            "status": "force_reference_not_released",
+            "reason": "force_reference_not_released",
+            "message": "Force reference is not near zero. Release contact before setting baseline.",
+            "baseline_unchanged": True,
+            "no_contact_attestation": copy.deepcopy(GLOBAL_BASELINE_ATTESTATION),
+        }
+    GLOBAL_BASELINE_ATTESTATION = {
+        "confirmed": True,
+        "attested_at_epoch_sec": time.time(),
+        "attested_by": str(attested_by or "operator"),
+        "force_evidence": force_evidence,
+        "status": (
+            "operator_and_force_reference_confirmed"
+            if force_reference_enforced
+            else "operator_confirmed_force_reference_pending_zero"
+            if force_connected and not force_tare_ready
+            else "operator_confirmed_force_reference_stale"
+            if force_connected
+            else "operator_confirmed_force_reference_unavailable"
+        ),
+    }
     model_baseline = bridge.set_baseline(
         {
             "channel_id": "P22",
@@ -3963,6 +4944,9 @@ def set_global_candidate_baseline(
             "recognition_scope": "global_3x3_hybrid_spectral_fingerprint",
             "physical_channel_mapping_final": False,
             "formal_model_baseline": False,
+            "no_contact_attestation": copy.deepcopy(
+                GLOBAL_BASELINE_ATTESTATION
+            ),
             "candidate_display_baseline_ok": candidate_baseline_ok,
             "static_model_spectrum_baseline": {
                 "ok": model_baseline_ready,
@@ -4000,6 +4984,9 @@ def set_global_candidate_baseline(
         )
         result["dynamic_temporal_shadow_reset"] = (
             _reset_dynamic_temporal_shadow("runtime_baseline_replaced")
+        )
+        result["all_source_beta_reset"] = _reset_all_source_beta(
+            "runtime_baseline_replaced"
         )
     return result
 
@@ -4085,7 +5072,13 @@ def global_spectrum_frame(
         "live_source_active": source_gate["live_source_active"],
         "selected_live_source": source_gate["selected_live_source"],
         "model_input_source_allowed": source_gate["model_input_source_allowed"],
+        "wavelength_axis_valid": source_gate["wavelength_axis_valid"],
+        "wavelength_axis_blockers": source_gate["wavelength_axis_blockers"],
+        "formal_spectrum_input_allowed": source_gate[
+            "formal_spectrum_input_allowed"
+        ],
         "model_input_source_mode": source_gate["model_input_source_mode"],
+        "operator_display_valid": source_gate["operator_display_valid"],
         "frame_age_sec": None,
         "display_available": False,
         "formal_recognition_allowed": False,
@@ -4118,6 +5111,7 @@ def global_spectrum_frame(
         except (TypeError, ValueError):
             frame_age_sec = None
         source_fresh = bool(source_gate["source_fresh"])
+        operator_display_valid = bool(source_gate["operator_display_valid"])
         candidate_contract_complete = (
             len(candidate_peaks) == 9
             and len(valid_candidates) == 9
@@ -4129,9 +5123,13 @@ def global_spectrum_frame(
             blockers.append("incomplete_or_invalid_global_candidate_set")
         if not baseline_ready:
             blockers.append("global_candidate_baseline_not_ready")
-        if source_gate["live_source_active"] and not source_fresh:
+        if not operator_display_valid:
             blockers.append("stale_or_cached_global_frame")
-        response_allowed = candidate_contract_complete and baseline_ready and source_fresh
+        response_allowed = (
+            candidate_contract_complete
+            and baseline_ready
+            and operator_display_valid
+        )
         blockers.extend(
             [
                 "physical_p11_p33_mapping_not_approved",
@@ -4176,7 +5174,15 @@ def global_spectrum_frame(
             "live_source_active": source_gate["live_source_active"],
             "selected_live_source": source_gate["selected_live_source"],
             "model_input_source_allowed": source_gate["model_input_source_allowed"],
+            "wavelength_axis_valid": source_gate["wavelength_axis_valid"],
+            "wavelength_axis_blockers": source_gate[
+                "wavelength_axis_blockers"
+            ],
+            "formal_spectrum_input_allowed": source_gate[
+                "formal_spectrum_input_allowed"
+            ],
             "model_input_source_mode": source_gate["model_input_source_mode"],
+            "operator_display_valid": operator_display_valid,
             "frame_age_sec": frame_age_sec,
             "display_available": bool(candidate_peaks),
             "response_allowed": response_allowed,
@@ -4193,6 +5199,7 @@ def global_spectrum_frame(
                 "physical_channel_mapping_final": False,
                 "global_candidate_summary": global_candidate_summary,
                 "source_fresh": source_fresh,
+                "operator_display_valid": operator_display_valid,
                 "frame_age_sec": frame_age_sec,
                 "response_allowed": response_allowed,
                 "response_block_reason": next(
@@ -4210,21 +5217,44 @@ def global_spectrum_frame(
             }
         )
         result["latest"] = latest
-    # The temporal validation model is the active recognizer in this mode.
-    # Running the legacy static ensemble as well adds close to a second of
-    # avoidable CPU work per live frame. Keep it available only when explicitly
-    # requested for diagnostics or when static fallback is the selected mode.
-    static_inference_requested = bool(not temporal_validation_enabled or include_shadow)
-    if static_inference_requested:
+    # Restore the pre-review runtime contract: temporal validation drives the
+    # live twin when selected, while the much slower static ensemble remains an
+    # explicit fallback or diagnostic comparison.
+    static_inference_requested = bool(
+        not temporal_validation_enabled or include_shadow
+    )
+    if (
+        source_gate["formal_spectrum_input_allowed"]
+        and static_inference_requested
+    ):
         static_model_frame = _predict_static_spectral_frame(
             include_shadow=bool(include_shadow)
         )
-    else:
+    elif source_gate["formal_spectrum_input_allowed"]:
         static_model_frame = {
             "ok": False,
             "status": "skipped_temporal_validation_mode",
             "reason": "dynamic_temporal_model_is_active",
             "inference_skipped": True,
+        }
+    else:
+        static_model_frame = {
+            "ok": False,
+            "status": "formal_spectrum_input_blocked",
+            "reason": (
+                "wavelength_grid_required_for_formal_recognition"
+                if not source_gate["wavelength_axis_valid"]
+                else "stale_or_mismatched_live_source"
+            ),
+            "source_gate": {
+                key: source_gate[key]
+                for key in (
+                    "model_input_source_mode",
+                    "qa_valid",
+                    "wavelength_axis_valid",
+                    "wavelength_axis_blockers",
+                )
+            },
         }
     static_prediction = static_model_frame.get("prediction") if static_model_frame.get("ok") else None
     static_shadow = (
@@ -4262,7 +5292,7 @@ def global_spectrum_frame(
         dynamic_temporal_shadow
     )
     static_model_assisted_display_allowed = bool(
-        static_model_frame.get("ok") and source_gate["model_input_source_allowed"]
+        static_model_frame.get("ok") and source_gate["operator_display_valid"]
     )
     temporal_model_assisted_display_allowed = bool(
         temporal_validation_enabled
@@ -4292,8 +5322,20 @@ def global_spectrum_frame(
         active_spectral_model_progress = None
     if model_assisted_display_allowed:
         model_assisted_display_block_reason = None
-    elif not source_gate["model_input_source_allowed"]:
+    elif (
+        temporal_validation_enabled
+        and not source_gate["model_input_source_allowed"]
+    ):
         model_assisted_display_block_reason = "stale_or_mismatched_live_source"
+    elif (
+        not temporal_validation_enabled
+        and not source_gate["formal_spectrum_input_allowed"]
+    ):
+        model_assisted_display_block_reason = (
+            "wavelength_grid_required_for_formal_recognition"
+            if not source_gate["wavelength_axis_valid"]
+            else "stale_or_mismatched_live_source"
+        )
     elif temporal_validation_enabled:
         model_assisted_display_block_reason = str(
             dynamic_temporal_display.get("reason")
@@ -4306,6 +5348,92 @@ def global_spectrum_frame(
         model_assisted_display_block_reason = str(
             static_model_frame.get("reason") or static_model_frame.get("status") or "model_not_ready"
         )
+
+    all_source_beta_prediction: dict[str, Any] | None = None
+    if ALL_SOURCE_BETA_ENABLED:
+        if source_gate["model_input_source_allowed"]:
+            all_source_beta_prediction = _predict_all_source_beta()
+        else:
+            all_source_beta_prediction = {
+                "ok": False,
+                "status": "latest_beta_model_source_blocked",
+                "reason": (
+                    "wavelength_grid_required_for_formal_recognition"
+                    if not source_gate["wavelength_axis_valid"]
+                    else "stale_or_mismatched_live_source"
+                ),
+                "runtime_role": "primary_beta_latest_model_only",
+                "old_model_fallback_enabled": False,
+            }
+
+        beta_ready = bool(
+            all_source_beta_prediction.get("ok")
+            and all_source_beta_prediction.get("status") == "ready"
+            and source_gate["operator_display_valid"]
+        )
+        model_assisted_display_allowed = beta_ready
+        active_spectral_prediction = all_source_beta_prediction
+        active_spectral_model_source = "ordinary_fbg_all_data_beta_v1"
+        active_spectral_model_status = all_source_beta_prediction.get("status")
+        active_spectral_model_expected = True
+        active_spectral_model_loaded = ALL_SOURCE_BETA_ADAPTER is not None
+        active_spectral_model_progress = {
+            "history_frames": all_source_beta_prediction.get(
+                "history_frames"
+            ),
+            "history_duration_sec": all_source_beta_prediction.get(
+                "history_duration_sec"
+            ),
+            "temporal_window_sec": all_source_beta_prediction.get(
+                "temporal_window_sec"
+            ),
+            "unique_frame_count": all_source_beta_prediction.get(
+                "unique_frame_count"
+            ),
+        }
+        model_assisted_display_block_reason = (
+            None
+            if beta_ready
+            else str(
+                all_source_beta_prediction.get("reason")
+                or all_source_beta_prediction.get("status")
+                or "latest_beta_model_not_ready"
+            )
+        )
+        static_model_frame = {
+            "ok": False,
+            "status": "skipped_beta_latest_model_only",
+            "reason": "old_models_are_not_loaded_or_bundled_in_beta",
+        }
+        static_prediction = None
+        static_shadow = None
+        static_shadow_prediction = None
+        dynamic_temporal_shadow = {
+            "ok": False,
+            "status": "skipped_beta_latest_model_only",
+            "reason": "old_models_are_not_loaded_or_bundled_in_beta",
+            "runtime_role": "disabled_in_beta_latest_model_only",
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
+        }
+        dynamic_temporal_display = {
+            "ok": False,
+            "status": "skipped_beta_latest_model_only",
+            "reason": "old_models_are_not_loaded_or_bundled_in_beta",
+        }
+        temporal_model_assisted_display_allowed = False
+        static_model_assisted_display_allowed = False
+        global_frame_qa["formal_recognition_allowed"] = beta_ready
+        global_frame_qa["response_allowed"] = beta_ready
+        global_frame_qa["model_baseline_ready"] = (
+            all_source_beta_prediction.get("status") != "baseline_required"
+        )
+        global_frame_qa["blockers"] = (
+            []
+            if beta_ready
+            else [model_assisted_display_block_reason]
+        )
+
     if isinstance(latest, dict):
         latest["trained_static_spectral_prediction"] = static_prediction
         latest["trained_static_spectral_model_status"] = static_model_frame.get("status")
@@ -4332,6 +5460,9 @@ def global_spectrum_frame(
             ),
             "baseline_ready": global_frame_qa.get("baseline_ready"),
             "source_fresh": global_frame_qa.get("source_fresh"),
+            "operator_display_valid": global_frame_qa.get(
+                "operator_display_valid"
+            ),
             "frame_age_sec": global_frame_qa.get("frame_age_sec"),
             "display_available": global_frame_qa.get("display_available"),
             "formal_recognition_allowed": global_frame_qa.get(
@@ -4352,6 +5483,8 @@ def global_spectrum_frame(
             "active_spectral_model_status": active_spectral_model_status,
             "active_spectral_model_progress": active_spectral_model_progress,
             "active_spectral_prediction": active_spectral_prediction,
+            "all_source_beta_model": _all_source_beta_status(),
+            "all_source_beta_prediction": all_source_beta_prediction,
             "trained_static_spectral_model": _static_spectral_model_status(),
             "trained_static_spectral_frame": static_model_frame,
             "trained_static_spectral_prediction": static_prediction,
@@ -4424,10 +5557,41 @@ def array_demo_frame(
     step: int = Query(default=0, ge=0, le=1000),
     coupling_view: str = Query(default="raw_coupled_response"),
 ) -> dict:
-    frame = simulated_array_frame(scenario=scenario, step=step, coupling_view=coupling_view)
+    capture_status = optical_force_capture.status()
+    if capture_status.get("running") or capture_status.get("start_in_progress"):
+        return {
+            "ok": False,
+            "mode": "simulation_blocked",
+            "status": "recording_active",
+            "reason": "stop_synchronized_recording_before_simulation",
+        }
+    sdk_status = sdk_live_reader.status()
+    watcher_status = export_watcher.status()
+    if sdk_status.get("active") or watcher_status.get("active"):
+        return {
+            "ok": False,
+            "mode": "simulation_blocked",
+            "status": "live_source_active",
+            "reason": "stop_live_acquisition_before_simulation",
+        }
+    try:
+        frame = simulated_array_frame(
+            scenario=scenario,
+            step=step,
+            coupling_view=coupling_view,
+        )
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        return {
+            "ok": False,
+            "mode": "recorded_demo_unavailable",
+            "status": "recorded_real_spectrum_asset_required",
+            "reason": str(exc),
+            "recorded_demo": recorded_demo_library.status(),
+        }
     return {
         "ok": True,
-        "mode": "simulated_array_demo",
+        "mode": "recorded_real_spectrum_reference_demo",
+        "demo_data_mode": frame.get("demo_data_mode"),
         "scenario": scenario,
         "coupling_view": coupling_view,
         "display_label": frame.get("display_label"),
@@ -4443,7 +5607,8 @@ def array_demo_frame(
         "surface_grid": frame.get("surface_grid"),
         "surface_note": frame.get("surface_note"),
         "response_band_thresholds": _operator_response_band_thresholds(),
+        "recorded_demo": recorded_demo_library.status(),
         "message": (
-            "mechanically coupled wavelength-shift simulation, not real calibrated 3x3 data"
+            "recorded real BaySpec spectrum with synchronized Fz-driven visual proxy"
         ),
     }

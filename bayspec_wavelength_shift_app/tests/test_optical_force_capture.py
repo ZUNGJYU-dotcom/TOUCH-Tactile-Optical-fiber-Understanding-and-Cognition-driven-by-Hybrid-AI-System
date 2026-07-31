@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -18,6 +19,7 @@ if str(APP_ROOT) not in sys.path:
 from backend.optical_force_capture import (
     OpticalForceCaptureManager,
     _continuous_force_fz_n,
+    _flush_and_sync,
     _write_text_transaction,
 )
 
@@ -49,6 +51,8 @@ def aligned_force(record: dict | None) -> dict:
         "sync_method": "window_median",
         "sync_quality": "excellent",
         "sync_offset_ms": 2.5,
+        "sync_within_target": True,
+        "calibration_sync_ok": True,
         "sample_count": 4,
         "force_sequence_start": int(timestamp * 1000),
         "force_sequence_end": int(timestamp * 1000),
@@ -511,6 +515,103 @@ class OpticalForceCaptureTests(unittest.TestCase):
         self.assertEqual(first.getvalue(), "first_header\n")
         self.assertEqual(second.getvalue(), "second_header\n")
 
+    def test_frame_write_transaction_flushes_operating_system_buffers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            first_path = Path(temporary) / "first.csv"
+            second_path = Path(temporary) / "second.csv"
+            with first_path.open("w+", encoding="utf-8") as first, second_path.open(
+                "w+", encoding="utf-8"
+            ) as second, patch(
+                "backend.optical_force_capture.os.fsync",
+                wraps=os.fsync,
+            ) as fsync:
+                _write_text_transaction(
+                    [
+                        (first, "first_frame\n"),
+                        (second, "second_frame\n"),
+                    ]
+                )
+
+            self.assertGreaterEqual(fsync.call_count, 2)
+            self.assertEqual(first_path.read_text(encoding="utf-8"), "first_frame\n")
+            self.assertEqual(second_path.read_text(encoding="utf-8"), "second_frame\n")
+
+    def test_flush_and_sync_supports_in_memory_test_handles(self) -> None:
+        handle = io.StringIO()
+        handle.write("frame")
+        _flush_and_sync(handle)
+        self.assertEqual(handle.getvalue(), "frame")
+
+    def test_start_persists_session_identity_and_capture_journal_before_return(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = OpticalForceCaptureManager(
+                output_root=Path(temporary),
+                frame_provider=FakeSpectrumSource().frame,
+                force_provider=aligned_force,
+                force_status_provider=lambda: {"connected": True, "tare_ready": True},
+                poll_interval_sec=0.05,
+            )
+            started = manager.start(selected_outputs=["spectrum"])
+            self.assertTrue(started["ok"], started)
+            output_dir = Path(started["output_directory"])
+            metadata_path = output_dir / "session_metadata.json"
+            journal_path = output_dir / "capture_journal.json"
+
+            self.assertTrue(metadata_path.is_file())
+            self.assertTrue(journal_path.is_file())
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["session_id"], started["session_id"])
+            self.assertEqual(journal["session_id"], started["session_id"])
+            self.assertTrue(metadata["running"])
+            self.assertTrue(journal["running"])
+            manager.stop()
+
+    def test_manager_recovers_session_left_running_by_previous_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_dir = root / "20260729_interrupted"
+            output_dir.mkdir()
+            metadata_path = output_dir / "session_metadata.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "touch_synchronized_capture_v4",
+                        "session_id": "interrupted-session",
+                        "running": True,
+                        "capture_status": "recording_selected_streams",
+                        "captured_timeline_frames": 7,
+                        "last_spectrum_frame_id": 41,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = OpticalForceCaptureManager(
+                output_root=root,
+                frame_provider=FakeSpectrumSource().frame,
+                force_provider=aligned_force,
+                force_status_provider=lambda: {"connected": True, "tare_ready": True},
+            )
+
+            recovered = json.loads(metadata_path.read_text(encoding="utf-8"))
+            journal = json.loads(
+                (output_dir / "capture_journal.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(recovered["running"])
+            self.assertEqual(recovered["capture_status"], "interrupted_recovered")
+            self.assertEqual(
+                recovered["recovery"]["reason"],
+                "previous_process_terminated_before_clean_stop",
+            )
+            self.assertEqual(journal["capture_status"], "interrupted_recovered")
+            status = manager.status()
+            self.assertEqual(status["recovered_interrupted_session_count"], 1)
+            self.assertEqual(
+                status["recovered_interrupted_session_ids"],
+                ["interrupted-session"],
+            )
+
     def test_worker_write_failure_is_reported_without_committing_a_frame(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             manager = OpticalForceCaptureManager(
@@ -617,7 +718,7 @@ class OpticalForceCaptureTests(unittest.TestCase):
             ), patch.object(
                 manager,
                 "_write_metadata_locked",
-                side_effect=OSError("metadata path unavailable"),
+                side_effect=[None, OSError("metadata path unavailable")],
             ):
                 result = manager.start(selected_outputs=["spectrum"])
 
@@ -698,7 +799,16 @@ class OpticalForceCaptureTests(unittest.TestCase):
             metadata = json.loads(
                 (output_dir / "session_metadata.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(metadata["schema_version"], "touch_synchronized_capture_v3")
+            self.assertEqual(metadata["schema_version"], "touch_synchronized_capture_v4")
+            self.assertIn("provenance", metadata)
+            self.assertEqual(
+                metadata["provenance"]["start_snapshot_error"],
+                "provenance_provider_not_configured",
+            )
+            self.assertEqual(
+                metadata["provenance"]["end_snapshot_error"],
+                "provenance_provider_not_configured",
+            )
             self.assertEqual(metadata["force_target"]["field"], "force_fz_n")
             self.assertEqual(metadata["force_target"]["unit"], "N")
             self.assertFalse(metadata["force_target"]["categorical_bins_enabled"])
@@ -739,6 +849,61 @@ class OpticalForceCaptureTests(unittest.TestCase):
                 any(error.startswith("capture_index_mismatch:manifest:") for error in audit["errors"]),
                 audit,
             )
+
+    def test_session_metadata_snapshots_provenance_at_start_and_end(self) -> None:
+        snapshots = iter(
+            [
+                {
+                    "software": {
+                        "version": "0.16.0",
+                        "build_id": "acceptance-remediation",
+                        "source_commit": "abc123",
+                    },
+                    "baseline": {"token": "baseline-start"},
+                },
+                {
+                    "software": {
+                        "version": "0.16.0",
+                        "build_id": "acceptance-remediation",
+                        "source_commit": "abc123",
+                    },
+                    "baseline": {"token": "baseline-end"},
+                },
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = OpticalForceCaptureManager(
+                output_root=Path(temporary),
+                frame_provider=FakeSpectrumSource().frame,
+                force_provider=aligned_force,
+                force_status_provider=lambda: {
+                    "connected": True,
+                    "tare_ready": True,
+                },
+                provenance_provider=lambda: next(snapshots),
+                poll_interval_sec=0.01,
+            )
+            self.assertTrue(
+                manager.start(
+                    selected_outputs=["spectrum", "force"],
+                    position_label="P22",
+                )["ok"]
+            )
+            time.sleep(0.04)
+            stopped = manager.stop()
+            metadata = json.loads(
+                (
+                    Path(stopped["output_directory"])
+                    / "session_metadata.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        provenance = metadata["provenance"]
+        self.assertEqual(metadata["schema_version"], "touch_synchronized_capture_v4")
+        self.assertEqual(provenance["start"]["baseline"]["token"], "baseline-start")
+        self.assertEqual(provenance["end"]["baseline"]["token"], "baseline-end")
+        self.assertIsNone(provenance["start_snapshot_error"])
+        self.assertIsNone(provenance["end_snapshot_error"])
 
     def test_nonfinite_spectrum_is_rejected_once_per_frame(self) -> None:
         invalid_frame = {
@@ -794,10 +959,36 @@ class OpticalForceCaptureTests(unittest.TestCase):
             self.assertEqual(stopped["invalid_force_samples"], 1)
             self.assertEqual(stopped["capture_status"], "no_paired_frames")
 
-    def test_optional_nonfinite_values_never_write_nan_tokens(self) -> None:
+    def test_nonfinite_sync_offset_is_rejected_for_calibration(self) -> None:
         def force_with_nonfinite_offset(record: dict | None) -> dict:
             payload = aligned_force(record)
             payload["sync_offset_ms"] = float("nan")
+            return payload
+
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = OpticalForceCaptureManager(
+                output_root=Path(temporary),
+                frame_provider=FakeSpectrumSource().frame,
+                force_provider=force_with_nonfinite_offset,
+                force_status_provider=lambda: {"connected": True, "tare_ready": True},
+                poll_interval_sec=0.01,
+            )
+            self.assertTrue(
+                manager.start(selected_outputs=["spectrum", "force"])["ok"]
+            )
+            time.sleep(0.04)
+            stopped = manager.stop()
+
+            self.assertEqual(stopped["captured_timeline_frames"], 0)
+            self.assertGreaterEqual(
+                stopped["frames_outside_force_sync_tolerance"], 1
+            )
+            self.assertEqual(stopped["capture_status"], "no_paired_frames")
+
+    def test_optional_nonfinite_values_never_write_nan_tokens(self) -> None:
+        def force_with_nonfinite_diagnostic(record: dict | None) -> dict:
+            payload = aligned_force(record)
+            payload["optional_diagnostic_value"] = float("nan")
             return payload
 
         def model_with_nonfinite_probability(record: dict) -> dict:
@@ -809,7 +1000,7 @@ class OpticalForceCaptureTests(unittest.TestCase):
             manager = OpticalForceCaptureManager(
                 output_root=Path(temporary),
                 frame_provider=FakeSpectrumSource().frame,
-                force_provider=force_with_nonfinite_offset,
+                force_provider=force_with_nonfinite_diagnostic,
                 force_status_provider=lambda: {"connected": True, "tare_ready": True},
                 model_provider=model_with_nonfinite_probability,
                 poll_interval_sec=0.01,

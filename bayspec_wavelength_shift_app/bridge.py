@@ -55,6 +55,22 @@ DEFAULT_CHANNEL_CONFIG = {
         "calibrated_pressure_output": False,
         "strain_temperature_decoupled": False,
     },
+    "hardware": {
+        "sense_root": str(DEFAULT_SENSE_ROOT),
+        "sense_export_subdirectory": "Spectrum_Data",
+        "device_id": DEFAULT_DEVICE_ID,
+        "sense_root_environment_variable": "TOUCH_SENSE_ROOT",
+        "device_id_environment_variable": "TOUCH_BAYSPEC_DEVICE_ID",
+        "require_wavelength_grid_for_formal_recognition": True,
+    },
+    "spectrum_normalization": {
+        "enabled": True,
+        "method": "no_contact_baseline_ratio",
+        "minimum_reference_counts": 100.0,
+        "minimum_valid_fraction": 0.80,
+        "output_field": "normalized_intensity_ratio",
+        "model_input_source": "raw_intensity",
+    },
     "array_wavelength_plan": {
         "wavelength_unit": "nm",
         "wavelength_start_nm": 1540.0,
@@ -269,6 +285,42 @@ def _load_channel_config() -> tuple[dict[str, Any], Path | None, str]:
 
 
 BAYSPEC_CHANNEL_CONFIG, CHANNEL_CONFIG_PATH, CHANNEL_CONFIG_STATUS = _load_channel_config()
+
+
+def configured_sense_root() -> Path:
+    hardware = BAYSPEC_CHANNEL_CONFIG.get("hardware", {}) or {}
+    environment_name = str(
+        hardware.get("sense_root_environment_variable") or "TOUCH_SENSE_ROOT"
+    ).strip()
+    configured = (
+        os.environ.get(environment_name)
+        or hardware.get("sense_root")
+        or str(DEFAULT_SENSE_ROOT)
+    )
+    return Path(str(configured)).expanduser()
+
+
+def configured_sense_export_root() -> Path:
+    hardware = BAYSPEC_CHANNEL_CONFIG.get("hardware", {}) or {}
+    subdirectory = str(
+        hardware.get("sense_export_subdirectory") or "Spectrum_Data"
+    ).strip()
+    return configured_sense_root() / subdirectory
+
+
+def configured_device_id() -> str:
+    hardware = BAYSPEC_CHANNEL_CONFIG.get("hardware", {}) or {}
+    environment_name = str(
+        hardware.get("device_id_environment_variable")
+        or "TOUCH_BAYSPEC_DEVICE_ID"
+    ).strip()
+    return str(
+        os.environ.get(environment_name)
+        or hardware.get("device_id")
+        or DEFAULT_DEVICE_ID
+    ).strip()
+
+
 _configured_channel_ids = list((BAYSPEC_CHANNEL_CONFIG.get("channels", {}) or {}).keys())
 CHANNEL_ORDER = [channel for channel in DEFAULT_CHANNEL_ORDER if channel in _configured_channel_ids]
 CHANNEL_ORDER.extend(channel for channel in _configured_channel_ids if channel not in CHANNEL_ORDER)
@@ -341,6 +393,105 @@ def _safe_float_list(
             continue
         out.append(number)
     return out
+
+
+ACCEPTED_SPECTRUM_NORMALIZATION_BASELINES = frozenset(
+    {
+        "stable_post_release_recovery_baseline",
+        "stable_post_release_recovery_baseline_with_warning",
+    }
+)
+
+
+def normalize_spectrum_to_baseline_ratio(
+    current_wavelength_nm: list[float],
+    current_intensity_counts: list[float],
+    baseline_wavelength_nm: list[float],
+    baseline_intensity_counts: list[float],
+    *,
+    minimum_reference_counts: float = 100.0,
+    minimum_valid_fraction: float = 0.80,
+) -> dict[str, Any]:
+    """Align a no-contact reference and compute the auditable I/I0 spectrum."""
+
+    current_x = np.asarray(current_wavelength_nm, dtype=float).reshape(-1)
+    current_y = np.asarray(current_intensity_counts, dtype=float).reshape(-1)
+    baseline_x = np.asarray(baseline_wavelength_nm, dtype=float).reshape(-1)
+    baseline_y = np.asarray(baseline_intensity_counts, dtype=float).reshape(-1)
+    total_points = int(current_x.size)
+    base = {
+        "ok": False,
+        "method": "no_contact_baseline_ratio",
+        "normalized_intensity_ratio": [],
+        "normalization_reference_intensity_counts": [],
+        "valid_point_count": 0,
+        "total_point_count": total_points,
+        "valid_fraction": 0.0,
+    }
+    if (
+        total_points < 2
+        or current_y.size != current_x.size
+        or baseline_x.size < 2
+        or baseline_y.size != baseline_x.size
+    ):
+        return {**base, "status": "invalid_spectrum_shape"}
+    if not (
+        np.all(np.isfinite(current_x))
+        and np.all(np.isfinite(current_y))
+        and np.all(np.isfinite(baseline_x))
+        and np.all(np.isfinite(baseline_y))
+    ):
+        return {**base, "status": "nonfinite_spectrum_value"}
+
+    baseline_delta = np.diff(baseline_x)
+    if np.all(baseline_delta < 0.0):
+        baseline_x = baseline_x[::-1]
+        baseline_y = baseline_y[::-1]
+    elif not np.all(baseline_delta > 0.0):
+        return {**base, "status": "invalid_baseline_wavelength_axis"}
+
+    current_delta = np.diff(current_x)
+    if not (np.all(current_delta > 0.0) or np.all(current_delta < 0.0)):
+        return {**base, "status": "invalid_current_wavelength_axis"}
+
+    overlap = (current_x >= baseline_x[0]) & (current_x <= baseline_x[-1])
+    aligned_reference = np.interp(current_x, baseline_x, baseline_y)
+    reference_floor = max(float(minimum_reference_counts), EPSILON)
+    valid = (
+        overlap
+        & np.isfinite(aligned_reference)
+        & (np.abs(aligned_reference) >= reference_floor)
+    )
+    valid_count = int(np.count_nonzero(valid))
+    valid_fraction = valid_count / max(total_points, 1)
+    details = {
+        **base,
+        "valid_point_count": valid_count,
+        "valid_fraction": float(valid_fraction),
+        "minimum_reference_counts": reference_floor,
+        "minimum_valid_fraction": float(minimum_valid_fraction),
+    }
+    if valid_fraction < max(0.0, min(float(minimum_valid_fraction), 1.0)):
+        return {**details, "status": "insufficient_valid_reference_points"}
+
+    ratio = np.ones_like(current_y, dtype=float)
+    ratio[valid] = current_y[valid] / aligned_reference[valid]
+    if not np.all(np.isfinite(ratio)):
+        return {**details, "status": "nonfinite_normalized_value"}
+    status = (
+        "ready"
+        if valid_count == total_points
+        else "ready_with_invalid_reference_points"
+    )
+    return {
+        **details,
+        "ok": True,
+        "status": status,
+        "normalized_intensity_ratio": ratio.astype(float).tolist(),
+        "normalization_reference_intensity_counts": (
+            aligned_reference.astype(float).tolist()
+        ),
+    }
 
 
 def _median(values: list[float]) -> float | None:
@@ -454,6 +605,10 @@ def _strip_spectrum(record: dict[str, Any], include_spectrum: bool) -> dict[str,
     if not include_spectrum:
         clean.pop("wavelength_nm", None)
         clean.pop("intensity", None)
+        clean.pop("display_intensity", None)
+        clean.pop("overlay_intensity", None)
+        clean.pop("normalized_intensity_ratio", None)
+        clean.pop("normalization_reference_intensity_counts", None)
     return clean
 
 
@@ -701,9 +856,10 @@ class BaySpecWavelengthShiftBridge:
                 "not_pd_voltage": True,
                 "calibrated_physical_output": False,
                 "array_mode": ARRAY_MODE,
-                "device_id_hint": DEFAULT_DEVICE_ID,
-                "sense_root": str(DEFAULT_SENSE_ROOT),
-                "sense_root_exists": DEFAULT_SENSE_ROOT.exists(),
+                "device_id_hint": configured_device_id(),
+                "sense_root": str(configured_sense_root()),
+                "sense_root_exists": configured_sense_root().exists(),
+                "sense_export_root": str(configured_sense_export_root()),
                 "sense_process": sense_process,
                 "latest_export_file": _format_path(latest_file),
                 "channels_seen": sorted(self.records_by_channel.keys()),
@@ -786,7 +942,11 @@ class BaySpecWavelengthShiftBridge:
             return {"ok": False, "reason": "payload must be a JSON object"}
 
         source = str(payload.get("source") or "bayspec_sense2020")
-        device_id = str(payload.get("device_id") or payload.get("device") or DEFAULT_DEVICE_ID)
+        device_id = str(
+            payload.get("device_id")
+            or payload.get("device")
+            or configured_device_id()
+        )
         source_timestamp = _safe_float(payload.get("timestamp"))
         timestamp = _now() if source_timestamp is None else source_timestamp
         channels = payload.get("channels")
@@ -1091,12 +1251,26 @@ class BaySpecWavelengthShiftBridge:
             max_items=self.max_spectrum_points,
             reject_invalid=True,
         )
+        display_intensity = _safe_float_list(
+            channel_payload.get("display_intensity"),
+            max_items=self.max_spectrum_points,
+            reject_invalid=True,
+        )
+        overlay_intensity = _safe_float_list(
+            channel_payload.get("overlay_intensity"),
+            max_items=self.max_spectrum_points,
+            reject_invalid=True,
+        )
         if (
             wavelength_input is not None
             and intensity_input is not None
             and len(wavelength_nm) != len(spectrum_intensity)
         ):
             raise SpectrumInputError("spectrum_axis_length_mismatch")
+        if display_intensity and len(display_intensity) != len(spectrum_intensity):
+            raise SpectrumInputError("display_spectrum_length_mismatch")
+        if overlay_intensity and len(overlay_intensity) != len(spectrum_intensity):
+            raise SpectrumInputError("overlay_spectrum_length_mismatch")
         peak_wavelength = _safe_float(
             _pick(channel_payload, ["peak_wavelength_nm", "peak_nm", "lambda_peak_nm", "wavelength_peak"])
         )
@@ -1356,7 +1530,127 @@ class BaySpecWavelengthShiftBridge:
             record["wavelength_nm"] = wavelength_nm
         if spectrum_intensity:
             record["intensity"] = spectrum_intensity
+        if display_intensity:
+            record["display_intensity"] = display_intensity
+        if overlay_intensity:
+            record["overlay_intensity"] = overlay_intensity
+        processing_payload = channel_payload.get("spectrum_processing")
+        if isinstance(processing_payload, dict):
+            record["model_input_source"] = str(
+                channel_payload.get("model_input_source")
+                or processing_payload.get("model_input_source")
+                or "raw_intensity"
+            )
+            record["spectrum_processing"] = {
+                "steps": [
+                    str(value)
+                    for value in (processing_payload.get("steps") or [])
+                ][:8],
+                "warnings": [
+                    str(value)
+                    for value in (processing_payload.get("warnings") or [])
+                ][:8],
+                "raw_retained": bool(processing_payload.get("raw_retained")),
+                "model_input_source": str(
+                    processing_payload.get("model_input_source")
+                    or "raw_intensity"
+                ),
+                "display_input_source": str(
+                    processing_payload.get("display_input_source")
+                    or "display_intensity"
+                ),
+                "background_reference_ready": bool(
+                    processing_payload.get("background_reference_ready")
+                ),
+                "raw_roughness": _safe_float(
+                    processing_payload.get("raw_roughness")
+                ),
+                "display_roughness": _safe_float(
+                    processing_payload.get("display_roughness")
+                ),
+                "frame_count": _safe_float(processing_payload.get("frame_count")),
+                "normalization_requested": bool(
+                    processing_payload.get("normalization_requested")
+                ),
+            }
+        self._refresh_full_spectrum_normalization(record)
         return record
+
+    def _refresh_full_spectrum_normalization(
+        self,
+        record: dict[str, Any],
+    ) -> None:
+        config = dict(BAYSPEC_CHANNEL_CONFIG.get("spectrum_normalization", {}) or {})
+        enabled = bool(config.get("enabled", True))
+        channel_id = str(record.get("channel_id") or "")
+        baseline_status = self.baseline_spectrum_status_by_channel.get(channel_id)
+        metadata = {
+            "enabled": enabled,
+            "method": str(
+                config.get("method") or "no_contact_baseline_ratio"
+            ),
+            "status": "disabled" if not enabled else "waiting_for_baseline",
+            "output_field": str(
+                config.get("output_field") or "normalized_intensity_ratio"
+            ),
+            "reference_status": baseline_status,
+            "reference_semantic_role": self.baseline_spectrum_semantic_role_by_channel.get(
+                channel_id,
+                "post_press_release_recovery_no_contact",
+            ),
+            "reference_sample_count": int(
+                self.baseline_spectrum_sample_count_by_channel.get(channel_id, 0)
+            ),
+            "reference_noise_ratio": self.baseline_spectrum_noise_ratio_by_channel.get(
+                channel_id
+            ),
+            "reference_drift_ratio": self.baseline_spectrum_drift_ratio_by_channel.get(
+                channel_id
+            ),
+            "raw_retained": True,
+            "model_input_source": "raw_intensity",
+            "applied_to_model_input": False,
+        }
+        record.pop("normalized_intensity_ratio", None)
+        record.pop("normalization_reference_intensity_counts", None)
+        if not enabled:
+            record["spectrum_normalization"] = metadata
+            return
+        if baseline_status not in ACCEPTED_SPECTRUM_NORMALIZATION_BASELINES:
+            record["spectrum_normalization"] = metadata
+            return
+
+        baseline = self.baseline_spectrum_by_channel.get(channel_id) or {}
+        result = normalize_spectrum_to_baseline_ratio(
+            _safe_float_list(record.get("wavelength_nm") or []),
+            _safe_float_list(record.get("intensity") or []),
+            _safe_float_list(baseline.get("wavelength_nm") or []),
+            _safe_float_list(baseline.get("intensity") or []),
+            minimum_reference_counts=(
+                _safe_float(config.get("minimum_reference_counts"), 100.0)
+                or 100.0
+            ),
+            minimum_valid_fraction=(
+                _safe_float(config.get("minimum_valid_fraction"), 0.80)
+                or 0.80
+            ),
+        )
+        metadata.update(
+            {
+                key: value
+                for key, value in result.items()
+                if key
+                not in {
+                    "normalized_intensity_ratio",
+                    "normalization_reference_intensity_counts",
+                }
+            }
+        )
+        if result.get("ok"):
+            record["normalized_intensity_ratio"] = list(
+                result["normalized_intensity_ratio"]
+            )
+        record["spectrum_normalization"] = metadata
 
     def _prune_baseline_candidates(self, channel_id: str, timestamp: float) -> list[float]:
         rolling_window = _config_float("baseline", "rolling_window_sec", 2.0)
@@ -2272,6 +2566,7 @@ class BaySpecWavelengthShiftBridge:
                 "qa_status": qa_status,
             }
         )
+        self._refresh_full_spectrum_normalization(record)
 
     def _refresh_channel_records(self, channels: set[str]) -> None:
         for channel in channels:
@@ -3120,11 +3415,16 @@ class BaySpecWavelengthShiftBridge:
         self,
         text: str,
         channel_id: str = "P22",
-        device_id: str = DEFAULT_DEVICE_ID,
+        device_id: str | None = None,
         source: str = "bayspec_sense2020_csv",
     ) -> dict[str, Any]:
         rows = list(csv.reader(io.StringIO(text)))
-        payloads = self._csv_rows_to_payloads(rows, channel_id=channel_id, device_id=device_id, source=source)
+        payloads = self._csv_rows_to_payloads(
+            rows,
+            channel_id=channel_id,
+            device_id=str(device_id or configured_device_id()),
+            source=source,
+        )
         if not payloads:
             return {
                 "ok": False,
@@ -3278,7 +3578,7 @@ class BaySpecWavelengthShiftBridge:
         result = self.ingest(
             {
                 "source": source,
-                "device_id": DEFAULT_DEVICE_ID,
+                "device_id": configured_device_id(),
                 "channels": [channel_payload],
             }
         )
@@ -3439,7 +3739,7 @@ class BaySpecWavelengthShiftBridge:
         return None
 
     def latest_export_file(self, root: str | Path | None = None) -> Path | None:
-        search_root = Path(root) if root else DEFAULT_SENSE_ROOT / "Spectrum_Data"
+        search_root = Path(root) if root else configured_sense_export_root()
         if not search_root.exists():
             return None
         latest: Path | None = None
@@ -3464,7 +3764,7 @@ class BaySpecWavelengthShiftBridge:
             return {
                 "ok": False,
                 "reason": "no CSV/TXT/TSV/DAT export found",
-                "export_root": str(root or (DEFAULT_SENSE_ROOT / "Spectrum_Data")),
+                "export_root": str(root or configured_sense_export_root()),
             }
         result = self.ingest_export_file(latest, channel_id=channel_id, source="bayspec_sense2020_export_file")
         result["source_file"] = str(latest)

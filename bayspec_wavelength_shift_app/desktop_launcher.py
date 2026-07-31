@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import ctypes
 from html import escape
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import socket
@@ -21,10 +23,17 @@ from desktop_window_zoom import MacStyleTaskbarZoom
 
 
 APP_TITLE = "TOUCH"
+APP_EXPANDED_TITLE = (
+    "Tactile Optical-fiber Understanding and Cognition driven by Hybrid-AI System"
+)
 DEFAULT_PORT = 8640
+FALLBACK_PORT_COUNT = 10
 EXPECTED_BACKEND_APP = "TOUCH System Trained Static Spectrum Twin"
 EXPECTED_BACKEND_MODE = "standalone_bayspec_trained_static_spectrum_twin"
 EXPECTED_BACKEND_CONTRACT_VERSION = "trained_static_spectrum_api_v2"
+EXPECTED_OPERATOR_RECOGNITION = "dynamic_temporal_v3_validation"
+EXPECTED_BETA_OPERATOR_RECOGNITION = "ordinary_fbg_all_data_beta_v1"
+BETA_RUNTIME_FLAG_FILENAME = "beta_all_data_runtime.flag"
 
 GWL_STYLE = -16
 WS_SYSMENU = 0x00080000
@@ -36,16 +45,98 @@ SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 
 
+_FALLBACK_STARTUP_LOGO = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<path fill="#78E2FE" d="M336 220C470 220 590 230 646 260C690 286 714 330 709 381C707 400 698 407 681 398C620 378 570 366 530 378C475 394 441 449 433 515C421 612 455 682 519 718C577 748 636 727 688 694C725 671 755 684 770 710C786 740 770 808 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z"/>
+<circle cx="566" cy="551" r="181" fill="#075C73"/>
+<circle cx="659" cy="552" r="149" fill="#FE9985"/>
+</svg>"""
+
+_ANIMATED_STARTUP_LOGO = """<svg class="contact-logo" xmlns="http://www.w3.org/2000/svg"
+  viewBox="34 174 800 824" role="img" aria-label="TOUCH contact animation">
+  <defs>
+    <linearGradient id="startup-body" x1="0.16" y1="0.02" x2="0.78" y2="0.98">
+      <stop offset="0" stop-color="#9AECFF"/>
+      <stop offset="0.30" stop-color="#78E2FE"/>
+      <stop offset="0.70" stop-color="#68DBF8"/>
+      <stop offset="1" stop-color="#5BD3F3"/>
+    </linearGradient>
+    <radialGradient id="startup-body-light" cx="0.28" cy="0.18" r="0.88">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.34"/>
+      <stop offset="0.45" stop-color="#FFFFFF" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#0C8FAE" stop-opacity="0.10"/>
+    </radialGradient>
+    <radialGradient id="startup-cavity" cx="0.68" cy="0.46" r="0.72">
+      <stop offset="0" stop-color="#0E7893"/>
+      <stop offset="0.62" stop-color="#075C73"/>
+      <stop offset="1" stop-color="#064B60"/>
+    </radialGradient>
+    <radialGradient id="startup-contact" cx="0.32" cy="0.24" r="0.86">
+      <stop offset="0" stop-color="#FFB5A5"/>
+      <stop offset="0.48" stop-color="#FE9985"/>
+      <stop offset="1" stop-color="#EF6E59"/>
+    </radialGradient>
+    <filter id="startup-body-depth" x="-18%" y="-18%" width="136%" height="144%">
+      <feDropShadow dx="0" dy="14" stdDeviation="13" flood-color="#0E7893" flood-opacity="0.20"/>
+    </filter>
+    <filter id="startup-ball-depth" x="-35%" y="-35%" width="170%" height="170%">
+      <feDropShadow dx="-2" dy="9" stdDeviation="10" flood-color="#A64538" flood-opacity="0.22"/>
+    </filter>
+    <filter id="startup-cavity-depth" x="-35%" y="-35%" width="170%" height="170%">
+      <feGaussianBlur stdDeviation="2.4"/>
+      <feDropShadow dx="6" dy="4" stdDeviation="10" flood-color="#064B60" flood-opacity="0.34"/>
+    </filter>
+    <clipPath id="startup-outer-clip">
+      <path d="M336 220C470 220 590 230 646 260C690 286 714 330 720 381C724 400 730 416 735 430C742 452 747 470 748 490C752 512 756 535 756 555C758 580 758 605 756 625C754 648 751 670 748 690C744 718 741 742 744 764C749 795 754 822 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z"/>
+    </clipPath>
+  </defs>
+  <g class="soft-shell" filter="url(#startup-body-depth)">
+    <path class="body-depth morph-shell"
+      d="M336 220C470 220 590 230 646 260C690 286 714 330 720 381C724 400 730 416 735 430C742 452 747 470 748 490C752 512 756 535 756 555C758 580 758 605 756 625C754 648 751 670 748 690C744 718 741 742 744 764C749 795 754 822 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z"
+      fill="#28B4D2" opacity="0.40" transform="translate(0 13)"/>
+    <g clip-path="url(#startup-outer-clip)">
+      <circle class="cavity-wall" cx="566" cy="551" r="181"
+        fill="url(#startup-cavity)" filter="url(#startup-cavity-depth)"/>
+    </g>
+    <path class="body-shape morph-shell"
+      d="M336 220C470 220 590 230 646 260C690 286 714 330 720 381C724 400 730 416 735 430C742 452 747 470 748 490C752 512 756 535 756 555C758 580 758 605 756 625C754 648 751 670 748 690C744 718 741 742 744 764C749 795 754 822 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z"
+      fill="url(#startup-body)"/>
+    <path class="body-light morph-shell"
+      d="M336 220C470 220 590 230 646 260C690 286 714 330 720 381C724 400 730 416 735 430C742 452 747 470 748 490C752 512 756 535 756 555C758 580 758 605 756 625C754 648 751 670 748 690C744 718 741 742 744 764C749 795 754 822 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z"
+      fill="url(#startup-body-light)" opacity="0.70"/>
+    <path class="body-highlight" fill="none" stroke="#FFFFFF" stroke-opacity="0.24"
+      stroke-width="7" stroke-linecap="round"
+      d="M224 239C358 219 538 226 625 254C669 269 694 296 706 332"/>
+  </g>
+  <g class="contact-ball" filter="url(#startup-ball-depth)">
+    <circle cx="659" cy="552" r="149" fill="url(#startup-contact)"/>
+  </g>
+</svg>"""
+
+
+def startup_logo_data_uri(app_root: Path) -> str:
+    """Embed the startup logo so WebView never depends on a local file URL."""
+
+    logo_path = app_root / "frontend" / "touch_system_icon.png"
+    try:
+        logo_bytes = logo_path.read_bytes()
+        media_type = "image/png"
+    except OSError:
+        logo_bytes = _FALLBACK_STARTUP_LOGO
+        media_type = "image/svg+xml"
+    encoded = base64.b64encode(logo_bytes).decode("ascii")
+    return f"data:{media_type};base64,{encoded}"
+
+
 def startup_document(app_root: Path, *, failed: bool = False) -> str:
     """Return the lightweight page shown while the backend initializes."""
 
-    logo_path = app_root / "frontend" / "touch_system_icon.png"
-    logo_uri = logo_path.resolve().as_uri() if logo_path.is_file() else ""
+    logo_uri = startup_logo_data_uri(app_root)
     title = "Unable to start" if failed else "Starting"
     detail = "Close TOUCH and try again" if failed else "Preparing workspace"
+    state_class = "is-failed" if failed else "is-loading"
     activity = "" if failed else """
-      <div class="activity" aria-hidden="true">
-        <i></i><i></i><i></i>
+      <div class="progress" aria-hidden="true">
+        <span></span>
       </div>
     """
     close_action = (
@@ -66,7 +157,12 @@ def startup_document(app_root: Path, *, failed: bool = False) -> str:
     :root {{ color-scheme: light; font-family: "Segoe UI Variable", "Segoe UI", sans-serif; }}
     * {{ box-sizing: border-box; }}
     html, body {{ width: 100%; height: 100%; margin: 0; overflow: hidden; }}
-    body {{ background: #f4f7fa; color: #102236; }}
+    body {{
+      background:
+        radial-gradient(circle at 50% 48%, rgba(92, 210, 234, 0.10), transparent 28%),
+        #f4f7fa;
+      color: #102236;
+    }}
     .titlebar {{
       height: 48px; display: flex; align-items: center; gap: 10px;
       padding: 0 18px; border-bottom: 1px solid #d8e3ec;
@@ -79,44 +175,267 @@ def startup_document(app_root: Path, *, failed: bool = False) -> str:
       height: calc(100% - 48px); display: grid; place-items: center;
       padding: 32px;
     }}
-    .startup {{ display: grid; justify-items: center; gap: 14px; text-align: center; }}
-    .startup > img {{
-      width: 68px; height: 68px; object-fit: contain;
-      filter: drop-shadow(0 10px 18px rgba(50, 112, 140, 0.14));
+    .startup {{
+      width: min(620px, 86vw);
+      display: grid;
+      justify-items: center;
+      gap: 12px;
+      text-align: center;
     }}
-    h1 {{ margin: 4px 0 0; font-size: 25px; font-weight: 700; letter-spacing: 0; }}
-    p {{ margin: 0; color: #607487; font-size: 15px; }}
-    .activity {{ display: flex; gap: 6px; height: 20px; align-items: center; margin-top: 4px; }}
-    .activity i {{
-      width: 7px; height: 7px; border-radius: 50%; background: #1598c2;
-      animation: pulse 1s ease-in-out infinite;
+    .logo-stage {{
+      position: relative;
+      width: 136px;
+      height: 136px;
+      display: grid;
+      place-items: center;
+      margin-bottom: 2px;
+      isolation: isolate;
     }}
-    .activity i:nth-child(2) {{ animation-delay: 0.14s; }}
-    .activity i:nth-child(3) {{ animation-delay: 0.28s; }}
+    .logo-stage::before,
+    .logo-stage::after {{
+      content: "";
+      position: absolute;
+      inset: 17px;
+      border-radius: 42%;
+      opacity: 0;
+      pointer-events: none;
+    }}
+    .logo-stage::before {{
+      border: 1px solid rgba(91, 211, 243, 0.30);
+    }}
+    .logo-stage::after {{
+      inset: 23px;
+      z-index: -1;
+      background: radial-gradient(circle, rgba(120, 226, 254, 0.30), transparent 68%);
+      filter: blur(8px);
+    }}
+    .logo-stage svg {{
+      position: relative;
+      z-index: 1;
+      width: 124px;
+      height: 124px;
+      overflow: visible;
+    }}
+    .morph-shell, .soft-shell, .contact-ball, .cavity-wall {{
+      transform-box: fill-box;
+      transform-origin: center;
+      will-change: transform, opacity;
+    }}
+    .morph-shell {{
+      d: path("M336 220C470 220 590 230 646 260C690 286 714 330 720 381C724 400 730 416 735 430C742 452 747 470 748 490C752 512 756 535 756 555C758 580 758 605 756 625C754 648 751 670 748 690C744 718 741 742 744 764C749 795 754 822 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z");
+    }}
+    .soft-shell {{
+      transform-origin: 62% 52%;
+    }}
+    .contact-ball {{
+      transform: translate(320px, 0) scaleX(0.96) scaleY(1.04);
+    }}
+    .cavity-wall {{
+      transform: scaleX(0.16) scaleY(0.62);
+      opacity: 0;
+    }}
+    .is-loading .contact-ball {{
+      animation: contact-press 2.08s linear 0.08s both;
+    }}
+    .is-loading .morph-shell {{
+      animation: shell-morph 2.08s linear 0.08s both;
+    }}
+    .is-loading .soft-shell {{
+      animation: elastic-recoil 2.08s linear 0.08s both;
+    }}
+    .is-loading .cavity-wall {{
+      animation: cavity-capture 2.08s linear 0.08s both;
+    }}
+    .is-loading .logo-stage::before {{
+      animation: haptic-pulse 2.08s linear 0.08s both;
+    }}
+    .is-loading .logo-stage::after {{
+      animation: settle-glow 2.08s linear 0.08s both;
+    }}
+    .is-failed .morph-shell {{
+      d: path("M336 220C470 220 590 230 646 260C690 286 714 330 709 381C707 400 698 407 681 398C620 378 570 366 530 378C475 394 441 449 433 515C421 612 455 682 519 718C577 748 636 727 688 694C725 671 755 684 770 710C786 740 770 808 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z");
+    }}
+    .is-failed .contact-ball {{
+      transform: none;
+    }}
+    .is-failed .cavity-wall {{
+      transform: none;
+      opacity: 1;
+    }}
+    h1 {{
+      margin: 0;
+      font-size: 30px;
+      line-height: 1;
+      font-weight: 760;
+      letter-spacing: 0.08em;
+    }}
+    .expanded-name {{
+      max-width: 590px;
+      margin: 0;
+      color: #526b7f;
+      font-size: 14px;
+      line-height: 1.45;
+      text-wrap: balance;
+    }}
+    .startup-status {{
+      display: grid;
+      gap: 2px;
+      margin-top: 8px;
+    }}
+    .status-title {{
+      color: #18384d;
+      font-size: 14px;
+      font-weight: 680;
+    }}
+    .status-detail {{
+      color: #7890a2;
+      font-size: 12px;
+    }}
+    .is-failed .status-title {{ color: #9d433f; }}
+    .progress {{
+      position: relative;
+      width: 184px;
+      height: 3px;
+      margin-top: 8px;
+      overflow: hidden;
+      border-radius: 2px;
+      background: #dbe8ef;
+    }}
+    .progress span {{
+      position: absolute;
+      inset: 0 auto 0 -45%;
+      width: 45%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #6eddef, #1598c2);
+      animation: progress-sweep 1.35s cubic-bezier(0.45, 0, 0.25, 1) infinite;
+    }}
     .close-action {{
       margin-top: 8px; min-width: 92px; height: 38px; border-radius: 6px;
       border: 1px solid #a9c4d6; background: #fff; color: #15364c;
       font: inherit; font-weight: 600; cursor: pointer;
     }}
-    @keyframes pulse {{
-      0%, 70%, 100% {{ opacity: 0.25; transform: translateY(0); }}
-      35% {{ opacity: 1; transform: translateY(-4px); }}
+    @keyframes contact-press {{
+      0%, 8% {{
+        transform: translate(320px, 0) scaleX(0.96) scaleY(1.04);
+        animation-timing-function: cubic-bezier(0.38, 0, 0.18, 1);
+      }}
+      14% {{
+        transform: translate(350px, -6px) scaleX(0.94) scaleY(1.06);
+        animation-timing-function: cubic-bezier(0.18, 0.82, 0.16, 1);
+      }}
+      31% {{
+        transform: translate(82px, -3px) scaleX(1.045) scaleY(0.97);
+        animation-timing-function: cubic-bezier(0.12, 0.76, 0.15, 1);
+      }}
+      40% {{
+        transform: translate(-22px, 2px) scaleX(0.84) scaleY(1.12);
+        animation-timing-function: cubic-bezier(0.16, 0.86, 0.20, 1);
+      }}
+      53% {{
+        transform: translate(20px, -5px) scaleX(1.035) scaleY(0.98);
+        animation-timing-function: cubic-bezier(0.20, 0.78, 0.22, 1);
+      }}
+      66% {{
+        transform: translate(-10px, 2px) scaleX(0.95) scaleY(1.04);
+        animation-timing-function: cubic-bezier(0.22, 0.72, 0.28, 1);
+      }}
+      78% {{
+        transform: translate(6px, -1px) scaleX(1.012) scaleY(0.994);
+        animation-timing-function: cubic-bezier(0.24, 0.68, 0.30, 1);
+      }}
+      89% {{
+        transform: translate(-3px, 1px) scaleX(0.987) scaleY(1.014);
+        animation-timing-function: cubic-bezier(0.26, 0.62, 0.34, 1);
+      }}
+      100% {{ transform: translate(0, 0) scaleX(1) scaleY(1); }}
+    }}
+    @keyframes shell-morph {{
+      0%, 16% {{
+        d: path("M336 220C470 220 590 230 646 260C690 286 714 330 720 381C724 400 730 416 735 430C742 452 747 470 748 490C752 512 756 535 756 555C758 580 758 605 756 625C754 648 751 670 748 690C744 718 741 742 744 764C749 795 754 822 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z");
+      }}
+      31% {{
+        d: path("M336 220C470 220 590 230 646 260C690 286 714 330 712 381C711 401 705 411 690 407C650 390 610 385 580 396C535 415 512 466 508 521C500 610 540 674 600 704C646 725 686 711 720 692C750 674 770 690 776 712C787 749 771 812 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z");
+      }}
+      40% {{
+        d: path("M336 220C470 220 590 230 646 260C685 284 706 329 700 382C697 409 684 416 660 402C586 374 527 367 483 390C424 420 395 481 392 541C388 640 432 715 502 743C570 770 645 738 704 692C748 661 780 680 788 714C798 750 776 821 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z");
+      }}
+      53% {{
+        d: path("M336 220C470 220 590 230 646 260C691 286 716 330 711 381C709 399 701 407 686 399C633 381 585 370 546 380C493 394 457 444 448 509C435 602 468 669 527 705C581 737 637 721 684 693C719 672 750 684 766 710C783 741 769 808 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z");
+      }}
+      66% {{
+        d: path("M336 220C470 220 590 230 646 260C688 285 711 330 705 382C703 403 693 410 675 400C607 377 556 367 515 381C460 399 426 457 420 523C411 620 449 690 514 724C574 755 638 729 693 693C732 668 761 683 776 711C791 742 773 814 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z");
+      }}
+      78% {{
+        d: path("M336 220C470 220 590 230 646 260C691 286 715 330 710 381C708 400 699 407 682 398C623 379 573 368 533 378C478 393 444 447 436 513C423 609 457 679 520 716C578 746 636 726 687 694C724 671 754 684 769 710C785 740 770 809 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z");
+      }}
+      90%, 100% {{
+        d: path("M336 220C470 220 590 230 646 260C690 286 714 330 709 381C707 400 698 407 681 398C620 378 570 366 530 378C475 394 441 449 433 515C421 612 455 682 519 718C577 748 636 727 688 694C725 671 755 684 770 710C786 740 770 808 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z");
+      }}
+    }}
+    @keyframes elastic-recoil {{
+      0%, 31% {{ transform: translateX(0) scaleX(1) scaleY(1); }}
+      40% {{ transform: translateX(-8px) scaleX(0.982) scaleY(1.014); }}
+      53% {{ transform: translateX(5px) scaleX(1.007) scaleY(0.995); }}
+      66% {{ transform: translateX(-3px) scaleX(0.996) scaleY(1.004); }}
+      78% {{ transform: translateX(1px) scaleX(1.002) scaleY(0.999); }}
+      90%, 100% {{ transform: translateX(0) scaleX(1) scaleY(1); }}
+    }}
+    @keyframes cavity-capture {{
+      0%, 24% {{ transform: scaleX(0.16) scaleY(0.62); opacity: 0; }}
+      31% {{ transform: scaleX(0.52) scaleY(0.82); opacity: 0.34; }}
+      40% {{ transform: scaleX(1.13) scaleY(1.08); opacity: 1; }}
+      53% {{ transform: scaleX(0.91) scaleY(0.97); opacity: 0.84; }}
+      66% {{ transform: scaleX(1.045) scaleY(1.02); opacity: 1; }}
+      78% {{ transform: scaleX(0.98) scaleY(0.995); opacity: 0.96; }}
+      90%, 100% {{ transform: scaleX(1) scaleY(1); opacity: 1; }}
+    }}
+    @keyframes haptic-pulse {{
+      0%, 32% {{ transform: scale(0.82); opacity: 0; }}
+      38% {{ transform: scale(0.91); opacity: 0.42; }}
+      56% {{ transform: scale(1.23); opacity: 0; }}
+      100% {{ transform: scale(1.23); opacity: 0; }}
+    }}
+    @keyframes settle-glow {{
+      0%, 28% {{ transform: scale(0.84); opacity: 0; }}
+      38% {{ transform: scale(1.01); opacity: 0.68; }}
+      54% {{ transform: scale(1.09); opacity: 0.26; }}
+      72%, 100% {{ transform: scale(1.14); opacity: 0; }}
+    }}
+    @keyframes progress-sweep {{
+      0% {{ transform: translateX(0); }}
+      100% {{ transform: translateX(325%); }}
     }}
     @media (prefers-reduced-motion: reduce) {{
-      .activity i {{ animation: none; opacity: 0.65; }}
+      .morph-shell, .soft-shell, .contact-ball, .cavity-wall,
+      .logo-stage::before, .logo-stage::after, .progress span {{
+        animation: none !important;
+      }}
+      .morph-shell {{
+        d: path("M336 220C470 220 590 230 646 260C690 286 714 330 709 381C707 400 698 407 681 398C620 378 570 366 530 378C475 394 441 449 433 515C421 612 455 682 519 718C577 748 636 727 688 694C725 671 755 684 770 710C786 740 770 808 741 868C711 920 650 946 552 957C430 970 294 960 214 942C121 922 89 862 77 776C64 690 73 507 83 419C93 331 129 272 194 242C231 226 278 219 336 220Z") !important;
+      }}
+      .contact-ball {{ transform: none !important; }}
+      .cavity-wall {{ transform: none !important; opacity: 1 !important; }}
+      .logo-stage::before, .logo-stage::after {{ display: none; }}
+      .progress span {{ left: 0; width: 100%; opacity: 0.72; }}
     }}
   </style>
 </head>
-<body>
+<body class="{state_class}">
   <header class="titlebar pywebview-drag-region">
-    {f'<img src="{escape(logo_uri)}" alt="">' if logo_uri else ""}
+    <img src="{escape(logo_uri)}" alt="">
     <strong>{escape(APP_TITLE)}</strong>
   </header>
   <main>
     <section class="startup" aria-live="polite">
-      {f'<img src="{escape(logo_uri)}" alt="">' if logo_uri else ""}
-      <h1>{escape(title)}</h1>
-      <p>{escape(detail)}</p>
+      <div class="logo-stage" aria-hidden="true">
+        {_ANIMATED_STARTUP_LOGO}
+      </div>
+      <h1>{escape(APP_TITLE)}</h1>
+      <p class="expanded-name">{escape(APP_EXPANDED_TITLE)}</p>
+      <div class="startup-status">
+        <span class="status-title">{escape(title)}</span>
+        <span class="status-detail">{escape(detail)}</span>
+      </div>
       {activity}
       {close_action}
     </section>
@@ -127,6 +446,20 @@ def startup_document(app_root: Path, *, failed: bool = False) -> str:
 
 def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
+
+
+def beta_all_data_runtime_requested() -> bool:
+    explicit = str(os.environ.get("TOUCH_BETA_ALL_DATA_MODEL", "")).strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    if not is_frozen():
+        return False
+    marker_locations = [
+        Path(sys.executable).resolve().parent / BETA_RUNTIME_FLAG_FILENAME,
+        Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)).resolve()
+        / BETA_RUNTIME_FLAG_FILENAME,
+    ]
+    return any(marker.is_file() for marker in marker_locations)
 
 
 def bundle_root() -> Path:
@@ -233,12 +566,17 @@ def show_error(title: str, message: str) -> None:
 
 def configure_runtime_paths() -> Path:
     app_root = bundle_root()
+    if beta_all_data_runtime_requested():
+        os.environ["TOUCH_BETA_ALL_DATA_MODEL"] = "true"
     os.environ["BAYSPEC_WAVELENGTH_APP_ROOT"] = str(app_root)
     if is_frozen():
-        # Keep experiment outputs beside the portable desktop package instead
-        # of burying them in PyInstaller's internal resource directory.
-        portable_data_root = Path(sys.executable).resolve().parent / "data" / "px6d_synchronized"
-        os.environ.setdefault("TOUCH_CAPTURE_OUTPUT_ROOT", str(portable_data_root))
+        # Keep experiment evidence outside the replaceable application bundle.
+        documents_root = Path(
+            os.environ.get("TOUCH_DOCUMENTS_ROOT")
+            or (Path.home() / "Documents")
+        ).expanduser()
+        capture_root = documents_root / "TOUCH" / "captures"
+        os.environ.setdefault("TOUCH_CAPTURE_OUTPUT_ROOT", str(capture_root))
     runtime_roots = [app_root]
     if not is_frozen():
         # Source launches import the shared recognition code from the project
@@ -253,8 +591,14 @@ def configure_runtime_paths() -> Path:
 
 def port_is_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.2)
-        return sock.connect_ex(("127.0.0.1", port)) != 0
+        try:
+            # A bound process can reject connections while still owning the
+            # port. Only a real bind attempt answers whether a new backend can
+            # safely listen here.
+            sock.bind(("127.0.0.1", int(port)))
+        except OSError:
+            return False
+        return True
 
 
 def require_fixed_port(port: int) -> None:
@@ -271,15 +615,67 @@ def require_fixed_port(port: int) -> None:
     raise RuntimeError(message)
 
 
+def select_backend_port(
+    preferred_port: int = DEFAULT_PORT,
+    *,
+    candidate_count: int = FALLBACK_PORT_COUNT,
+) -> tuple[int, bool]:
+    """Return an available or compatible local port.
+
+    The preferred port can be stranded by a native driver after a USB reset.
+    A fallback keeps the desktop app usable while still reusing a healthy TOUCH
+    backend when one already owns a candidate port.
+    """
+
+    candidate_count = max(1, int(candidate_count))
+    for offset in range(candidate_count):
+        port = int(preferred_port) + offset
+        if port_is_free(port):
+            return port, True
+        health_url = f"http://127.0.0.1:{port}/api/health"
+        if backend_is_ready(health_url, timeout_s=0.55):
+            return port, False
+        write_log(
+            f"Backend port {port} is occupied by an unresponsive or incompatible process"
+        )
+    message = (
+        f"No usable TOUCH backend port was found in "
+        f"{preferred_port}-{preferred_port + candidate_count - 1}."
+    )
+    write_log(message)
+    show_error(APP_TITLE, message)
+    raise RuntimeError(message)
+
+
 def health_payload_is_expected(payload: object) -> bool:
-    return bool(
-        isinstance(payload, dict)
-        and payload.get("ok") is True
+    if not isinstance(payload, dict):
+        return False
+    common_contract = bool(
+        payload.get("ok") is True
         and payload.get("app") == EXPECTED_BACKEND_APP
         and payload.get("mode") == EXPECTED_BACKEND_MODE
         and payload.get("backend_contract_version")
         == EXPECTED_BACKEND_CONTRACT_VERSION
-        and payload.get("trained_static_model_primary") is True
+    )
+    if not common_contract:
+        return False
+    if beta_all_data_runtime_requested():
+        beta_model = payload.get("all_source_beta_model", {})
+        return bool(
+            payload.get("all_source_beta_primary") is True
+            and payload.get("default_operator_recognition")
+            == EXPECTED_BETA_OPERATOR_RECOGNITION
+            and payload.get("dynamic_temporal_validation_primary") is False
+            and payload.get("static_spectral_fallback_available") is False
+            and payload.get("old_model_fallback_enabled") is False
+            and isinstance(beta_model, dict)
+            and beta_model.get("loaded") is True
+            and beta_model.get("old_model_fallback_enabled") is False
+        )
+    return bool(
+        payload.get("dynamic_temporal_validation_primary") is True
+        and payload.get("default_operator_recognition")
+        == EXPECTED_OPERATOR_RECOGNITION
     )
 
 
@@ -288,27 +684,48 @@ def run_self_test() -> int:
 
     os.environ["TOUCH_PX6D_AUTO_START"] = "false"
     app_root = configure_runtime_paths()
+    config_root = app_root / "config" if is_frozen() else app_root.parent / "config"
     checks: dict[str, object] = {
         "app_root": str(app_root),
         "frozen": is_frozen(),
+        "beta_all_data_runtime": beta_all_data_runtime_requested(),
         "frontend_index": (app_root / "frontend" / "index.html").is_file(),
         "frontend_javascript": (app_root / "frontend" / "app.js").is_file(),
         "sdk_helper": (app_root / "sdk_probe" / "BaySpecSdkStream.exe").is_file(),
+        "mfbg_intensity_config": (
+            config_root / "mfbg_intensity_3x3.yaml"
+        ).is_file(),
     }
     try:
         from backend.main import health
 
         payload = health()
         checks["backend_contract"] = health_payload_is_expected(payload)
-        checks["static_model_loaded"] = bool(
-            payload.get("trained_static_spectral_model", {}).get("loaded")
-        )
-        checks["dynamic_model_loaded"] = bool(
-            payload.get("dynamic_temporal_shadow", {}).get("loaded")
-        )
+        if beta_all_data_runtime_requested():
+            beta_model = payload.get("all_source_beta_model", {})
+            checks["beta_latest_model_loaded"] = bool(beta_model.get("loaded"))
+            checks["old_model_fallback_disabled"] = bool(
+                payload.get("old_model_fallback_enabled") is False
+                and payload.get("static_spectral_fallback_available") is False
+                and payload.get("dynamic_temporal_validation_primary") is False
+            )
+        else:
+            checks["static_model_loaded"] = bool(
+                payload.get("trained_static_spectral_model", {}).get("loaded")
+            )
+            checks["dynamic_model_loaded"] = bool(
+                payload.get("dynamic_temporal_shadow", {}).get("loaded")
+            )
     except Exception as exc:
         checks["backend_import_error"] = f"{type(exc).__name__}: {exc}"
-    ok = all(value is True for key, value in checks.items() if key not in {"app_root", "frozen"})
+    ignored_check_keys = {"app_root", "frozen"}
+    if not beta_all_data_runtime_requested():
+        ignored_check_keys.add("beta_all_data_runtime")
+    ok = all(
+        value is True
+        for key, value in checks.items()
+        if key not in ignored_check_keys
+    )
     write_log("SELF_TEST " + json.dumps({"ok": ok, "checks": checks}, ensure_ascii=False))
     return 0 if ok else 1
 
@@ -389,6 +806,7 @@ def load_application_when_ready(
     server_holder: dict[str, Any],
     ownership: dict[str, bool],
     started_at: float,
+    backend_port: int = DEFAULT_PORT,
 ) -> None:
     """Navigate the already-visible startup window once the backend is ready."""
 
@@ -402,7 +820,7 @@ def load_application_when_ready(
             ownership["owns_backend"] = False
             write_log(
                 "Backend start lost the port race; reusing expected backend "
-                f"on port {DEFAULT_PORT}"
+                f"on port {backend_port}"
             )
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         write_log(f"STARTUP_TIMING stage=backend_ready elapsed_ms={elapsed_ms:.1f}")
@@ -547,21 +965,21 @@ def main() -> int:
     started_at = time.perf_counter()
     app_root = configure_runtime_paths()
     write_log(f"Starting {APP_TITLE}; app_root={app_root}")
-    port = DEFAULT_PORT
     server_holder: dict[str, Any] = {}
+    port, start_backend_after_window = select_backend_port(DEFAULT_PORT)
     health_url = f"http://127.0.0.1:{port}/api/health"
     app_url = f"http://127.0.0.1:{port}/?desktop=1"
-    ownership = {"owns_backend": False}
+    ownership = {"owns_backend": start_backend_after_window}
     backend_thread: threading.Thread | None = None
-    start_backend_after_window = False
     try:
-        if port_is_free(port):
-            start_backend_after_window = True
-            ownership["owns_backend"] = True
-        elif backend_is_ready(health_url, timeout_s=1.2):
-            write_log(f"Reusing existing trained static-spectrum backend on port {port}")
+        if start_backend_after_window:
+            if port != DEFAULT_PORT:
+                write_log(
+                    f"Preferred backend port {DEFAULT_PORT} is unavailable; "
+                    f"starting isolated backend on fallback port {port}"
+                )
         else:
-            require_fixed_port(port)
+            write_log(f"Reusing existing TOUCH temporal backend on port {port}")
 
         desktop_api = DesktopApi(initially_maximized=False)
         window = webview.create_window(
@@ -614,6 +1032,7 @@ def main() -> int:
                 server_holder=server_holder,
                 ownership=ownership,
                 started_at=started_at,
+                backend_port=port,
             )
 
         window.events.closed += on_closed
@@ -631,6 +1050,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
+        multiprocessing.freeze_support()
         if "--self-test" in sys.argv:
             raise SystemExit(run_self_test())
         raise SystemExit(main())

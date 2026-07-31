@@ -1,0 +1,19 @@
+spectrum_processing:
+  integration_us: 5000
+  update_overlay_data: true
+  subtract_background: false
+  baseline_correction: true
+  spectrum_smoothing: true
+  normalize_spectrum: true
+  smoothing_window: 7
+  baseline_window: 41
+  baseline_percentile: 18.0
+  model_input_source: raw_intensity
+
+notes:
+  raw_data_policy: "Raw BaySpec intensity is retained for recognition and recording."
+  display_policy: "When an accepted no-contact reference exists, the chart can display wavelength-aligned I/I0; otherwise it falls back to display_intensity."
+  normalization_policy: "Normalization is I(lambda,t)/I0(lambda) against a stable no-contact spectrum. Per-frame min-max normalization is forbidden."
+  recording_policy: "Recording retains raw counts and adds aligned I0 plus I/I0 when the reference is ready."
+  background_policy: "Background subtraction requires an explicitly captured dark frame."
+  vendor_equivalence: "These are auditable TOUCH equivalents, not undocumented BaySpec Sense internals."

@@ -8,6 +8,7 @@ app_dir = Path.cwd()
 datas = [
     (str(app_dir / "frontend"), "frontend"),
     (str(app_dir / "sdk_probe"), "sdk_probe"),
+    (str(app_dir.parent / "VERSION.json"), "."),
     (str(app_dir.parent / "config"), "config"),
     (str(app_dir.parent / "src"), "src"),
     (str(app_dir.parent / "models"), "models"),
@@ -16,6 +17,7 @@ datas = [
 hiddenimports = (
     collect_submodules("backend")
     + collect_submodules("src.array_surface")
+    + collect_submodules("src.mfbg_intensity")
     + collect_submodules("src.wavelength_shift")
     + collect_submodules("src.hybrid_spectrum")
     + collect_submodules("uvicorn")
@@ -34,6 +36,17 @@ hiddenimports = (
     ]
 )
 
+# These packages are present in the research environment but are not used by
+# the deployed static-spectrum runtime. Excluding them prevents optional
+# sklearn compatibility hooks from adding several hundred megabytes.
+deployment_excludes = [
+    "torch",
+    "tensorflow",
+    "sympy",
+    "matplotlib",
+    "pandas",
+]
+
 a = Analysis(
     ["desktop_launcher.py"],
     pathex=[str(app_dir), str(app_dir.parent)],
@@ -43,7 +56,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=deployment_excludes,
     noarchive=False,
     optimize=0,
 )

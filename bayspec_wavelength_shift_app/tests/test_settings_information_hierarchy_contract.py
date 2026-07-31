@@ -39,7 +39,7 @@ class SettingsInformationHierarchyContractTests(unittest.TestCase):
         self.assertNotIn("settingsSpectrumButton", JS)
 
     def test_compact_settings_and_diagnostic_runtime_styles_exist(self) -> None:
-        self.assertIn("width: min(292px, calc(100vw - 24px));", CSS)
+        self.assertIn("width: min(320px, calc(100vw - 24px));", CSS)
         self.assertIn(".diagnostics-mode .diagnostic-runtime-content", CSS)
         self.assertIn(".diagnostics-mode .diagnostic-runtime-buttons button.active", CSS)
 

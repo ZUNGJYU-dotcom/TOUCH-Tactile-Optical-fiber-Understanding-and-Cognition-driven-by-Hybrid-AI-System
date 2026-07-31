@@ -64,6 +64,16 @@ const settingsWholeHandButton = document.getElementById("settingsWholeHandButton
 const settingsThumbHolderButton = document.getElementById("settingsThumbHolderButton");
 const settingsSurfaceOnlyButton = document.getElementById("settingsSurfaceOnlyButton");
 const settingsResetCameraButton = document.getElementById("settingsResetCameraButton");
+const spectrumIntegrationSelect = document.getElementById("spectrumIntegrationSelect");
+const spectrumOverlayToggle = document.getElementById("spectrumOverlayToggle");
+const spectrumBackgroundToggle = document.getElementById("spectrumBackgroundToggle");
+const spectrumBaselineToggle = document.getElementById("spectrumBaselineToggle");
+const spectrumSmoothingToggle = document.getElementById("spectrumSmoothingToggle");
+const spectrumNormalizationToggle = document.getElementById("spectrumNormalizationToggle");
+const spectrumCaptureBackgroundButton = document.getElementById("spectrumCaptureBackgroundButton");
+const spectrumClearBackgroundButton = document.getElementById("spectrumClearBackgroundButton");
+const spectrumProcessingStatus = document.getElementById("spectrumProcessingStatus");
+const spectrumBackgroundStatus = document.getElementById("spectrumBackgroundStatus");
 const settingsTemporalValidationButton = document.getElementById("settingsTemporalValidationButton");
 const settingsStaticFallbackButton = document.getElementById("settingsStaticFallbackButton");
 const operatorDiagnosticsButton = document.getElementById("operatorDiagnosticsButton");
@@ -103,18 +113,62 @@ const desktopMaximizeButton = document.getElementById("desktopMaximizeButton");
 const desktopCloseButton = document.getElementById("desktopCloseButton");
 let spectrumDrawerOpener = null;
 let settingsPanelOpener = null;
+let desktopWindowCommandFailure = null;
+let operatorDiagnosticsAttentionFromQa = false;
 
 function activateDesktopChrome() {
   document.body.classList.add("pywebview-desktop");
 }
 
+function refreshDiagnosticsAttention() {
+  const attentionRequired =
+    operatorDiagnosticsAttentionFromQa || Boolean(desktopWindowCommandFailure);
+  operatorDiagnosticsButton?.classList.toggle("attention-required", attentionRequired);
+  operatorDiagnosticsButton?.setAttribute(
+    "aria-label",
+    attentionRequired ? "Diagnostics, attention required" : "Diagnostics"
+  );
+  if (operatorDiagnosticsButton) {
+    operatorDiagnosticsButton.dataset.tooltip = attentionRequired
+      ? "Diagnostics - attention"
+      : "Diagnostics";
+  }
+}
+
+function setDesktopWindowCommandFailure(commandName, error = null) {
+  desktopWindowCommandFailure = commandName
+    ? {
+        command: commandName,
+        reason: String(error?.message || error?.status || error || "desktop command failed"),
+        timestamp: Date.now(),
+      }
+    : null;
+  document.body.classList.toggle(
+    "desktop-window-command-error",
+    Boolean(desktopWindowCommandFailure)
+  );
+  refreshDiagnosticsAttention();
+}
+
 async function invokeDesktopWindowCommand(commandName) {
   const desktopApi = window.pywebview?.api;
-  if (!desktopApi || typeof desktopApi[commandName] !== "function") return null;
+  if (!desktopApi || typeof desktopApi[commandName] !== "function") {
+    if (document.body.classList.contains("pywebview-desktop")) {
+      setDesktopWindowCommandFailure(commandName, "desktop API unavailable");
+    }
+    return null;
+  }
   try {
-    return await desktopApi[commandName]();
+    const result = await desktopApi[commandName]();
+    if (result?.ok === false) {
+      setDesktopWindowCommandFailure(commandName, result.status);
+    } else {
+      setDesktopWindowCommandFailure(null);
+    }
+    return result;
   } catch (error) {
     console.error(`[desktop-window:${commandName}]`, error);
+    setDesktopWindowCommandFailure(commandName, error);
     return null;
   }
 }
@@ -202,12 +256,6 @@ function applyResponseBandThresholds(raw = {}) {
     RESPONSE_BAND_THRESHOLDS.moderateMax = moderateMax;
   }
 }
-const DEMO_PRESETS = {
-  no_contact: { label: "no_contact", intensity: 40000, shiftPm: 0, description: "stable Bragg wavelength baseline" },
-  light_press: { label: "small_shift", intensity: 40000, shiftPm: 55, description: "small Bragg wavelength shift" },
-  normal_press: { label: "moderate_shift", intensity: 40000, shiftPm: 190, description: "moderate Bragg wavelength shift" },
-  hard_press: { label: "large_shift", intensity: 40000, shiftPm: 420, description: "large Bragg wavelength shift" },
-};
 const DEMO_ARRAY_STEP_INTERVAL_MS = 100;
 const DEMO_ARRAY_LOOP_INTERVAL_MS = 5000;
 const DEMO_FRAME_SCHEDULER_INTERVAL_MS = 25;
@@ -268,9 +316,10 @@ const DEMO_TRACE_WINDOW_POINTS = 80;
 // 0.4 s. Polling at 25 Hz only redrew identical spectra and made the desktop UI
 // contend with model inference. Animation remains requestAnimationFrame-based.
 const LIVE_MODEL_POLL_INTERVAL_MS = 160;
+const LIVE_SOURCE_PROBE_INTERVAL_MS = 1500;
 const PX6D_UI_POLL_INTERVAL_MS = 100;
 const PX6D_CAPTURE_POLL_INTERVAL_MS = 500;
-const RECOGNITION_MODE_STORAGE_KEY = "touch-recognition-mode";
+const RECOGNITION_MODE_STORAGE_KEY = "touch-recognition-mode-v2";
 const ARRAY_DISPLAY_ROWS = [
   ["P11", "P21", "P31"],
   ["P12", "P22", "P32"],
@@ -320,6 +369,8 @@ const THREE_SURFACE_ARRAY_TO_SCENE_Z_SIGN = -1;
 const THREE_SURFACE_AXIS_MODE = "swap_array_xy";
 const WAVELENGTH_PLAN_ORDER = ["P11", "P12", "P13", "P21", "P22", "P23", "P31", "P32", "P33"];
 const GLOBAL_RECOGNITION_SCOPE = "global_3x3_hybrid_spectral_fingerprint";
+const ALL_SOURCE_BETA_RECOGNITION_SOURCE = "ordinary_fbg_all_data_beta_v1";
+const OPTICAL_FORCE_DISPLAY_MAX_N = 5;
 const GLOBAL_CANDIDATE_IDS = Array.from({ length: 9 }, (_, index) => `FBG${String(index + 1).padStart(2, "0")}`);
 const GLOBAL_PROXY_FULL_SCALE_PM = 75;
 const GLOBAL_PROXY_VISIBLE_MIN = 0.12;
@@ -510,6 +561,11 @@ function resetTrainedModelTraceHistory() {
 
 function appendTrainedModelTrace(rawRecord, prediction, trainedSurface) {
   const source = String(rawRecord?.source || "trained_static_spectrum");
+  const allSourceBeta = String(
+    rawRecord?.active_spectral_model_source ||
+    prediction?.recognition_source ||
+    ""
+  ) === ALL_SOURCE_BETA_RECOGNITION_SOURCE;
   if (state.trainedModelTraceSource && state.trainedModelTraceSource !== source) {
     resetTrainedModelTraceHistory();
   }
@@ -522,12 +578,21 @@ function appendTrainedModelTrace(rawRecord, prediction, trainedSurface) {
     source,
     recognition_scope: GLOBAL_RECOGNITION_SCOPE,
     trained_model_visual_response_ratio: Math.max(0, Math.min(1, Number(trainedSurface?.peak) || 0)),
-    trained_model_response_level: prediction?.digital_twin?.active
-      ? prediction?.force_level?.label || prediction?.digital_twin?.force_level || "uncertain"
-      : "no_contact",
+    trained_model_response_level: allSourceBeta
+      ? prediction?.digital_twin?.active
+        ? "continuous_optical_fz"
+        : "no_contact"
+      : prediction?.digital_twin?.active
+        ? prediction?.force_level?.label || prediction?.digital_twin?.force_level || "uncertain"
+        : "no_contact",
     trained_model_position_id: prediction?.position?.label || null,
+    estimated_force_fz_n: allSourceBeta
+      ? Number(prediction?.estimated_force_fz_n ?? prediction?.force_fz?.estimated_n)
+      : null,
     trained_model_review_needed: prediction?.uncertainty?.review_needed === true,
-    trace_response_semantics: "trained_model_visual_response_percent",
+    trace_response_semantics: allSourceBeta
+      ? "continuous_optical_force_visual_proxy"
+      : "trained_model_visual_response_percent",
   };
   const previous = state.trainedModelTraceRecords[state.trainedModelTraceRecords.length - 1];
   if (previous && frameId !== null && String(previous.frame_id) === String(frameId)) {
@@ -763,6 +828,7 @@ function isModelPositionLevelMode(mode) {
   return [
     "trained_static_spectral_position_level",
     "dynamic_temporal_validation_position_level",
+    "all_source_optical_force_position",
   ].includes(String(mode || ""));
 }
 
@@ -774,12 +840,55 @@ function activeModelPrediction(record = null, arrayFrame = null) {
     null;
 }
 
+function opticalForcePresentation(record = null, arrayFrame = null, runtimeFrame = null) {
+  const prediction = activeModelPrediction(record, arrayFrame);
+  const forceCandidates = [
+    record?.estimated_force_fz_n,
+    record?.optical_force_estimate?.estimated_n,
+    arrayFrame?.estimated_force_fz_n,
+    arrayFrame?.optical_force_estimate?.estimated_n,
+    prediction?.estimated_force_fz_n,
+    prediction?.force_fz?.estimated_n,
+    runtimeFrame?.estimated_force_fz_n,
+    runtimeFrame?.active_spectral_prediction?.estimated_force_fz_n,
+    runtimeFrame?.active_spectral_prediction?.force_fz?.estimated_n,
+  ];
+  let valueN = null;
+  for (const candidate of forceCandidates) {
+    const numeric = finiteNumberOrNull(candidate);
+    if (numeric !== null) {
+      valueN = Math.max(0, Math.min(OPTICAL_FORCE_DISPLAY_MAX_N, numeric));
+      break;
+    }
+  }
+  const source = String(
+    record?.active_spectral_model_source ||
+    arrayFrame?.active_spectral_model_source ||
+    runtimeFrame?.active_spectral_model_source ||
+    prediction?.recognition_source ||
+    runtimeFrame?.active_spectral_prediction?.recognition_source ||
+    ""
+  );
+  const betaStatus = runtimeFrame?.all_source_beta_model || record?.all_source_beta_model || {};
+  const enabled =
+    state.betaForceDisplayEnabled === true ||
+    source === ALL_SOURCE_BETA_RECOGNITION_SOURCE ||
+    prediction?.recognition_source === ALL_SOURCE_BETA_RECOGNITION_SOURCE ||
+    betaStatus?.enabled === true ||
+    runtimeFrame?.all_source_beta_prediction != null ||
+    valueN !== null;
+  return { enabled, valueN, prediction, source };
+}
+
 function activeModelDisplayName(record = null, arrayFrame = null) {
   const source = String(
     record?.active_spectral_model_source ||
     arrayFrame?.active_spectral_model_source ||
     "static_spectral_model"
   );
+  if (source === ALL_SOURCE_BETA_RECOGNITION_SOURCE) {
+    return "All-data optical model";
+  }
   return source === "dynamic_temporal_v3_validation"
     ? "Temporal validation model"
     : "Trained full-spectrum model";
@@ -900,69 +1009,10 @@ function surfaceSceneToArrayCoord(x, z) {
   };
 }
 
-function gaussian(x, center, sigma, amplitude) {
-  return amplitude * Math.exp(-0.5 * Math.pow((x - center) / sigma, 2));
-}
-
-function generateDemoSpectrum(preset) {
-  const wavelengths = [];
-  const baseCounts = [];
-  const targetShape = [];
-  const points = 512;
-  const shiftedCenterNm = DEMO_BASELINE_WAVELENGTH_NM + (Number(preset?.shiftPm) || 0) / 1000;
-  const start = DEMO_BASELINE_WAVELENGTH_NM - 1.45;
-  const end = DEMO_BASELINE_WAVELENGTH_NM + 1.45;
-  const targetPeakHeight = preset.intensity;
-
-  for (let i = 0; i < points; i += 1) {
-    const wavelength = start + ((end - start) * i) / (points - 1);
-    const offset = wavelength - DEMO_BASELINE_WAVELENGTH_NM;
-    const selectedOffset = wavelength - shiftedCenterNm;
-    const ripple = 70 * Math.sin(offset * 13.0) + 42 * Math.sin(offset * 31.0) + 24 * Math.sin(offset * 57.0);
-    const baseline = 760 + ripple + 180 * Math.exp(-Math.pow(offset / 1.25, 2));
-
-    wavelengths.push(Number(wavelength.toFixed(4)));
-    baseCounts.push(Math.max(80, baseline));
-    targetShape.push(
-      gaussian(wavelength, shiftedCenterNm, 0.03, 1.0) +
-        gaussian(wavelength, shiftedCenterNm - 0.78, 0.08, 0.13) +
-        gaussian(wavelength, shiftedCenterNm - 0.48, 0.09, 0.20) +
-        gaussian(wavelength, shiftedCenterNm - 0.23, 0.055, 0.18) +
-        gaussian(wavelength, shiftedCenterNm + 0.22, 0.055, 0.32) +
-        gaussian(wavelength, shiftedCenterNm + 0.43, 0.065, 0.27) +
-        gaussian(wavelength, shiftedCenterNm + 0.72, 0.075, 0.18) +
-        gaussian(wavelength, shiftedCenterNm + 1.04, 0.09, 0.11) +
-        0.06 * Math.exp(-Math.pow(selectedOffset / 0.78, 2))
-    );
-  }
-
-  const windowIndices = wavelengths
-    .map((wavelength, index) => ({ wavelength, index }))
-    .filter((item) => Math.abs(item.wavelength - shiftedCenterNm) <= 0.9)
-    .map((item) => item.index);
-  const targetMean = (amplitude) => {
-    const values = windowIndices
-      .map((index) => baseCounts[index] + amplitude * targetShape[index])
-      .sort((a, b) => b - a);
-    const topValues = values.slice(0, Math.min(5, values.length));
-    return topValues.reduce((sum, value) => sum + value, 0) / Math.max(topValues.length, 1);
-  };
-  let low = 0;
-  let high = 100000;
-  for (let step = 0; step < 28; step += 1) {
-    const mid = (low + high) / 2;
-    if (targetMean(mid) < targetPeakHeight) low = mid;
-    else high = mid;
-  }
-  const amplitude = (low + high) / 2;
-  const counts = baseCounts.map((value, index) => Math.max(80, Math.round(value + amplitude * targetShape[index])));
-
-  return { wavelengths, counts };
-}
-
 const state = {
   paused: false,
   frame: null,
+  betaForceDisplayEnabled: false,
   lastRenderedSourceFrameKey: null,
   selectedChannel: "P22",
   smoothAttenuation: 0,
@@ -992,7 +1042,8 @@ const state = {
   trainedModelTraceSource: null,
   temporalValidationMode: (() => {
     try {
-      return window.localStorage.getItem(RECOGNITION_MODE_STORAGE_KEY) !== "static";
+      const storedMode = window.localStorage.getItem(RECOGNITION_MODE_STORAGE_KEY);
+      return storedMode !== "static";
     } catch {
       return true;
     }
@@ -1013,6 +1064,21 @@ const state = {
   exportWatchActive: false,
   sdkLiveActive: false,
   liveRequested: false,
+  spectrumProcessing: {
+    settings: {
+      integration_us: 5000,
+      update_overlay_data: true,
+      subtract_background: false,
+      baseline_correction: true,
+      spectrum_smoothing: true,
+      normalize_spectrum: true,
+      model_input_source: "raw_intensity",
+    },
+    background_reference_ready: false,
+    raw_spectrum_retained: true,
+    model_input_source: "raw_intensity",
+    display_input_source: "display_intensity",
+  },
   demoModeActive: false,
   demoAutoplay: false,
   demoTimer: null,
@@ -1025,11 +1091,14 @@ const state = {
   arrayDemoPlaybackMode: null,
   arrayDemoActionComplete: false,
   nextLiveModelPollAt: 0,
+  nextLiveSourceProbeAt: 0,
+  liveSourceProbeInFlight: false,
+  liveSourceProbeController: null,
   displayMode: "operator",
   surfaceRenderMode: "physical_proxy",
   geometryDisplayMode: "thumb_holder",
-  selectedFinger: "thumb",
-  fingerNavigationIndex: 1,
+  selectedFinger: "all",
+  fingerNavigationIndex: 0,
   fingerCloseupActive: false,
   surfaceFullscreenActive: false,
   surfaceNativeFullscreenEntered: false,
@@ -1063,6 +1132,9 @@ const state = {
   px6dCaptureStatusEpoch: 0,
   px6dCaptureStatus: null,
   pageVisible: document.visibilityState !== "hidden",
+  animationFrameId: null,
+  controlsInteracting: false,
+  controlsSettlingUntil: 0,
   bootStarted: false,
   bootComplete: false,
   clientSchedulersStarted: false,
@@ -1120,6 +1192,30 @@ function finiteNumberOrNull(value) {
   return Number.isFinite(numeric) ? numeric : null;
 }
 
+function px6dConnectionDisplayState(status = {}) {
+  if (status.connected === true) return "connected";
+  const lifecycle = String(status.lifecycle_status || "").toLowerCase();
+  const errorKind = String(status.connection_error_kind || "").toLowerCase();
+  const detection = String(status.port_detection_status || "").toLowerCase();
+  if (status.connection_in_progress === true || lifecycle === "connecting") {
+    return "connecting";
+  }
+  if (errorKind === "port_busy_or_permission_denied") {
+    return "port in use";
+  }
+  if (
+    errorKind === "port_not_found" ||
+    detection === "device_not_detected" ||
+    detection === "configured_device_identity_not_detected"
+  ) {
+    return "waiting for sensor";
+  }
+  if (lifecycle === "reconnecting") return "reconnecting";
+  if (lifecycle === "stopped" || status.stop_requested === true) return "stopped";
+  if (lifecycle === "unavailable") return "unavailable";
+  return status.running === true ? "reconnecting" : "stopped";
+}
+
 function updatePx6dPanel(payload = {}) {
   if (Object.prototype.hasOwnProperty.call(payload, "px6d_reference")) {
     state.px6dAligned = payload?.px6d_reference || null;
@@ -1160,12 +1256,14 @@ function updatePx6dPanel(payload = {}) {
     sampleAge >= 0 &&
     sampleAge <= freshnessLimit
   );
+  const liveForceVisible = connected && fresh && Number.isFinite(referenceValue);
   const currentForceReady = connected && tareReady && fresh;
   const rawFz = fresh ? rawFzValue : null;
   const currentFilteredZeroed = currentForceReady ? filteredZeroed : {};
   const displayedMechanical = currentForceReady ? candidateMechanical : {};
+  const connectionState = px6dConnectionDisplayState(status);
   const stateLabel = !connected
-    ? "offline"
+    ? connectionState
     : !tareReady
       ? "tare required"
       : fresh
@@ -1176,10 +1274,11 @@ function updatePx6dPanel(payload = {}) {
     connected,
     tareReady,
     fresh,
+    liveForceVisible,
     stateLabel,
   };
 
-  const displayedCompressionFz = currentForceReady && Number.isFinite(referenceValue)
+  const displayedCompressionFz = liveForceVisible
     ? Math.max(0, referenceValue)
     : null;
   setText(
@@ -1193,7 +1292,11 @@ function updatePx6dPanel(payload = {}) {
     if (button) button.disabled = !connected || state.commandPending !== null;
   });
 
-  setText("diagnosticPx6dConnection", connected ? `${status.port || "COM3"} · connected` : `${status.port || "COM3"} · offline`);
+  const px6dPort = status.active_port || status.port || status.configured_port || "COM3";
+  setText(
+    "diagnosticPx6dConnection",
+    connected ? `${px6dPort} · connected` : `${px6dPort} · ${connectionState}`
+  );
   setText("diagnosticPx6dFirmware", `Firmware ${status?.firmware_version || "--"}`);
   setText("diagnosticPx6dRawFz", Number.isFinite(rawFz) ? `${rawFz.toFixed(3)} N` : "--");
   setText(
@@ -1691,12 +1794,21 @@ function operatorFreshnessLabel(value) {
 
 function acquisitionDisplayState(watcher = {}, sdkLive = {}) {
   if (state.demoModeActive) {
-    const operatorMode = state.displayMode === "operator";
+    const demoRecord = state.frame?.latest || {};
+    const demoArrayFrame = state.frame?.array_frame || state.currentArrayFrame;
+    if (state.arrayDemoActive && isRecordedDemoSpectrum(demoRecord, demoArrayFrame)) {
+      return {
+        label: "RECORDED",
+        short: "REC",
+        tone: "demo",
+        detail: "Recorded 512-point spectrum with synchronized Fz; response surface is a visual proxy.",
+      };
+    }
     return {
-      label: operatorMode ? "LOCAL" : state.arrayDemoActive ? "Demo · 3×3" : "Demo · legacy P22",
-      short: operatorMode ? "LOCAL" : "DEMO",
+      label: "SIMULATED",
+      short: "SIM",
       tone: "demo",
-      detail: operatorMode ? "Local synchronized response scenario" : "Simulated Bragg wavelength response",
+      detail: "Simulated response. Not live data and not calibrated.",
     };
   }
 
@@ -1751,7 +1863,7 @@ function frameHasMeasurement(frame) {
 function frameSourceIsFresh(frame) {
   if (frame?.array_frame?.mode === "simulated_array_demo") return true;
   if (frame?.scope === GLOBAL_RECOGNITION_SCOPE) {
-    return frame?.global_frame_qa?.source_fresh !== false && frame?.latest?.source_fresh !== false;
+    return frame?.global_frame_qa?.operator_display_valid === true;
   }
   const qaStatus = String(frame?.latest?.qa_status || "").toLowerCase();
   return !qaStatus.includes("stale");
@@ -1768,14 +1880,109 @@ function trainedStaticModelDisplayReady(frame) {
 function frameResponseIsUsable(frame) {
   if (!frameHasMeasurement(frame)) return false;
   if (frame?.array_frame?.mode === "simulated_array_demo") return true;
-  // A stopped HTTP/replay source is shown as a held frame, but a prediction
-  // that passed the runtime baseline gate remains valid for visualization.
-  if (trainedStaticModelDisplayReady(frame)) return frame?.latest?.response_allowed === true;
   if (!frameSourceIsFresh(frame)) return false;
-  if (frame?.scope === GLOBAL_RECOGNITION_SCOPE) {
-    return frame?.latest?.response_allowed === true;
-  }
+  if (frame?.scope === GLOBAL_RECOGNITION_SCOPE) return frame?.latest?.response_allowed === true;
   return true;
+}
+
+function zeroSurfaceGridLike(grid) {
+  if (!Array.isArray(grid)) return [];
+  return grid.map((row) => (Array.isArray(row) ? row.map(() => 0) : []));
+}
+
+function neutralResponseRecord(record = {}) {
+  return {
+    ...record,
+    diagnostic_raw_response: {
+      response_value: record?.response_value ?? null,
+      wavelength_shift_response_ratio: record?.wavelength_shift_response_ratio ?? null,
+      delta_wavelength_pm: record?.delta_wavelength_pm ?? null,
+      absolute_shift_pm: record?.absolute_shift_pm ?? null,
+      response_level: record?.response_level ?? null,
+      model_position_id: record?.model_position_id ?? null,
+      model_force_level: record?.model_force_level ?? null,
+    },
+    response_allowed: false,
+    response_value: 0,
+    wavelength_shift_response_ratio: 0,
+    delta_wavelength_pm: 0,
+    absolute_shift_pm: 0,
+    response_level: "no_contact",
+    dominant_channel: null,
+    provisional_dominant_channel: null,
+    model_position_id: null,
+    model_position_confidence: null,
+    model_force_level: null,
+    model_force_confidence: null,
+  };
+}
+
+function atomicNeutralFrame(frame) {
+  if (!frame || !frameHasMeasurement(frame) || frameResponseIsUsable(frame)) return frame;
+  const sourceArrayFrame = frame?.array_frame || {};
+  const sourceMetrics = sourceArrayFrame?.surface_metrics || frame?.surface_metrics || {};
+  const sourceGrid = sourceArrayFrame?.surface_grid || frame?.surface_grid || [];
+  const responseBlockReason =
+    frame?.latest?.response_block_reason ||
+    sourceArrayFrame?.response_block_reason ||
+    "operator_response_not_usable";
+  const channels = (sourceArrayFrame?.channels || frame?.channel_grid || []).map((channel) => ({
+    ...channel,
+    diagnostic_raw_response_value: channel?.response_value ?? channel?.wavelength_shift_response_ratio ?? null,
+    response_value: 0,
+    wavelength_shift_response_ratio: 0,
+    response_enabled: false,
+  }));
+  const surfaceMetrics = {
+    ...sourceMetrics,
+    surface_peak: 0,
+    surface_mean: 0,
+    surface_area_active: 0,
+    surface_area_active_percent: 0,
+    surface_centroid_x: null,
+    surface_centroid_y: null,
+    surface_spread: 0,
+    dominant_channel: null,
+    provisional_dominant_channel: null,
+    responding_channel_count: 0,
+    responding_channel_ids: [],
+    responding_candidate_ids: [],
+    contact_evidence_passed: false,
+    quality_status: responseBlockReason,
+  };
+  const surfaceGrid = zeroSurfaceGridLike(sourceGrid);
+  const sourceTrace = Array.isArray(frame?.trace) ? frame.trace : [];
+  const neutralTrace = sourceTrace.length
+    ? sourceTrace.map((item, index) =>
+        index === sourceTrace.length - 1 ? neutralResponseRecord(item) : item
+      )
+    : [];
+  const arrayFrame = {
+    ...sourceArrayFrame,
+    mode: "invalid_input_neutral",
+    presentation_status: "invalid_input_neutral",
+    response_allowed: false,
+    response_block_reason: responseBlockReason,
+    surface_metrics: surfaceMetrics,
+    surface_grid: surfaceGrid,
+    channels,
+    dominant_channel: null,
+    peak_shift_response: 0,
+    peak_wavelength_shift_pm: 0,
+  };
+  return {
+    ...frame,
+    model_assisted_display_allowed: false,
+    operator_frame_atomic_neutralized: true,
+    presentation_status: "invalid_input_neutral",
+    latest: neutralResponseRecord(frame.latest),
+    trace: neutralTrace,
+    channel_grid: channels,
+    array_frame: arrayFrame,
+    surface_grid: surfaceGrid,
+    surface_metrics: surfaceMetrics,
+    diagnostic_raw_array_frame: sourceArrayFrame,
+  };
 }
 
 function invalidateFrameRequestContext() {
@@ -1872,15 +2079,12 @@ function operatorAlertState({ record, sourceState, operatorQa, measurementAvaila
 
 function updateOperatorAlert(context) {
   const alertState = operatorAlertState(context);
-  const diagnosticsAttention = ["warning", "error"].includes(alertState?.tone);
-  operatorDiagnosticsButton?.classList.toggle("attention-required", diagnosticsAttention);
-  operatorDiagnosticsButton?.setAttribute(
-    "aria-label",
-    diagnosticsAttention ? "Diagnostics, attention required" : "Diagnostics"
-  );
+  operatorDiagnosticsAttentionFromQa = ["warning", "error"].includes(alertState?.tone);
+  refreshDiagnosticsAttention();
   if (operatorDiagnosticsButton) {
-    operatorDiagnosticsButton.dataset.tooltip = diagnosticsAttention
-      ? "Diagnostics · attention"
+    operatorDiagnosticsButton.dataset.tooltip =
+      operatorDiagnosticsAttentionFromQa || Boolean(desktopWindowCommandFailure)
+      ? "Diagnostics - attention"
       : "Diagnostics";
   }
   if (operatorAlert) {
@@ -2081,13 +2285,36 @@ function responseText(record) {
     const prediction = activeModelPrediction(record);
     const activeStatus = String(record?.active_spectral_model_status || record?.trained_static_spectral_model_status || "");
     const modelName = activeModelDisplayName(record);
+    const allSourceBeta =
+      String(record?.active_spectral_model_source || prediction?.recognition_source || "") ===
+      ALL_SOURCE_BETA_RECOGNITION_SOURCE;
     if (["ready", "temporal_validation_ready"].includes(activeStatus) && prediction?.digital_twin) {
       if (prediction?.contact?.label !== "contact" || prediction?.digital_twin?.active !== true) {
         return `${modelName}: no active contact; deformation is suppressed.`;
       }
       const position = prediction?.position?.label || "unknown position";
+      if (allSourceBeta) {
+        const estimatedForce = Number(
+          prediction?.estimated_force_fz_n ?? prediction?.force_fz?.estimated_n
+        );
+        return Number.isFinite(estimatedForce)
+          ? `${modelName}: ${position} · optical Fz estimate ${estimatedForce.toFixed(2)} N.`
+          : `${modelName}: ${position} · optical Fz estimate unavailable.`;
+      }
       const level = prediction?.force_level?.label || "uncertain level";
       return `${modelName}: ${position} · approximate ${level} response level.`;
+    }
+    if (allSourceBeta) {
+      if (activeStatus === "baseline_required") {
+        return "All-data optical model loaded · set a stable no-contact baseline.";
+      }
+      if (activeStatus === "latest_beta_model_source_blocked") {
+        return "All-data optical model loaded · waiting for a fresh wavelength-grid frame.";
+      }
+      if (record?.active_spectral_model_loaded === true) {
+        return `All-data optical model loaded · input waiting (${activeStatus || "no frame"}).`;
+      }
+      return "Latest Beta model unavailable · Diagnostics contains the explicit load error.";
     }
     if (record?.active_spectral_model_source === "dynamic_temporal_v3_validation") {
       const progress = record?.active_spectral_model_progress || {};
@@ -2297,7 +2524,14 @@ function alignSmoothTraceRecords(previous, target) {
 function cloneSpectrumRecord(record) {
   if (!record) return null;
   const clone = { ...record };
-  ["wavelength_nm", "spectrum_wavelength_nm", "intensity", "spectrum_counts"].forEach((key) => {
+  [
+    "wavelength_nm",
+    "spectrum_wavelength_nm",
+    "intensity",
+    "spectrum_counts",
+    "display_intensity",
+    "overlay_intensity",
+  ].forEach((key) => {
     if (Array.isArray(record?.[key])) {
       clone[key] = record[key].map((value) => Number(value));
     }
@@ -2324,6 +2558,7 @@ function setChartTargets(trace, record) {
   }
   state.smoothSpectrumRecord = alignSmoothSpectrumRecord(state.smoothSpectrumRecord, state.targetSpectrumRecord);
   state.chartsNeedRefresh = true;
+  requestThreeAnimation();
 }
 
 function drawVisibleCharts() {
@@ -2463,8 +2698,8 @@ function updateTraceKpis(records) {
   const peak = measurementAvailable && values.length ? Math.max(...values.map(Math.abs)) : Number.NaN;
 
   const unit = modelResponseTrace ? "%" : "pm";
-  setText("traceCurrentLabel", `Now · ${unit}`);
-  setText("tracePeakLabel", `Peak · ${unit}`);
+  setText("traceCurrentLabel", "Now");
+  setText("tracePeakLabel", "Peak");
   setCompactMetric(
     "traceCurrentValue",
     formatCompactNumber(current, Math.abs(current) >= 100 ? 0 : 1),
@@ -2477,7 +2712,7 @@ function updateTraceKpis(records) {
   );
 
   if (!measurementAvailable) {
-    setText("traceHistoryValue", "IDLE");
+    setText("traceHistoryValue", "--");
     return;
   }
 
@@ -2516,11 +2751,6 @@ function drawTrace(records) {
       18,
       30
     );
-    if (!frameHasMeasurement(state.frame)) {
-      ctx.font = "9px system-ui, sans-serif";
-      ctx.fillStyle = useDarkCanvas() ? "#55768d" : "#8a9cab";
-      ctx.fillText("IDLE", 18, 47);
-    }
     return;
   }
   const values = plotRecords.map(traceAttenuationPercent).filter(Number.isFinite);
@@ -2690,11 +2920,36 @@ function spectrumArrays(record) {
     : Array.isArray(record?.spectrum_wavelength_nm)
       ? record.spectrum_wavelength_nm
       : [];
-  const intensity = Array.isArray(record?.intensity)
+  const rawIntensity = Array.isArray(record?.intensity)
     ? record.intensity
     : Array.isArray(record?.spectrum_counts)
       ? record.spectrum_counts
       : [];
+  const processedIntensity = Array.isArray(record?.display_intensity)
+    ? record.display_intensity
+    : [];
+  const normalizedIntensity = Array.isArray(record?.normalized_intensity_ratio)
+    ? record.normalized_intensity_ratio
+    : [];
+  const normalizationStatus = String(record?.spectrum_normalization?.status || "");
+  const normalizedDisplay = Boolean(
+    state.spectrumProcessing?.settings?.normalize_spectrum !== false &&
+    normalizedIntensity.length === rawIntensity.length &&
+    normalizedIntensity.length &&
+    normalizedIntensity.every((value) => Number.isFinite(Number(value))) &&
+    ["ready", "ready_with_invalid_reference_points"].includes(normalizationStatus)
+  );
+  const intensity = normalizedDisplay
+    ? normalizedIntensity
+    : processedIntensity.length === rawIntensity.length && processedIntensity.length
+      ? processedIntensity
+      : rawIntensity;
+  const candidateOverlay = Array.isArray(record?.overlay_intensity)
+    ? record.overlay_intensity
+    : [];
+  const overlayIntensity = !normalizedDisplay && candidateOverlay.length === intensity.length
+    ? candidateOverlay
+    : [];
   if (axisIsPixel && intensity.length) {
     xValues = intensity.map((_, idx) => idx);
   } else if (intensity.length && xValues.length !== intensity.length) {
@@ -2706,13 +2961,62 @@ function spectrumArrays(record) {
       xValues = intensity.map((_, idx) => idx);
     }
   }
-  return { xValues, intensity, axisIsPixel };
+  return {
+    xValues,
+    intensity,
+    overlayIntensity,
+    rawIntensity,
+    normalizedIntensity,
+    axisIsPixel,
+    normalizedDisplay,
+    displayProcessed: intensity === processedIntensity && processedIntensity.length > 0,
+  };
+}
+
+function normalizedSpectrumBounds(values) {
+  const finite = values.map(Number).filter(Number.isFinite);
+  if (!finite.length) return { yMin: 0.8, yMax: 1.2 };
+  const minimum = Math.min(1, ...finite);
+  const maximum = Math.max(1, ...finite);
+  const span = Math.max(maximum - minimum, 0.10);
+  return {
+    yMin: Math.max(0, minimum - span * 0.15),
+    yMax: maximum + span * 0.15,
+  };
+}
+
+function drawNormalizedReferenceLine(ctx, xStart, xEnd, y, { label = true } = {}) {
+  ctx.save();
+  ctx.strokeStyle = useDarkCanvas()
+    ? "rgba(222, 233, 239, 0.55)"
+    : "rgba(71, 100, 121, 0.48)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(xStart, y);
+  ctx.lineTo(xEnd, y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  if (label) {
+    ctx.fillStyle = useDarkCanvas() ? "#b8cbd7" : "#587084";
+    ctx.font = "9px system-ui, sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText("I/I0 = 1", xStart + 4, Math.max(10, y - 4));
+  }
+  ctx.restore();
 }
 
 function isSyntheticWavelengthSpectrum(record) {
   const spectrumType = String(record?.spectrum_type || "").toLowerCase();
   const source = String(record?.source || "").toLowerCase();
-  return spectrumType.includes("synthetic") || source.includes("simulated_array_demo");
+  if (spectrumType.includes("recorded real") || source.includes("20260731_")) return false;
+  return spectrumType.includes("synthetic") || source.includes("synthetic_");
+}
+
+function isRecordedDemoSpectrum(record, arrayFrame = state.currentArrayFrame) {
+  const spectrumType = String(record?.spectrum_type || "").toLowerCase();
+  const dataMode = String(record?.demo_data_mode || arrayFrame?.demo_data_mode || "").toLowerCase();
+  return spectrumType.includes("recorded real") || dataMode.includes("recorded_real_spectrum");
 }
 
 function fixedSyntheticSpectrumMaximum(record, fallbackValues = []) {
@@ -2779,7 +3083,7 @@ function drawSpectrum(record) {
   drawOpticalPreview(record);
   const { ctx, width, height } = setupCanvas(spectrumCanvas);
   drawGrid(ctx, width, height);
-  const { xValues, intensity, axisIsPixel } = spectrumArrays(record);
+  const { xValues, intensity, overlayIntensity, axisIsPixel, normalizedDisplay } = spectrumArrays(record);
   if (!xValues.length || xValues.length !== intensity.length) {
     ctx.fillStyle = useDarkCanvas() ? "#7fb4ce" : "#71889d";
     ctx.fillText(spectrumUnavailableMessage(record), 18, 32);
@@ -2787,10 +3091,18 @@ function drawSpectrum(record) {
   }
   const xMin = Math.min(...xValues);
   const xMax = Math.max(...xValues);
-  const yMin = 0;
-  const yMax = isSyntheticWavelengthSpectrum(record)
-    ? fixedSyntheticSpectrumMaximum(record, intensity) * 1.08
-    : Math.max(Math.max(...intensity) * 1.08, Number(record?.baseline_intensity_counts) || 1);
+  const plottedValues = overlayIntensity.length
+    ? intensity.concat(overlayIntensity)
+    : intensity;
+  const normalizedBounds = normalizedDisplay
+    ? normalizedSpectrumBounds(plottedValues)
+    : null;
+  const yMin = normalizedBounds?.yMin ?? 0;
+  const yMax = normalizedBounds?.yMax ?? (
+    isSyntheticWavelengthSpectrum(record)
+      ? fixedSyntheticSpectrumMaximum(record, plottedValues) * 1.08
+      : Math.max(Math.max(...plottedValues) * 1.08, Number(record?.baseline_intensity_counts) || 1)
+  );
   const plotLeft = 6;
   const plotRight = width - 6;
   const plotTop = 46;
@@ -2799,6 +3111,21 @@ function drawSpectrum(record) {
   const yOf = (v) => plotBottom - ((v - yMin) / Math.max(yMax - yMin, 1e-9)) * (plotBottom - plotTop);
 
   const darkCanvas = useDarkCanvas();
+  if (normalizedDisplay && 1 >= yMin && 1 <= yMax) {
+    drawNormalizedReferenceLine(ctx, plotLeft, plotRight, yOf(1));
+  }
+  if (overlayIntensity.length) {
+    ctx.strokeStyle = darkCanvas ? "rgba(165, 193, 210, 0.48)" : "rgba(94, 117, 134, 0.42)";
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+    xValues.forEach((xValue, idx) => {
+      const x = xOf(xValue);
+      const y = yOf(Number(overlayIntensity[idx]) || 0);
+      if (idx === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
   ctx.strokeStyle = isSyntheticWavelengthSpectrum(record) ? "#18a99a" : darkCanvas ? "#32f0a4" : "#13a56f";
   ctx.lineWidth = 1.8;
   ctx.beginPath();
@@ -2810,7 +3137,10 @@ function drawSpectrum(record) {
   });
   ctx.stroke();
 
-  const candidatePeakProfile = String(record?.spectrum_peak_profile || "") === "current_real_9fbg_candidate";
+  const peakProfile = String(record?.spectrum_peak_profile || "").toLowerCase();
+  const candidatePeakProfile =
+    peakProfile === "current_real_9fbg_candidate" ||
+    peakProfile === "recorded_auto_discovered_9fbg";
   const markers = axisIsPixel || candidatePeakProfile ? [] : targetPeakMarkers();
   if (markers.length) {
     ctx.save();
@@ -2846,9 +3176,11 @@ function drawSpectrum(record) {
         : Number(peak.tracked_wavelength_nm ?? peak.peak_wavelength_nm ?? peak.target_wavelength_nm);
       if (!Number.isFinite(marker) || marker < xMin || marker > xMax) return;
       const x = xOf(marker);
-      const peakDisplayId = peak.candidate_id || peak.channel_id;
+      const peakDisplayId = peak.provisional_channel_id || peak.channel_id || peak.candidate_id;
+      const peakIdentity = peak.candidate_id || peak.channel_id || peak.provisional_channel_id;
       const isDominant =
-        peakDisplayId === (record?.dominant_candidate_id || record?.dominant_channel) ||
+        peakDisplayId === record?.dominant_channel ||
+        peakIdentity === record?.dominant_candidate_id ||
         peak.dominant;
       const role = String(peak.affected_role || "");
       const roles = Array.isArray(peak.coupling_roles) ? peak.coupling_roles.join(" ") : role;
@@ -2926,14 +3258,17 @@ function drawOpticalPreview(record) {
     ctx.stroke();
   }
 
-  const { xValues, intensity, axisIsPixel } = spectrumArrays(record);
+  const { xValues, intensity, overlayIntensity, axisIsPixel, normalizedDisplay } = spectrumArrays(record);
   if (!xValues.length || xValues.length !== intensity.length) {
     // The state-driven DOM overlay owns the concise no-frame message. Keep
     // only the grid in the canvas so empty-state text is never duplicated.
     return;
   }
 
-  const numericIntensity = intensity.map(Number).filter(Number.isFinite);
+  const numericIntensity = intensity
+    .concat(overlayIntensity)
+    .map(Number)
+    .filter(Number.isFinite);
   if (!numericIntensity.length) return;
   const xMin = Math.min(...xValues);
   const xMax = Math.max(...xValues);
@@ -2954,16 +3289,27 @@ function drawOpticalPreview(record) {
   opticalPreviewCanvas.dataset.responseSemantics = String(
     record?.spectral_evidence_semantics || (syntheticSpectrum ? "wavelength_translation_only_demo" : "measured_spectrum")
   );
-  const yMin = syntheticSpectrum ? 0 : Math.max(0, yMinRaw - yPadding);
-  const yMax = syntheticSpectrum
-    ? fixedSyntheticSpectrumMaximum(record, numericIntensity) * 1.08
-    : yMaxRaw + yPadding;
+  const normalizedBounds = normalizedDisplay
+    ? normalizedSpectrumBounds(numericIntensity)
+    : null;
+  const yMin = normalizedBounds?.yMin ?? (
+    syntheticSpectrum ? 0 : Math.max(0, yMinRaw - yPadding)
+  );
+  const yMax = normalizedBounds?.yMax ?? (
+    syntheticSpectrum
+      ? fixedSyntheticSpectrumMaximum(record, numericIntensity) * 1.08
+      : yMaxRaw + yPadding
+  );
   const left = 7;
   const right = Math.max(left + 1, width - 7);
   const top = 9;
   const bottom = Math.max(top + 1, height - 18);
   const xOf = (value) => left + ((value - xMin) / Math.max(xMax - xMin, 1e-9)) * (right - left);
   const yOf = (value) => bottom - ((value - yMin) / Math.max(yMax - yMin, 1e-9)) * (bottom - top);
+
+  if (normalizedDisplay && 1 >= yMin && 1 <= yMax) {
+    drawNormalizedReferenceLine(ctx, left, right, yOf(1), { label: false });
+  }
 
   const fill = ctx.createLinearGradient(0, top, 0, bottom);
   fill.addColorStop(0, darkCanvas ? "rgba(37, 197, 185, 0.24)" : "rgba(18, 158, 148, 0.20)");
@@ -2980,6 +3326,19 @@ function drawOpticalPreview(record) {
   ctx.lineTo(left, bottom);
   ctx.closePath();
   ctx.fill();
+
+  if (overlayIntensity.length) {
+    ctx.strokeStyle = darkCanvas ? "rgba(155, 188, 205, 0.55)" : "rgba(93, 116, 132, 0.48)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    xValues.forEach((value, index) => {
+      const x = xOf(value);
+      const y = yOf(Number(overlayIntensity[index]) || 0);
+      if (index === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
 
   ctx.strokeStyle = darkCanvas ? "#33d6c8" : "#138f92";
   ctx.lineWidth = 1.6;
@@ -3031,7 +3390,7 @@ function drawOpticalPreview(record) {
 function drawSelectedPeakZoom(record) {
   const { ctx, width, height } = setupCanvas(selectedSpectrumCanvas);
   drawGrid(ctx, width, height);
-  const { xValues, intensity, axisIsPixel } = spectrumArrays(record);
+  const { xValues, intensity, axisIsPixel, normalizedDisplay } = spectrumArrays(record);
   if (!xValues.length || xValues.length !== intensity.length) {
     ctx.fillStyle = useDarkCanvas() ? "#7fb4ce" : "#71889d";
     ctx.fillText(spectrumUnavailableMessage(record), 18, 30);
@@ -3067,10 +3426,17 @@ function drawSelectedPeakZoom(record) {
     return;
   }
   const visibleValues = visible.map((point) => point.yValue);
-  const yMin = isSyntheticWavelengthSpectrum(record) ? 0 : Math.min(...visibleValues) * 0.94;
-  const yMax = isSyntheticWavelengthSpectrum(record)
-    ? fixedSyntheticSpectrumMaximum(record, visibleValues) * 1.08
-    : Math.max(...visibleValues) * 1.06;
+  const normalizedBounds = normalizedDisplay
+    ? normalizedSpectrumBounds(visibleValues)
+    : null;
+  const yMin = normalizedBounds?.yMin ?? (
+    isSyntheticWavelengthSpectrum(record) ? 0 : Math.min(...visibleValues) * 0.94
+  );
+  const yMax = normalizedBounds?.yMax ?? (
+    isSyntheticWavelengthSpectrum(record)
+      ? fixedSyntheticSpectrumMaximum(record, visibleValues) * 1.08
+      : Math.max(...visibleValues) * 1.06
+  );
   const plotLeft = 8;
   const plotRight = width - 8;
   const plotTop = 8;
@@ -3078,6 +3444,9 @@ function drawSelectedPeakZoom(record) {
   const xOf = (v) => plotLeft + ((v - xMin) / Math.max(xMax - xMin, 1e-9)) * (plotRight - plotLeft);
   const yOf = (v) => plotBottom - ((v - yMin) / Math.max(yMax - yMin, 1e-9)) * (plotBottom - plotTop);
   const darkCanvas = useDarkCanvas();
+  if (normalizedDisplay && 1 >= yMin && 1 <= yMax) {
+    drawNormalizedReferenceLine(ctx, plotLeft, plotRight, yOf(1), { label: false });
+  }
   ctx.strokeStyle = darkCanvas ? "#32f0a4" : "#169e79";
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -3616,6 +3985,32 @@ function visibleObjectBounds(root) {
   return bounds;
 }
 
+function disposeObject3D(root) {
+  if (!root) return;
+  const disposedGeometry = new Set();
+  const disposedMaterials = new Set();
+  const disposedTextures = new Set();
+  root.traverse((child) => {
+    const geometry = child.geometry;
+    if (geometry?.dispose && !disposedGeometry.has(geometry)) {
+      disposedGeometry.add(geometry);
+      geometry.dispose();
+    }
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    materials.filter(Boolean).forEach((material) => {
+      if (disposedMaterials.has(material)) return;
+      disposedMaterials.add(material);
+      Object.values(material).forEach((value) => {
+        if (value?.isTexture && value.dispose && !disposedTextures.has(value)) {
+          disposedTextures.add(value);
+          value.dispose();
+        }
+      });
+      material.dispose?.();
+    });
+  });
+}
+
 function setupFingerSensorGroups() {
   for (const [fingerId, group] of fingerSensorGroups.entries()) {
     if (fingerId !== "thumb") group.parent?.remove(group);
@@ -3704,7 +4099,13 @@ function updateFingerScopeLabels() {
   const label = selectedFingerLabel();
   const scope = state.selectedFinger === "all" ? "All fingers" : label;
   setText("spectrumOverviewTitle", `${scope} 9-FBG spectrum`);
-  setText("footprintTitle", `${scope} 9-FBG Fingerprint`);
+  setText("footprintTitle", "Shared 3x3 Contact Map");
+  setText(
+    "footprintNote",
+    state.selectedFinger === "all"
+      ? "One response is mirrored across the five fingertip views"
+      : `${label} inspection view uses the shared response proxy`
+  );
   if (fingerFocusSelect && fingerFocusSelect.value !== state.selectedFinger) {
     fingerFocusSelect.value = state.selectedFinger;
   }
@@ -3712,13 +4113,15 @@ function updateFingerScopeLabels() {
     fingerFocusControl.dataset.selectedFinger = state.selectedFinger;
   }
   if (state.geometryDisplayMode === "whole_hand") {
-    setText(
-      "tactileSurfaceTitle",
-      state.selectedFinger === "all" ? "Five-Finger Tactile Surface" : `${label} Tactile Surface`
-    );
+    // Keep the workspace title stable while the selector changes inspection
+    // scope. The whole-hand scene remains a five-finger surface even when one
+    // fingertip is brought into close-up.
+    setText("tactileSurfaceTitle", "Five-Finger Tactile Surface");
     setText(
       "surfaceProxyCaption",
-      state.selectedFinger === "all" ? "Synchronized five-finger response" : `${label} sensor response`
+      state.selectedFinger === "all"
+        ? "Shared response proxy across five fingertip views"
+        : `${label} view · shared response proxy`
     );
   }
   for (const elementId of ["levelBadge", "heatmapChip"]) {
@@ -3823,6 +4226,7 @@ function beginCameraTransition(
   if (threeMount) {
     threeMount.dataset.closeupViewSide = closeup ? pose.viewSide || "" : "";
   }
+  requestThreeAnimation();
   return true;
 }
 
@@ -4021,7 +4425,7 @@ async function loadThumbSceneConfig() {
       geometry_status: "solidworks_tilted_flush_max_area_recesses_integrated",
       manufacturing_status: "provisional_trial_dimensions",
       data_status: "synchronized_demo_only",
-      default_selected_finger: "thumb",
+      default_selected_finger: "all",
       demo_sync_mode: "synchronized_with_thumb",
       spectrum_scope_mode: "selected_finger",
       array_scope_mode: "selected_finger",
@@ -4145,11 +4549,11 @@ async function loadThumbSceneConfig() {
   state.thumbModelAssetUrl = fallback.thumb_holder_scene.fallback_asset_url;
   state.wholeHandModelAssetUrl = resolved.whole_hand_scene?.asset_url || fallback.whole_hand_scene.asset_url;
   const configuredFinger = String(
-    resolved.finger_sensor_array?.default_selected_finger || "thumb"
+    resolved.finger_sensor_array?.default_selected_finger || "all"
   ).toLowerCase();
   state.selectedFinger = [...FINGER_ORDER, "all"].includes(configuredFinger)
     ? configuredFinger
-    : "thumb";
+    : "all";
   state.fingerNavigationIndex = defaultFingerNavigationIndex(state.selectedFinger);
   if (fingerFocusSelect) fingerFocusSelect.value = state.selectedFinger;
   state.thumbModelMessage = "using local STL thumb holder fallback";
@@ -4550,7 +4954,7 @@ function wholeHandOverviewPose(configuredPose) {
 
 function applyThumbCameraConfig({
   animated = false,
-  keepFingerNavigation = false,
+  keepFingerNavigation = true,
 } = {}) {
   if (!camera || !controls) return;
   const wholeHandMode = state.geometryDisplayMode === "whole_hand";
@@ -4773,6 +5177,7 @@ async function setupThumbHolderModel() {
   const result = await loadThumbHolderModel(state.thumbSceneConfig || {});
   if (thumbHolderObject) {
     thumbModelRoot.remove(thumbHolderObject);
+    disposeObject3D(thumbHolderObject);
   }
   thumbHolderObject = result.object;
   if (thumbHolderObject) {
@@ -4784,6 +5189,7 @@ async function setupThumbHolderModel() {
   state.thumbModelFallbackUsed = Boolean(result.fallback);
   populateThumbAlignmentPanel();
   applyThumbSceneLayout();
+  requestThreeAnimation();
 }
 
 async function setupWholeHandModel() {
@@ -4791,6 +5197,7 @@ async function setupWholeHandModel() {
   const result = await loadRobotNanoHandModel(state.thumbSceneConfig || {});
   if (wholeHandBodyObject) {
     wholeHandRoot.remove(wholeHandBodyObject);
+    disposeObject3D(wholeHandBodyObject);
   }
   wholeHandBodyObject = result.object;
   if (wholeHandBodyObject) {
@@ -4807,6 +5214,7 @@ async function setupWholeHandModel() {
     console.warn(`[whole-hand] ${result.message || "model unavailable"}`);
   }
   applyThumbSceneLayout();
+  requestThreeAnimation();
 }
 
 function updateGeometryDisplayMode(mode) {
@@ -5123,6 +5531,16 @@ function initThree() {
   controls.minDistance = 4.0;
   controls.maxDistance = 13.0;
   applyThumbCameraConfig();
+  controls.addEventListener("start", () => {
+    state.controlsInteracting = true;
+    requestThreeAnimation();
+  });
+  controls.addEventListener("change", requestThreeAnimation);
+  controls.addEventListener("end", () => {
+    state.controlsInteracting = false;
+    state.controlsSettlingUntil = performance.now() + 360;
+    requestThreeAnimation();
+  });
   renderer.domElement.addEventListener("pointerdown", handleFingerPointerDown);
   renderer.domElement.addEventListener("pointerup", handleFingerPointerUp);
   renderer.domElement.addEventListener("pointermove", handleFingerPointerMove);
@@ -5283,7 +5701,7 @@ function initThree() {
   setupWholeHandModel();
   applyThumbSceneLayout();
   resizeThree();
-  animate();
+  requestThreeAnimation();
 }
 
 function resizeThree() {
@@ -5293,13 +5711,17 @@ function resizeThree() {
   renderer.setSize(width, height);
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
+  requestThreeAnimation();
 }
 
 function updateThree(record, arrayFrame = null) {
   const metrics = arrayFrame?.surface_metrics || {};
   const peak = Number(metrics.surface_peak);
   const rawPeak = Number.isFinite(peak) ? Math.max(0, Math.min(1, peak)) : attenuation(record);
-  const visualPeak = visualSurfacePeakForFrame(rawPeak, record, arrayFrame);
+  const atomicNeutral =
+    arrayFrame?.presentation_status === "invalid_input_neutral" ||
+    arrayFrame?.mode === "invalid_input_neutral";
+  const visualPeak = atomicNeutral ? 0 : visualSurfacePeakForFrame(rawPeak, record, arrayFrame);
   state.currentSurfaceGrid = Array.isArray(arrayFrame?.surface_grid) ? arrayFrame.surface_grid : null;
   state.currentSurfaceMetrics = metrics;
   const cx = Number(metrics.surface_centroid_x);
@@ -5315,7 +5737,22 @@ function updateThree(record, arrayFrame = null) {
   state.targetDeformation = Number.isFinite(peak)
     ? visualDeformationFromSurfacePeak(visualPeak, rawPeak)
     : visualDeformationStrength(record);
+  if (atomicNeutral) {
+    state.targetAttenuation = 0;
+    state.targetDeformation = 0;
+    state.smoothAttenuation = 0;
+    state.smoothDeformation = 0;
+    state.smoothSurfaceVisualPeak = 0;
+    state.smoothSurfaceCentroidX = 0;
+    state.smoothSurfaceCentroidY = 0;
+    state.smoothSurfaceSpread = state.targetSurfaceSpread;
+    state.smoothSurfaceActiveArea = 0;
+    if (surfaceGeometry) {
+      applyThreeGeometry(0, 0, { recomputeNormals: true });
+    }
+  }
   state.threeNeedsRefresh = true;
+  requestThreeAnimation();
 }
 
 function surfaceValueAtScene(x, z) {
@@ -5505,8 +5942,14 @@ function applyThreeGeometry(raw, deformation, { recomputeNormals = false } = {})
   }
 }
 
+function requestThreeAnimation() {
+  if (!state.pageVisible || !renderer || state.animationFrameId !== null) return;
+  state.animationFrameId = requestAnimationFrame(animate);
+}
+
 function animate(timestamp = 0) {
-  requestAnimationFrame(animate);
+  state.animationFrameId = null;
+  if (!state.pageVisible || !renderer || !scene || !camera) return;
   if (windowResizeActive) {
     state.lastThreeFrameMs = timestamp;
     return;
@@ -5644,6 +6087,15 @@ function animate(timestamp = 0) {
   const cameraTransitionUpdated = updateCameraTransition(timestamp);
   if (!cameraTransitionUpdated) controls?.update();
   renderer?.render(scene, camera);
+  const controlsSettling = state.controlsInteracting || timestamp < state.controlsSettlingUntil;
+  if (
+    cameraTransition?.active ||
+    controlsSettling ||
+    state.chartsNeedRefresh ||
+    state.threeNeedsRefresh
+  ) {
+    requestThreeAnimation();
+  }
 }
 
 function sortedChannels(grid) {
@@ -5920,6 +6372,7 @@ function updateArrayDiagnostics(arrayFrame, record, measurementAvailable = true)
     return status && !["ok", "ok_with_manual_wavelength", "simulated", "no_data"].includes(status);
   }).length;
   const mode = String(arrayFrame?.mode || "p22_fallback");
+  const recordedDemo = isRecordedDemoSpectrum(record, arrayFrame);
   const trainedStaticMode = isModelPositionLevelMode(mode);
   const globalSpectrumMode = mode.startsWith("global_spectrum_");
   const fallbackLike = mode === "p22_fallback" || mode === "no_valid_channel" || mode === "";
@@ -5930,7 +6383,7 @@ function updateArrayDiagnostics(arrayFrame, record, measurementAvailable = true)
   setText(
     "surfaceSource",
     mode === "simulated_array_demo"
-      ? "simulated 3x3 array"
+      ? recordedDemo ? "recorded spectrum + response proxy" : "simulated 3x3 array"
       : trainedStaticMode
         ? "trained 512-point spectrum"
       : globalSpectrumMode
@@ -5945,7 +6398,9 @@ function updateArrayDiagnostics(arrayFrame, record, measurementAvailable = true)
   );
   setText(
     "surfaceRuleSource",
-    mode === "simulated_array_demo"
+    !measurementAvailable
+      ? "--"
+      : mode === "simulated_array_demo"
       ? "coupled"
       : trainedStaticMode
         ? "coupled"
@@ -5960,7 +6415,9 @@ function updateArrayDiagnostics(arrayFrame, record, measurementAvailable = true)
   setText(
     "surfaceQualityNote",
     mode === "simulated_array_demo"
-      ? "Data source: simulated 3x3 array; mechanically coupled wavelength shift"
+      ? recordedDemo
+        ? "Data source: recorded 512-point BaySpec spectrum; surface remains a response proxy"
+        : "Data source: simulated 3x3 array; mechanically coupled wavelength shift"
       : trainedStaticMode
         ? "Data source: trained static full-spectrum model; approximate manual fingertip position and response level"
       : globalSpectrumMode
@@ -6015,7 +6472,7 @@ function updateChannelGrid(grid, selected) {
   }
 }
 
-function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, measurementAvailable = true, heldMeasurement = false) {
+function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, measurementAvailable = true, heldMeasurement = false, runtimeFrame = null) {
   const channelIds = ["P11", "P21", "P31", "P12", "P22", "P32", "P13", "P23", "P33"];
   const channels = new Map((arrayFrame?.channels || []).map((item) => [item.channel_id, item]));
   const candidatePeaks = globalCandidatePeaks(record);
@@ -6035,12 +6492,7 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
   const dominantCandidateId = surfaceMetrics?.contact_evidence_passed
     ? dominantGlobalCandidate(record)?.candidate_id || null
     : null;
-  const selectedFingerScope =
-    state.selectedFinger === "all" ? "All fingers" : selectedFingerLabel();
-  setText(
-    "footprintTitle",
-    `${selectedFingerScope} ${globalCandidateView ? "9-FBG Fingerprint" : "Contact Footprint"}`
-  );
+  setText("footprintTitle", "Contact Map");
   const fallbackLike = !arrayFrame || ["p22_fallback", "single_point_p22", "no_valid_channel", ""].includes(String(arrayFrame.mode || ""));
   const globalEventPeakShiftPm = Number(surfaceMetrics?.global_event_absolute_shift_pm ?? record?.absolute_shift_pm);
   const responseBlockReason = String(record?.response_block_reason || "");
@@ -6111,32 +6563,91 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
     }
   }
 
+  const forcePresentation = opticalForcePresentation(record, arrayFrame, runtimeFrame);
+  const activeResponsePrediction = trainedStaticView
+    ? forcePresentation.prediction
+    : null;
+  const allSourceBeta = forcePresentation.enabled;
+  const estimatedForceN = forcePresentation.valueN;
+  const responseBandRatio =
+    allSourceBeta && estimatedForceN !== null
+      ? Math.max(0, Math.min(1, estimatedForceN / OPTICAL_FORCE_DISPLAY_MAX_N))
+      : peak;
+  setText("responseBandTitle", allSourceBeta ? "Estimated Force" : "Optical Response");
+  document.querySelector(".operator-band-card")?.classList.toggle("force-estimate-mode", allSourceBeta);
+  const responseBandLabels = Array.from(
+    document.querySelectorAll(".operator-band-card .response-band-labels span")
+  );
+  const responseBandLabelText = allSourceBeta
+    ? ["0 N", "1.25", "2.5", "3.75", "5 N"]
+    : ["0%", "25%", "50%", "75%", "100%"];
+  responseBandLabels.forEach((label, index) => {
+    label.textContent = responseBandLabelText[index] || "";
+  });
   const marker = document.getElementById("responseBandMarker");
   if (marker) {
     const track = marker.parentElement;
     if (track) {
       track.setAttribute(
         "aria-label",
-        "Continuous normalized optical response from 0% to 100%; visual proxy only"
+        allSourceBeta
+          ? "Force estimated from the optical spectrum, from 0 to 5 newtons"
+          : "Continuous normalized optical response from 0% to 100%; visual proxy only"
       );
     }
     marker.classList.toggle("unavailable", !measurementAvailable);
-    if (measurementAvailable) marker.style.left = `${(peak * 100).toFixed(1)}%`;
+    const markerPercent = measurementAvailable && Number.isFinite(responseBandRatio)
+      ? Math.max(0, Math.min(100, responseBandRatio * 100))
+      : 0;
+    marker.style.left = `${markerPercent.toFixed(1)}%`;
+    marker.style.transform = `translate(${-markerPercent.toFixed(1)}%, -50%)`;
+    marker.textContent = allSourceBeta
+      ? measurementAvailable && estimatedForceN !== null
+        ? `${estimatedForceN.toFixed(2)} N`
+        : "-- N"
+      : measurementAvailable
+        ? formatPercent(peak, 0)
+        : "--";
+    marker.setAttribute("role", "meter");
+    marker.setAttribute("aria-valuemin", "0");
+    marker.setAttribute(
+      "aria-valuemax",
+      allSourceBeta ? String(OPTICAL_FORCE_DISPLAY_MAX_N) : "100"
+    );
+    if (measurementAvailable) {
+      const meterValue = allSourceBeta && estimatedForceN !== null
+        ? estimatedForceN
+        : Math.max(0, Math.min(100, peak * 100));
+      marker.setAttribute("aria-valuenow", meterValue.toFixed(2));
+      marker.setAttribute(
+        "aria-valuetext",
+        allSourceBeta && estimatedForceN !== null
+          ? `${estimatedForceN.toFixed(2)} newtons estimated from the optical spectrum`
+          : formatPercent(peak, 0)
+      );
+    } else {
+      marker.removeAttribute("aria-valuenow");
+      marker.setAttribute("aria-valuetext", "No current measurement");
+    }
   }
   const trainedPrediction = trainedStaticView
     ? activeModelPrediction(record, arrayFrame)
     : null;
   const responseBandValue = document.getElementById("responseBandValue");
   const compactResponseBandText = measurementAvailable
-    ? `${formatPercent(peak, 0)} optical response${heldMeasurement ? " · held" : ""}`
-    : unavailableResponseText;
+    ? allSourceBeta && estimatedForceN !== null
+      ? `${estimatedForceN.toFixed(2)} N${heldMeasurement ? " · held" : ""}`
+      : `${formatPercent(peak, 0)} optical response${heldMeasurement ? " · held" : ""}`
+    : allSourceBeta ? "-- N" : unavailableResponseText;
   setText("responseBandValue", compactResponseBandText);
   if (responseBandValue) {
     const eventPeakShift = globalCandidateView
       ? globalEventPeakShiftPm
       : arrayFrame?.peak_wavelength_shift_pm ?? record?.absolute_shift_pm;
     const evidenceDetail = trainedPrediction
-      ? `${activeModelDisplayName(record, arrayFrame)}; ${formatPercent(peak, 0)} normalized visual response`
+      ? allSourceBeta && estimatedForceN !== null
+        ? `${activeModelDisplayName(record, arrayFrame)}; ${estimatedForceN.toFixed(2)} N estimated from spectrum`
+        : `${activeModelDisplayName(record, arrayFrame)}; ${formatPercent(peak, 0)} normalized visual response`
       : `${formatPercent(peak, 0)} normalized response; ${formatPm(eventPeakShift, 1)} event peak |Δλ|`;
     responseBandValue.title = measurementAvailable ? evidenceDetail : unavailableResponseText;
     responseBandValue.setAttribute(
@@ -6282,6 +6793,9 @@ function updateWatcherUI(watcher, sdkLive) {
   setText("frameAge", formatSeconds(sdkActive ? sdkLive?.seconds_since_last_frame : watcher?.seconds_since_last_ingest));
   setText("watchIngestCount", sdkActive ? sdkLive?.frame_count ?? "--" : watcher?.ingest_count ?? "--");
   setText("watchError", sdkActive ? sdkLive?.last_error || "none" : watcher?.last_error || "none");
+  if (sdkLive?.spectrum_processing) {
+    renderSpectrumProcessingStatus(sdkLive.spectrum_processing);
+  }
 }
 
 function setDemoStatus(text, mode = "ready") {
@@ -6363,12 +6877,11 @@ function snapDisplayedFrameToCurrentTargets() {
   state.smoothSurfaceSpread = state.targetSurfaceSpread;
   state.smoothSurfaceActiveArea = state.targetSurfaceActiveArea;
 
-  drawTrace(state.smoothTraceRecords);
-  drawSpectrum(state.smoothSpectrumRecord);
-  drawSelectedPeakZoom(state.smoothSpectrumRecord);
-  drawHeatmap(state.currentArrayFrame);
+  drawVisibleCharts();
   if (surfaceGeometry) {
-    applyThreeGeometry(state.smoothAttenuation, state.smoothDeformation);
+    applyThreeGeometry(state.smoothAttenuation, state.smoothDeformation, {
+      recomputeNormals: true,
+    });
   }
   state.chartsNeedRefresh = false;
   state.threeNeedsRefresh = false;
@@ -6419,10 +6932,14 @@ async function stopLiveInputsForDemo() {
 }
 
 async function ensureLiveInputsStoppedForDemo() {
-  if (state.demoModeActive && !state.exportWatchActive && !state.sdkLiveActive) {
-    return;
+  const captureRunning = state.frame?.optical_force_capture?.running === true;
+  if (state.exportWatchActive || state.sdkLiveActive || state.liveRequested || captureRunning) {
+    throw new Error(
+      captureRunning
+        ? "Stop recording before opening a simulated response."
+        : "Stop live acquisition before opening a simulated response."
+    );
   }
-  await stopLiveInputsForDemo();
 }
 
 async function prepareDemoMode({ reset = false } = {}) {
@@ -6433,49 +6950,18 @@ async function prepareDemoMode({ reset = false } = {}) {
   state.arrayDemoActive = false;
   state.arrayDemoScenario = null;
   state.dataStreamActive = true;
-  if (reset || !state.demoModeActive) {
-    await requestJSON(
-      "/api/reset?keep_baseline=false",
-      { method: "POST" },
-      { timeoutMs: 7000 }
-    );
-  }
-  await postJSON("/api/baseline", {
-    channel_id: state.selectedChannel,
-    baseline_intensity_counts: DEMO_BASELINE,
-    baseline_wavelength_nm: DEMO_BASELINE_WAVELENGTH_NM,
-  });
   state.demoModeActive = true;
   setDemoStatus(state.demoAutoplay ? "auto" : "demo", state.demoAutoplay ? "auto" : "running");
 }
 
 async function injectDemoFrame(level, { reset = false } = {}) {
-  const preset = DEMO_PRESETS[level] || DEMO_PRESETS.no_contact;
-  await prepareDemoMode({ reset });
-  const timestamp = Date.now();
-  const demoSpectrum = generateDemoSpectrum(preset);
-  await postJSON("/api/ingest", {
-    device_id: "BaySpec-Demo",
-    timestamp_ms: timestamp,
-    channels: [
-      {
-        channel_id: state.selectedChannel,
-        intensity_counts: preset.intensity,
-        peak_wavelength_nm: DEMO_BASELINE_WAVELENGTH_NM + (Number(preset.shiftPm) || 0) / 1000,
-        target_wavelength_nm: DEMO_TARGET_WAVELENGTH_NM,
-        integration_ms: 40,
-        source: `software_demo_${preset.label}`,
-        wavelength_nm: demoSpectrum.wavelengths,
-        intensity: demoSpectrum.counts,
-        spectrum_wavelength_nm: demoSpectrum.wavelengths,
-        spectrum_counts: demoSpectrum.counts,
-      },
-    ],
+  const scenario = level === "no_contact" ? "no_contact" : "center_press";
+  await injectArrayDemoFrame(scenario, {
+    resetTrajectory: reset,
+    playbackMode: "single",
   });
   state.demoCurrentLevel = level;
-  setDemoStatus(state.demoAutoplay ? "auto" : levelLabel(preset.label), state.demoAutoplay ? "auto" : "running");
   updateDemoControls();
-  await fetchFrame();
 }
 
 async function runDemoTransition(action, button = null) {
@@ -6532,26 +7018,30 @@ function frameFromArrayDemo(arrayFrame) {
   const spectrumPeaks = Array.isArray(spectrum?.peaks) ? spectrum.peaks : [];
   return {
     ok: true,
-    mode: "simulated_array_demo",
+    mode: arrayFrame?.demo_data_mode || arrayFrame?.mode || "recorded_real_spectrum_reference",
     frame_id: arrayFrame?.frame_id,
     timestamp: arrayFrame?.timestamp,
     selected_channel: selected.channel_id || dominantChannel,
     latest: {
       ...selected,
-      source: `simulated_array_demo_${arrayFrame?.scenario || "surface"}`,
+      source: spectrum?.source_session_id || arrayFrame?.demo_source_session_id || "recorded_demo_reference",
       demodulation_mode: "fbg_wavelength_shift",
-      response_basis: "simulated Bragg wavelength-shift surface",
-      peak_axis_type: spectrum?.axis_type === "wavelength_nm" ? "wavelength_nm" : "simulated",
+      response_basis: "recorded spectrum with synchronized Fz visual proxy",
+      peak_axis_type: spectrum?.axis_type === "wavelength_nm" ? "wavelength_nm" : "recorded",
       spectrum_x_unit: spectrum?.axis_type || "wavelength_nm",
       wavelength_nm: spectrum?.wavelength_nm || [],
       spectrum_wavelength_nm: spectrum?.wavelength_nm || [],
       intensity: spectrum?.intensity || [],
       spectrum_counts: spectrum?.intensity || [],
       spectrum_peaks: spectrumPeaks,
+      spectrum_peak_profile: spectrum?.spectrum_peak_profile,
+      spectrum_peak_mapping_status: spectrum?.spectrum_peak_mapping_status,
+      peak_assignment_method: spectrum?.peak_assignment_method,
+      physical_channel_mapping_final: Boolean(spectrum?.physical_channel_mapping_final),
       spectrum_points: Array.isArray(spectrum?.intensity) ? spectrum.intensity.length : 0,
-      spectrum_type: spectrum?.spectrum_type || "synthetic simulated spectrum",
-      spectrum_source_note: spectrum?.source_note || "synthetic simulated spectrum",
-      peak_height_mode: spectrum?.peak_height_mode || "fixed_per_channel",
+      spectrum_type: spectrum?.spectrum_type || "recorded spectrum unavailable",
+      spectrum_source_note: spectrum?.source_note || "recorded spectrum unavailable",
+      peak_height_mode: spectrum?.peak_height_mode || "recorded_counts",
       intensity_modulation_enabled: Boolean(spectrum?.intensity_modulation_enabled),
       frame_render_semantics: spectrum?.frame_render_semantics || "replace_previous_spectrum",
       wavelength_plan: spectrum?.wavelength_plan || arrayFrame?.wavelength_plan,
@@ -6574,6 +7064,16 @@ function frameFromArrayDemo(arrayFrame) {
       possible_same_fiber_coupling: Boolean(arrayFrame?.possible_same_fiber_coupling || selected.possible_same_fiber_coupling),
       local_response_estimate_available: Boolean(arrayFrame?.local_response_estimate_available || selected.local_response_estimate_available),
       coupling_model_note: arrayFrame?.coupling_model_note,
+      demo_data_mode: arrayFrame?.demo_data_mode,
+      demo_reference_kind: arrayFrame?.demo_reference_kind,
+      demo_source_session_id: arrayFrame?.demo_source_session_id,
+      demo_source_capture_index: arrayFrame?.demo_source_capture_index,
+      demo_source_elapsed_time_sec: arrayFrame?.demo_source_elapsed_time_sec,
+      demo_source_position: arrayFrame?.demo_source_position,
+      recorded_reference_force_fz_n: arrayFrame?.recorded_reference_force_fz_n,
+      estimated_force_fz_n: arrayFrame?.estimated_force_fz_n,
+      optical_force_estimate: arrayFrame?.optical_force_estimate,
+      active_spectral_model_source: arrayFrame?.active_spectral_model_source,
     },
     trace: appendArrayDemoTrace(arrayFrame),
     channel_grid: arrayFrame?.channels || [],
@@ -6581,16 +7081,21 @@ function frameFromArrayDemo(arrayFrame) {
     surface_grid: arrayFrame?.surface_grid,
     surface_metrics: arrayFrame?.surface_metrics,
     surface_note: arrayFrame?.surface_note,
-    status: { buffered_records: 0, channels_seen: ["simulated_array_demo"] },
-    export_watcher: { active: false, freshness: "simulated" },
-    sdk_live: { active: false, freshness: "simulated" },
+    estimated_force_fz_n: arrayFrame?.estimated_force_fz_n,
+    optical_force_estimate: arrayFrame?.optical_force_estimate,
+    status: {
+      buffered_records: 0,
+      channels_seen: [spectrum?.source_session_id || "recorded_demo_reference"],
+    },
+    export_watcher: { active: false, freshness: "recorded" },
+    sdk_live: { active: false, freshness: "recorded" },
     sense_control: {},
   };
 }
 
 async function injectArrayDemoFrame(
   scenario,
-  { resetTrajectory = true, playbackMode = "loop" } = {}
+  { resetTrajectory = true, playbackMode = "single" } = {}
 ) {
   invalidateFrameRequestContext();
   const demoEpoch = state.frameModeEpoch;
@@ -6618,6 +7123,9 @@ async function injectArrayDemoFrame(
     { cache: "no-store" },
     { timeoutMs: 7000 }
   );
+  if (data?.ok === false || !data?.array_frame) {
+    throw new Error(data?.reason || data?.status || "Simulated response is unavailable.");
+  }
   if (demoEpoch !== state.frameModeEpoch) return;
   const arrayFrame = data.array_frame;
   arrayFrame.scenario = scenario;
@@ -6655,6 +7163,9 @@ async function injectArrayDemoFrameAtStep(scenario, step = 0) {
     { cache: "no-store" },
     { timeoutMs: 7000 }
   );
+  if (data?.ok === false || !data?.array_frame) {
+    throw new Error(data?.reason || data?.status || "Simulated response is unavailable.");
+  }
   if (demoEpoch !== state.frameModeEpoch) return;
   const arrayFrame = data.array_frame;
   arrayFrame.scenario = scenario;
@@ -6733,7 +7244,9 @@ function frameSyncDiagnostics(frame, record, trace, arrayFrame) {
   };
 }
 
-function updateUI(frame) {
+function updateUI(inputFrame) {
+  const frame = atomicNeutralFrame(inputFrame);
+  if (state.frame === inputFrame && frame !== inputFrame) state.frame = frame;
   const record = frame?.latest;
   const trace = frame?.trace || [];
   const status = frame?.status || {};
@@ -6747,6 +7260,20 @@ function updateUI(frame) {
   const surfaceMetrics = arrayFrame?.surface_metrics || {};
   const syncDiag = frameSyncDiagnostics(frame, record, trace, arrayFrame);
   const trainedModelDisplay = trainedStaticModelDisplayReady(frame);
+  const opticalForceDisplay = opticalForcePresentation(record, arrayFrame, frame);
+  const activeModelSource = opticalForceDisplay.source;
+  const allSourceBetaActive = opticalForceDisplay.enabled;
+  const opticalForceEstimate = opticalForceDisplay.valueN;
+  const opticalForceEstimateField = document.getElementById("opticalForceEstimateField");
+  if (opticalForceEstimateField) opticalForceEstimateField.hidden = !allSourceBetaActive;
+  const opticalForceEstimateLabel = opticalForceEstimateField?.querySelector("span");
+  if (opticalForceEstimateLabel) opticalForceEstimateLabel.textContent = "Estimated Force";
+  setText(
+    "opticalForceEstimate",
+    allSourceBetaActive && opticalForceEstimate !== null
+      ? `${opticalForceEstimate.toFixed(2)} N`
+      : "-- N"
+  );
   state.currentArrayFrame = arrayFrame;
   state.currentSurfaceGrid = Array.isArray(arrayFrame?.surface_grid) ? arrayFrame.surface_grid : null;
   state.currentSurfaceMetrics = surfaceMetrics;
@@ -6817,8 +7344,9 @@ function updateUI(frame) {
     );
   }
 
+  const recordedDemoActive = state.arrayDemoActive && isRecordedDemoSpectrum(displayRecord, arrayFrame);
   const sourceName = state.demoModeActive
-    ? "SIMULATION"
+    ? recordedDemoActive ? "RECORDED DATA" : "SIMULATION"
     : inputSourceSelect?.value === "export_watch"
       ? "SENSE WATCH"
       : inputSourceSelect?.value === "http_ingest"
@@ -6838,7 +7366,7 @@ function updateUI(frame) {
     : heldMeasurement || state.paused
       ? "HELD"
       : state.demoModeActive
-        ? "SIMULATED"
+        ? recordedDemoActive ? "RECORDED" : "SIMULATED"
         : "AVAILABLE";
   const frameStateTone = !measurementAvailable
     ? "neutral"
@@ -6849,8 +7377,10 @@ function updateUI(frame) {
         : "ok";
   const baselineStatusKey = String(displayRecord?.baseline_status || "").toLowerCase();
   const trainedModelBaselineReady =
+    displayRecord?.active_spectral_model_status === "ready" ||
     displayRecord?.active_spectral_model_status === "temporal_validation_ready" ||
     displayRecord?.trained_static_spectral_model_status === "ready" ||
+    baselineStatusKey.includes("all_source_optical_force_baseline_ready") ||
     baselineStatusKey.includes("static_model_full_spectrum_baseline_ready") ||
     baselineStatusKey.includes("temporal_model_window_ready");
   const globalBaselineReady = trainedModelBaselineReady || (
@@ -6927,18 +7457,6 @@ function updateUI(frame) {
       : status?.peak_map_status?.display?.replace("Peak map: ", "") || "target"
   );
   setText(
-    "surfaceModeChip",
-    globalRecognitionFrame
-      ? state.temporalValidationMode
-        ? "Temporal validation"
-        : "Static fallback"
-      : isFallbackLikeFrame
-        ? "P22 legacy fallback"
-        : arrayMode === "simulated_array_demo"
-          ? state.displayMode === "operator" ? "Coupled response" : "Simulated 3x3"
-          : "Coupled response"
-  );
-  setText(
     "spectrumChip",
     !syncDiag.hasSpectrum
       ? "NO FRAME"
@@ -6979,6 +7497,15 @@ function updateUI(frame) {
       : spectrumIsSynthetic
         ? state.displayMode === "operator" ? "Wavelength (nm) · optical intensity (counts)" : "Wavelength (nm) · optical intensity (counts) · simulated"
         : "Wavelength (nm) · reflected intensity (counts)"
+  );
+  const spectrumPeakProfile = String(record?.spectrum_peak_profile || "").toLowerCase();
+  setText(
+    "spectrumReferenceLegend",
+    spectrumPeakProfile === "recorded_auto_discovered_9fbg"
+      ? "auto-discovered reference"
+      : spectrumPeakProfile === "current_real_9fbg_candidate"
+        ? "tracked wavelength-order reference"
+        : "preliminary target"
   );
   setText(
     "spectrumDiagnosticNote",
@@ -7104,7 +7631,9 @@ function updateUI(frame) {
     !measurementAvailable
       ? "--"
       : arrayMode === "simulated_array_demo"
-        ? "simulated demo"
+        ? isRecordedDemoSpectrum(displayRecord, arrayFrame)
+          ? "recorded spectrum"
+          : "simulated response"
         : displayRecord?.source || "wavelength frame"
   );
   const diagnosticFrameSourceElement = document.getElementById("diagnosticFrameSource");
@@ -7242,7 +7771,9 @@ function updateUI(frame) {
         : isFallbackLikeFrame
       ? "P22 fallback"
       : arrayMode === "simulated_array_demo"
-        ? "Simulated 3x3 coupled response"
+        ? isRecordedDemoSpectrum(displayRecord, arrayFrame)
+          ? "Recorded spectrum response proxy"
+          : "Simulated 3x3 coupled response"
         : "Coupled Bragg wavelength-shift response"
   );
   setText(
@@ -7270,12 +7801,21 @@ function updateUI(frame) {
       dominantChannelRecord?.absolute_shift_pm ??
       record?.absolute_shift_pm
   );
-  setText("surfacePeakLabel", trainedModelDisplay ? "Visual response" : "Peak |Δλ|");
+  setText(
+    "surfacePeakLabel",
+    allSourceBetaActive
+      ? "Optical response"
+      : trainedModelDisplay
+        ? "Visual response"
+        : "Peak |Δλ|"
+  );
   const surfacePeakElement = document.getElementById("surfacePeak");
   if (surfacePeakElement) {
-    surfacePeakElement.title = trainedModelDisplay
-      ? "Trained model visual response proxy; not calibrated force"
-      : "Peak absolute Bragg wavelength shift";
+    surfacePeakElement.title = allSourceBetaActive
+      ? "Digital-twin response normalized from the optical-only continuous Fz estimate"
+      : trainedModelDisplay
+        ? "Trained model visual response proxy; not calibrated force"
+        : "Peak absolute Bragg wavelength shift";
   }
   setText(
     "surfacePeak",
@@ -7385,7 +7925,7 @@ function updateUI(frame) {
       ? String(surfaceMetrics.max_coupling_hop_depth ?? arrayFrame?.max_coupling_hop_depth ?? 0)
       : "--"
   );
-  updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, responseAvailable, heldMeasurement);
+  updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, responseAvailable, heldMeasurement, frame);
   const secondaryObserved = Array.isArray(surfaceMetrics.secondary_observed_channels)
     ? surfaceMetrics.secondary_observed_channels
     : Array.isArray(surfaceMetrics.secondary_changed_channels)
@@ -7412,7 +7952,9 @@ function updateUI(frame) {
       : isFallbackLikeFrame
       ? "trajectory limited by single-point fallback"
       : arrayMode === "simulated_array_demo"
-        ? "simulated contact center trajectory"
+        ? isRecordedDemoSpectrum(displayRecord, arrayFrame)
+          ? "recorded-reference contact center trajectory"
+          : "simulated contact center trajectory"
         : "contact center trajectory from enabled wavelength-shift channels"
   );
 
@@ -7446,7 +7988,12 @@ function updateUI(frame) {
   updateThree(record, arrayFrame);
   updateChannelSelectorLabels(arrayFrame?.channels || frame?.channel_grid || []);
   updateChannelGrid(arrayFrame?.channels || frame?.channel_grid || [], frame?.selected_channel);
+  // Labels commit atomically per source frame, while charts and geometry ease
+  // toward the same frame targets. Synchronous redraw and normal recomputation
+  // here caused the post-review live UI regression.
   state.chartsNeedRefresh = true;
+  state.threeNeedsRefresh = true;
+  requestThreeAnimation();
 }
 
 function normalizeGlobalSpectrumFrame(frame) {
@@ -7455,6 +8002,7 @@ function normalizeGlobalSpectrumFrame(frame) {
   const trainedModelFrame = frame?.trained_static_spectral_frame || {};
   const activeModelSource = String(frame?.active_spectral_model_source || "static_spectral_model");
   const temporalModelActive = activeModelSource === "dynamic_temporal_v3_validation";
+  const allSourceBetaActive = activeModelSource === ALL_SOURCE_BETA_RECOGNITION_SOURCE;
   const trainedPrediction = frame?.active_spectral_prediction || frame?.trained_static_spectral_prediction || trainedModelFrame?.prediction || null;
   const trainedModelExpected = frame?.active_spectral_model_expected === true || frame?.trained_static_spectral_model?.loaded === true;
   const trainedModelReady = Boolean(
@@ -7462,12 +8010,20 @@ function normalizeGlobalSpectrumFrame(frame) {
     trainedPrediction?.digital_twin
   );
   const trainedContactActive = trainedModelReady && trainedPrediction?.digital_twin?.active === true;
-  const trainedForceLevel = String(
-    trainedPrediction?.force_level?.label || trainedPrediction?.digital_twin?.force_level || ""
-  );
-  const trainedResponseLevel = trainedContactActive && ["light", "normal", "hard"].includes(trainedForceLevel)
-    ? `${trainedForceLevel}_press`
-    : "no_contact";
+  const trainedForceLevel = allSourceBetaActive
+    ? ""
+    : String(
+        trainedPrediction?.force_level?.label ||
+        trainedPrediction?.digital_twin?.force_level ||
+        ""
+      );
+  const trainedResponseLevel = allSourceBetaActive
+    ? trainedContactActive
+      ? "contact"
+      : "no_contact"
+    : trainedContactActive && ["light", "normal", "hard"].includes(trainedForceLevel)
+      ? `${trainedForceLevel}_press`
+      : "no_contact";
   const trainedSurface = trainedModelReady ? trainedStaticModelSurface(trainedPrediction) : null;
   const trainedModelTrace = trainedModelReady
     ? appendTrainedModelTrace(rawRecord, trainedPrediction, trainedSurface)
@@ -7482,9 +8038,11 @@ function normalizeGlobalSpectrumFrame(frame) {
   const baselineReady =
     peaks.length === GLOBAL_CANDIDATE_IDS.length &&
     peaks.every((peak) => peak?.candidate_reference_status === "session_global_no_contact_baseline");
-  const sourceFresh = globalFrameQa.source_fresh !== false;
+  const sourceUsable =
+    globalFrameQa.operator_display_valid === true &&
+    globalFrameQa.source_fresh !== false;
   const rawProxyResponseAllowed =
-    validPeaks.length === GLOBAL_CANDIDATE_IDS.length && baselineReady && sourceFresh;
+    validPeaks.length === GLOBAL_CANDIDATE_IDS.length && baselineReady && sourceUsable;
   const modelPrimaryBlocked = trainedModelExpected && !trainedModelReady;
   const responseAllowed = trainedModelReady || (!trainedModelExpected && rawProxyResponseAllowed);
   const responseBlockReason =
@@ -7499,7 +8057,7 @@ function normalizeGlobalSpectrumFrame(frame) {
       ? "incomplete_global_candidate_frame"
       : !baselineReady
         ? "global_candidate_baseline_required"
-        : !sourceFresh
+        : !sourceUsable
           ? "stale_source_frame"
           : null;
   const baselineStatsByCandidate = globalCandidateBaselineStatsMap(rawTrace);
@@ -7619,14 +8177,18 @@ function normalizeGlobalSpectrumFrame(frame) {
     global_proxy_full_scale_pm: GLOBAL_PROXY_FULL_SCALE_PM,
     global_visual_proxy_response_ratio: proxyResponseRatio,
     quality_status: trainedModelReady
-      ? temporalModelActive
+      ? allSourceBetaActive
+        ? "all_source_optical_force_model"
+        : temporalModelActive
         ? "dynamic_temporal_validation_model"
         : "trained_static_model_single_session_baseline"
       : !responseAllowed
       ? responseBlockReason
       : "global_spectrum_ready",
     coupling_status: trainedModelReady
-      ? temporalModelActive
+      ? allSourceBetaActive
+        ? "all-data optical contact, position, and continuous Fz estimate"
+        : temporalModelActive
         ? "dynamic temporal spectral fingerprint; validation mode"
         : "trained full-spectrum fingerprint; broad manual fingertip domain"
       : modelPrimaryBlocked
@@ -7635,7 +8197,9 @@ function normalizeGlobalSpectrumFrame(frame) {
           : "trained model waiting; raw residual proxy suppressed"
       : "global spectral fingerprint; provisional wavelength-order spatial proxy",
     event_interpretation: trainedModelReady
-      ? temporalModelActive
+      ? allSourceBetaActive
+        ? "optical-only contact, position, and continuous Fz estimate"
+        : temporalModelActive
         ? "temporal model position and approximate manual response level"
         : "model-driven manual fingertip position and approximate response level"
       : modelPrimaryBlocked
@@ -7650,7 +8214,12 @@ function normalizeGlobalSpectrumFrame(frame) {
           : "trained_static_spectral_model_blocked"
         : "spectral_proxy",
     model_position_confidence: trainedPrediction?.position?.confidence ?? null,
-    model_force_confidence: trainedPrediction?.force_level?.confidence ?? null,
+    model_force_confidence: allSourceBetaActive
+      ? null
+      : trainedPrediction?.force_level?.confidence ?? null,
+    estimated_force_fz_n: allSourceBetaActive
+      ? Number(trainedPrediction?.estimated_force_fz_n ?? trainedPrediction?.force_fz?.estimated_n)
+      : null,
   };
   const rawQaStatus = String(rawRecord?.qa_status || "").toLowerCase();
   const rawQaFlags = Array.isArray(rawRecord?.qa_flags) ? rawRecord.qa_flags : [];
@@ -7700,17 +8269,21 @@ function normalizeGlobalSpectrumFrame(frame) {
         ? "uncertain"
         : !baselineReady
           ? "baseline_required"
-          : !sourceFresh
+          : !sourceUsable
             ? "stale_frame"
             : responseLevelFromSurfaceValue(proxyResponseRatio),
     response_allowed: responseAllowed,
     response_block_reason: responseBlockReason,
     baseline_status: trainedModelReady
-      ? temporalModelActive
+      ? allSourceBetaActive
+        ? "all_source_optical_force_baseline_ready"
+        : temporalModelActive
         ? "temporal_model_window_ready"
         : "static_model_full_spectrum_baseline_ready"
       : modelPrimaryBlocked
-        ? temporalModelActive
+        ? allSourceBetaActive
+          ? "all_source_optical_force_baseline_required"
+          : temporalModelActive
           ? "temporal_model_window_warming_or_baseline_required"
           : "static_model_full_spectrum_baseline_required"
       : baselineReady
@@ -7725,9 +8298,9 @@ function normalizeGlobalSpectrumFrame(frame) {
       : validPeaks.length !== GLOBAL_CANDIDATE_IDS.length
         ? "warning"
         : baselineReady
-          ? sourceFresh
-            ? "ok"
-            : "stale_frame"
+            ? sourceUsable
+              ? "ok"
+              : "stale_frame"
           : "global_candidate_baseline_required",
     qa_flags: [
       ...new Set([
@@ -7739,7 +8312,8 @@ function normalizeGlobalSpectrumFrame(frame) {
     diagnostic_only_qa_flags: diagnosticOnlyRawQaFlags,
     carrier_qa_flags: rawQaFlags,
     global_frame_qa: globalFrameQa,
-    source_fresh: sourceFresh,
+    source_fresh: globalFrameQa.source_fresh === true,
+    operator_display_valid: sourceUsable,
     frame_age_sec: globalFrameQa.frame_age_sec ?? frame.frame_age_sec ?? null,
     formal_recognition_allowed: globalFrameQa.formal_recognition_allowed === true,
     blockers,
@@ -7753,9 +8327,21 @@ function normalizeGlobalSpectrumFrame(frame) {
     active_spectral_model_progress: frame?.active_spectral_model_progress || null,
     model_position_id: trainedModelReady ? trainedPrediction?.position?.label || null : null,
     model_position_confidence: trainedModelReady ? trainedPrediction?.position?.confidence ?? null : null,
-    model_force_level: trainedModelReady ? trainedPrediction?.force_level?.label || null : null,
-    model_force_confidence: trainedModelReady ? trainedPrediction?.force_level?.confidence ?? null : null,
-    model_force_scope: trainedModelReady ? trainedPrediction?.force_model_scope || null : null,
+    model_force_level: trainedModelReady && !allSourceBetaActive
+      ? trainedPrediction?.force_level?.label || null
+      : null,
+    model_force_confidence: trainedModelReady && !allSourceBetaActive
+      ? trainedPrediction?.force_level?.confidence ?? null
+      : null,
+    model_force_scope: trainedModelReady && !allSourceBetaActive
+      ? trainedPrediction?.force_model_scope || null
+      : null,
+    estimated_force_fz_n: trainedModelReady && allSourceBetaActive
+      ? Number(trainedPrediction?.estimated_force_fz_n ?? trainedPrediction?.force_fz?.estimated_n)
+      : null,
+    optical_force_estimate: trainedModelReady && allSourceBetaActive
+      ? trainedPrediction?.force_fz || null
+      : null,
     model_review_needed: modelReviewNeeded,
     model_uncertainty_reasons: trainedModelReady
       ? trainedPrediction?.uncertainty?.reasons || []
@@ -7763,7 +8349,9 @@ function normalizeGlobalSpectrumFrame(frame) {
   };
   const arrayFrame = {
     mode: trainedModelReady
-      ? temporalModelActive
+      ? allSourceBetaActive
+        ? "all_source_optical_force_position"
+        : temporalModelActive
         ? "dynamic_temporal_validation_position_level"
         : "trained_static_spectral_position_level"
       : modelPrimaryBlocked
@@ -7787,7 +8375,9 @@ function normalizeGlobalSpectrumFrame(frame) {
     physical_channel_mapping_final: false,
     trained_position_label_mapping_available: trainedModelReady,
     surface_visualization_semantics: trainedModelReady
-      ? "predicted_broad_fingertip_proxy_not_measured_pressure"
+      ? allSourceBetaActive
+        ? "continuous_optical_fz_proxy_not_measured_force_field"
+        : "predicted_broad_fingertip_proxy_not_measured_pressure"
       : modelPrimaryBlocked
         ? "no_contact_until_trained_model_baseline_ready"
       : "provisional_wavelength_order_proxy_not_measured_pressure",
@@ -7798,6 +8388,9 @@ function normalizeGlobalSpectrumFrame(frame) {
     trained_static_spectral_prediction: trainedPrediction,
     active_spectral_prediction: trainedPrediction,
     active_spectral_model_source: activeModelSource,
+    estimated_force_fz_n: allSourceBetaActive
+      ? Number(trainedPrediction?.estimated_force_fz_n ?? trainedPrediction?.force_fz?.estimated_n)
+      : null,
   };
   return {
     ...frame,
@@ -7818,6 +8411,47 @@ function sourceFrameRenderKey(rawFrame) {
   const source = latest.source ?? rawFrame?.source ?? "unknown";
   if (frameId == null && timestamp == null) return null;
   return `${source}|${String(frameId ?? "")}|${String(timestamp ?? "")}`;
+}
+
+function invalidateLiveSourceProbe() {
+  state.liveSourceProbeController?.abort();
+  state.liveSourceProbeController = null;
+  state.liveSourceProbeInFlight = false;
+}
+
+async function reconcileLiveSourceState({ force = false } = {}) {
+  if (!state.pageVisible) return false;
+  const now = performance.now();
+  if (!force && now < state.nextLiveSourceProbeAt) {
+    return state.exportWatchActive || state.sdkLiveActive;
+  }
+  if (state.liveSourceProbeInFlight) {
+    return state.exportWatchActive || state.sdkLiveActive;
+  }
+
+  state.nextLiveSourceProbeAt = now + LIVE_SOURCE_PROBE_INTERVAL_MS;
+  state.liveSourceProbeInFlight = true;
+  const controller = new AbortController();
+  state.liveSourceProbeController = controller;
+  try {
+    const payload = await requestJSON(
+      "/api/frame?trace_limit=1&include_spectrum=false",
+      { cache: "no-store" },
+      { timeoutMs: 4000, signal: controller.signal }
+    );
+    updateWatcherUI(payload?.export_watcher || {}, payload?.sdk_live || {});
+    return state.exportWatchActive || state.sdkLiveActive;
+  } catch (error) {
+    if (error?.name !== "AbortError") {
+      console.warn("[live source probe]", error);
+    }
+    return state.exportWatchActive || state.sdkLiveActive;
+  } finally {
+    if (state.liveSourceProbeController === controller) {
+      state.liveSourceProbeController = null;
+    }
+    state.liveSourceProbeInFlight = false;
+  }
 }
 
 async function fetchFrame({ force = false } = {}) {
@@ -7880,6 +8514,9 @@ async function fetchFrame({ force = false } = {}) {
         { cache: "no-store" },
         { timeoutMs: 7000, signal: requestController.signal }
       );
+      if (data?.ok === false || !data?.array_frame) {
+        throw new Error(data?.reason || data?.status || "Simulated response is unavailable.");
+      }
       if (requestEpoch !== state.frameModeEpoch) return;
       if (!actionFinished) {
         state.arrayDemoStep += 1;
@@ -7905,7 +8542,8 @@ async function fetchFrame({ force = false } = {}) {
       return;
     }
     if (!state.dataStreamActive && !state.demoModeActive && !state.exportWatchActive && !state.sdkLiveActive && !state.liveRequested) {
-      return;
+      const sourceActive = await reconcileLiveSourceState({ force });
+      if (!sourceActive) return;
     }
     const traceLimit = state.demoModeActive ? DEMO_TRACE_WINDOW_POINTS : TRACE_WINDOW_POINTS;
     const temporalValidation = state.temporalValidationMode ? "true" : "false";
@@ -7985,12 +8623,190 @@ async function requestJSON(url, options = {}, { timeoutMs = 10000, signal = null
   }
 }
 
+function renderSpectrumProcessingStatus(payload = state.spectrumProcessing) {
+  const status = payload?.spectrum_processing || payload || {};
+  const settings = {
+    ...(state.spectrumProcessing?.settings || {}),
+    ...(status.settings || {}),
+  };
+  state.spectrumProcessing = {
+    ...state.spectrumProcessing,
+    ...status,
+    settings,
+  };
+
+  if (spectrumIntegrationSelect) {
+    spectrumIntegrationSelect.value = String(Number(settings.integration_us) || 5000);
+  }
+  if (spectrumOverlayToggle) {
+    spectrumOverlayToggle.checked = Boolean(settings.update_overlay_data);
+  }
+  if (spectrumBackgroundToggle) {
+    spectrumBackgroundToggle.checked = Boolean(settings.subtract_background);
+  }
+  if (spectrumBaselineToggle) {
+    spectrumBaselineToggle.checked = Boolean(settings.baseline_correction);
+  }
+  if (spectrumSmoothingToggle) {
+    spectrumSmoothingToggle.checked = Boolean(settings.spectrum_smoothing);
+  }
+  if (spectrumNormalizationToggle) {
+    spectrumNormalizationToggle.checked = Boolean(settings.normalize_spectrum);
+  }
+
+  const enabledSteps = [];
+  if (settings.baseline_correction) enabledSteps.push("baseline");
+  if (settings.spectrum_smoothing) enabledSteps.push("smooth");
+  if (settings.update_overlay_data) enabledSteps.push("overlay");
+  if (settings.subtract_background) enabledSteps.push("dark");
+  if (settings.normalize_spectrum) {
+    const normalizationStatus = String(
+      state.frame?.latest?.spectrum_normalization?.status || ""
+    );
+    enabledSteps.unshift(
+      ["ready", "ready_with_invalid_reference_points"].includes(normalizationStatus)
+        ? "I/I0"
+        : "I/I0 waiting"
+    );
+  }
+  if (spectrumProcessingStatus) {
+    spectrumProcessingStatus.textContent = enabledSteps.length
+      ? `Display: ${enabledSteps.join(" + ")}`
+      : "Display: raw";
+    spectrumProcessingStatus.title =
+      "Recognition retains raw intensity. Recording keeps raw counts and adds I0 plus I/I0 when the no-contact reference is ready.";
+  }
+  if (spectrumBackgroundStatus) {
+    spectrumBackgroundStatus.textContent = status.background_reference_ready
+      ? `Dark: ${status.background_reference_points || "ready"} points`
+      : "Dark: none";
+  }
+}
+
+async function loadSpectrumProcessingStatus() {
+  try {
+    const payload = await requestJSON(
+      "/api/spectrum_processing/status",
+      { cache: "no-store" },
+      { timeoutMs: 4000 }
+    );
+    renderSpectrumProcessingStatus(payload);
+    return payload;
+  } catch (error) {
+    console.warn("[spectrum processing status]", error);
+    renderSpectrumProcessingStatus();
+    return null;
+  }
+}
+
+async function loadRuntimeCapabilities() {
+  try {
+    const payload = await requestJSON(
+      "/api/health",
+      { cache: "no-store" },
+      { timeoutMs: 4000 }
+    );
+    state.betaForceDisplayEnabled = Boolean(
+      payload?.all_source_beta_primary === true &&
+      payload?.all_source_beta_model?.enabled === true
+    );
+    return payload;
+  } catch (error) {
+    console.warn("[runtime capabilities]", error);
+    state.betaForceDisplayEnabled = false;
+    return null;
+  }
+}
+
+async function updateSpectrumProcessingSettings(updates, { restartLive = false } = {}) {
+  const payload = await requestJSON(
+    "/api/spectrum_processing/settings",
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    },
+    { timeoutMs: 5000 }
+  );
+  renderSpectrumProcessingStatus(payload);
+
+  if (restartLive && state.sdkLiveActive) {
+    const channel = encodeURIComponent(state.selectedChannel);
+    const integration = Number(
+      payload?.spectrum_processing?.settings?.integration_us
+      || state.spectrumProcessing?.settings?.integration_us
+      || 5000
+    );
+    const livePayload = await requestJSON(
+      `/api/live/start?channel_id=${channel}&interval_sec=0.1&integration=${integration}&control_sense=false&source=direct_sdk`,
+      { method: "POST" },
+      { timeoutMs: 12000 }
+    );
+    updateWatcherUI(livePayload?.watcher || {}, livePayload?.sdk_live || {});
+    await fetchFrame({ force: true });
+  }
+  return payload;
+}
+
 async function postJSON(url, payload = {}) {
   return requestJSON(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+}
+
+async function loadMfbgProfileStatus() {
+  try {
+    const payload = await requestJSON(
+      "/api/mfbg-intensity/profiles",
+      { cache: "no-store" },
+      { timeoutMs: 4000 }
+    );
+    const profiles = payload?.profiles || {};
+    const current = profiles[payload?.active_runtime_profile] || {};
+    const future = profiles[payload?.future_primary_profile] || {};
+    const currentProfileId = String(payload?.active_runtime_profile || "");
+    const currentIsMfbg =
+      current.sensor_family === "micro_fiber_bragg_grating" ||
+      currentProfileId.toLowerCase().startsWith("mfbg");
+    const currentProfileLabel = currentIsMfbg ? "mFBG intensity" : "Ordinary FBG";
+    setText("surfaceModeChip", currentProfileLabel);
+    const sensorProfileStatusItem = document.getElementById("sensorProfileStatusItem");
+    if (sensorProfileStatusItem) {
+      sensorProfileStatusItem.title = currentIsMfbg
+        ? "Active profile: mFBG optical intensity."
+        : "Active profile: Ordinary FBG. mFBG intensity profile is integrated and awaiting real calibration.";
+    }
+    setText(
+      "mfbgCurrentRuntime",
+      currentProfileLabel
+    );
+    setText("mfbgFuturePrimary", future.display_name || "mFBG 3x3");
+    setText(
+      "mfbgSignalMode",
+      future.demodulation_mode === "spectral_window_intensity"
+        ? "Optical intensity"
+        : future.demodulation_mode || "Pending"
+    );
+    setText(
+      "mfbgRealArrayStatus",
+      future.real_3x3_enabled ? "Enabled" : "Disabled"
+    );
+    const realArrayStatus = document.getElementById("mfbgRealArrayStatus");
+    if (realArrayStatus) {
+      realArrayStatus.dataset.healthTone = future.real_3x3_enabled ? "ok" : "warning";
+    }
+  } catch {
+    setText("surfaceModeChip", "Ordinary FBG");
+    const sensorProfileStatusItem = document.getElementById("sensorProfileStatusItem");
+    if (sensorProfileStatusItem) {
+      sensorProfileStatusItem.title = "Active sensor profile. Profile status is temporarily unavailable.";
+    }
+    setText("mfbgFuturePrimary", "mFBG profile unavailable");
+    setText("mfbgSignalMode", "--");
+    setText("mfbgRealArrayStatus", "Disabled");
+  }
 }
 
 function commandErrorMessage(error, fallback = "Command failed") {
@@ -8096,6 +8912,9 @@ channelSelect.addEventListener("change", () => {
 });
 
 baselineButton.addEventListener("click", () => {
+  if (!window.confirm("Confirm that the tactile surface is fully released and stable.")) {
+    return;
+  }
   runCommand({
     id: "baseline",
     button: baselineButton,
@@ -8119,7 +8938,7 @@ baselineButton.addEventListener("click", () => {
       resetTrainedModelTraceHistory();
       state.dataStreamActive = true;
       const result = await requestJSON(
-        "/api/global_candidate_baseline?minimum_frames=30",
+        "/api/global_candidate_baseline?minimum_frames=30&no_contact_attested=true&attested_by=operator_ui",
         { method: "POST" },
         { timeoutMs: 12000 }
       );
@@ -8206,8 +9025,9 @@ liveTwinButton.addEventListener("click", () => {
           resetTrainedModelTraceHistory();
           const source = inputSourceSelect.value === "export_watch" ? "export_watch" : "direct_sdk";
           const controlSense = source === "export_watch" ? "true" : "false";
+          const integration = Number(state.spectrumProcessing?.settings?.integration_us) || 5000;
           await requestJSON(
-            `/api/live/start?channel_id=${channel}&interval_sec=0.1&control_sense=${controlSense}&source=${source}`,
+            `/api/live/start?channel_id=${channel}&interval_sec=0.1&integration=${integration}&control_sense=${controlSense}&source=${source}`,
             { method: "POST" },
             { timeoutMs: 12000 }
           );
@@ -8304,7 +9124,7 @@ arrayDemoStepButtons.forEach((button) => {
     await runDemoTransition(
       () => injectArrayDemoFrame(button.dataset.arrayScenario || "center_press", {
         resetTrajectory: true,
-        playbackMode: "loop",
+        playbackMode: "single",
       }),
       button
     );
@@ -8499,7 +9319,9 @@ demoSpeedControl?.addEventListener("input", () => {
 });
 
 settingsButton?.addEventListener("click", () => {
-  setSettingsPanelOpen(!settingsPanel?.classList.contains("open"));
+  const willOpen = !settingsPanel?.classList.contains("open");
+  setSettingsPanelOpen(willOpen);
+  if (willOpen) void loadSpectrumProcessingStatus();
 });
 
 settingsCloseButton?.addEventListener("click", () => {
@@ -8524,6 +9346,95 @@ settingsSurfaceOnlyButton?.addEventListener("click", () => {
 settingsResetCameraButton?.addEventListener("click", () => {
   applyThumbCameraConfig();
   state.threeNeedsRefresh = true;
+});
+
+spectrumIntegrationSelect?.addEventListener("change", async () => {
+  spectrumIntegrationSelect.disabled = true;
+  try {
+    const integrationUs = Number(spectrumIntegrationSelect.value) || 5000;
+    await updateSpectrumProcessingSettings(
+      { integration_us: integrationUs },
+      { restartLive: true }
+    );
+    setCommandFeedback(
+      `Exposure set to ${(integrationUs / 1000).toFixed(0)} ms.`,
+      "success",
+      { autoHideMs: 2400 }
+    );
+  } catch (error) {
+    console.error("[spectrum exposure]", error);
+    setCommandFeedback(commandErrorMessage(error, "Exposure update failed"), "error", {
+      autoHideMs: 7000,
+    });
+    await loadSpectrumProcessingStatus();
+  } finally {
+    spectrumIntegrationSelect.disabled = false;
+  }
+});
+
+[
+  [spectrumOverlayToggle, "update_overlay_data"],
+  [spectrumBackgroundToggle, "subtract_background"],
+  [spectrumBaselineToggle, "baseline_correction"],
+  [spectrumSmoothingToggle, "spectrum_smoothing"],
+  [spectrumNormalizationToggle, "normalize_spectrum"],
+].forEach(([control, settingName]) => {
+  control?.addEventListener("change", async () => {
+    control.disabled = true;
+    try {
+      await updateSpectrumProcessingSettings({ [settingName]: control.checked });
+    } catch (error) {
+      console.error(`[spectrum setting: ${settingName}]`, error);
+      setCommandFeedback(commandErrorMessage(error, "Spectrum display update failed"), "error", {
+        autoHideMs: 7000,
+      });
+      await loadSpectrumProcessingStatus();
+    } finally {
+      control.disabled = false;
+    }
+  });
+});
+
+spectrumCaptureBackgroundButton?.addEventListener("click", async () => {
+  spectrumCaptureBackgroundButton.disabled = true;
+  try {
+    const payload = await requestJSON(
+      "/api/spectrum_processing/background/capture",
+      { method: "POST" },
+      { timeoutMs: 5000 }
+    );
+    renderSpectrumProcessingStatus(payload);
+    setCommandFeedback(
+      "Dark frame captured. Enable Subtract background when appropriate.",
+      "success",
+      { autoHideMs: 3200 }
+    );
+  } catch (error) {
+    setCommandFeedback(commandErrorMessage(error, "Dark-frame capture failed"), "error", {
+      autoHideMs: 7000,
+    });
+  } finally {
+    spectrumCaptureBackgroundButton.disabled = false;
+  }
+});
+
+spectrumClearBackgroundButton?.addEventListener("click", async () => {
+  spectrumClearBackgroundButton.disabled = true;
+  try {
+    const payload = await requestJSON(
+      "/api/spectrum_processing/background/clear",
+      { method: "POST" },
+      { timeoutMs: 5000 }
+    );
+    renderSpectrumProcessingStatus(payload);
+    setCommandFeedback("Dark frame cleared.", "success", { autoHideMs: 2200 });
+  } catch (error) {
+    setCommandFeedback(commandErrorMessage(error, "Unable to clear dark frame"), "error", {
+      autoHideMs: 7000,
+    });
+  } finally {
+    spectrumClearBackgroundButton.disabled = false;
+  }
 });
 
 settingsTemporalValidationButton?.addEventListener("click", () => {
@@ -8917,8 +9828,13 @@ window.addEventListener("resize", () => {
 function handlePageVisibilityChange() {
   state.pageVisible = document.visibilityState !== "hidden";
   if (!state.pageVisible) {
+    if (state.animationFrameId !== null) {
+      cancelAnimationFrame(state.animationFrameId);
+      state.animationFrameId = null;
+    }
     state.forcedFrameRequestQueued = false;
     invalidateFrameRequestContext();
+    invalidateLiveSourceProbe();
     invalidatePx6dReferenceRequest();
     invalidatePx6dCaptureStatusPoll();
     state.lastThreeFrameMs = 0;
@@ -8930,14 +9846,36 @@ function handlePageVisibilityChange() {
   state.lastChartUpdateMs = 0;
   state.lastGeometryUpdateMs = 0;
   state.nextLiveModelPollAt = 0;
+  state.nextLiveSourceProbeAt = 0;
   state.chartsNeedRefresh = true;
   state.threeNeedsRefresh = true;
+  requestThreeAnimation();
   fetchFrame({ force: true });
   fetchPx6dReference();
   fetchPx6dCaptureStatus();
 }
 
 document.addEventListener("visibilitychange", handlePageVisibilityChange);
+
+function disposeThreeRuntime() {
+  if (state.animationFrameId !== null) {
+    cancelAnimationFrame(state.animationFrameId);
+    state.animationFrameId = null;
+  }
+  if (state.frameSchedulerId) window.clearInterval(state.frameSchedulerId);
+  if (state.px6dSchedulerId) window.clearInterval(state.px6dSchedulerId);
+  if (state.px6dCaptureSchedulerId) window.clearInterval(state.px6dCaptureSchedulerId);
+  state.frameRequestController?.abort();
+  invalidateLiveSourceProbe();
+  state.px6dRequestController?.abort();
+  state.px6dCapturePollController?.abort();
+  controls?.dispose();
+  disposeObject3D(scene);
+  renderer?.dispose();
+  renderer?.forceContextLoss?.();
+}
+
+window.addEventListener("beforeunload", disposeThreeRuntime, { once: true });
 
 function startClientSchedulers() {
   if (state.clientSchedulersStarted) return;
@@ -8954,7 +9892,10 @@ async function boot() {
   if (state.bootStarted) return;
   state.bootStarted = true;
   initializeDiagnosticsPanelResize();
-  await loadThumbSceneConfig();
+  await Promise.all([
+    loadThumbSceneConfig(),
+    loadRuntimeCapabilities(),
+  ]);
   setDemoPlaybackRate(state.demoPlaybackRate, { persist: false });
   updateRecognitionValidationMode(state.temporalValidationMode, {
     announce: false,
@@ -8970,8 +9911,14 @@ async function boot() {
   const idleFrame = makeIdleFrame();
   state.frame = idleFrame;
   updateUI(idleFrame);
+  await loadSpectrumProcessingStatus();
+  void loadMfbgProfileStatus();
   await fetchPx6dReference();
   await fetchPx6dCaptureStatus();
+  const liveSourceActive = await reconcileLiveSourceState({ force: true });
+  if (liveSourceActive) {
+    await fetchFrame({ force: true });
+  }
   startClientSchedulers();
   state.bootComplete = true;
 }

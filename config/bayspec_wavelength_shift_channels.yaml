@@ -13,6 +13,22 @@ app:
   calibrated_pressure_output: false
   strain_temperature_decoupled: false
 
+hardware:
+  sense_root: "D:/APPs/Sense 2020 V1.6.3.3/Sense 2020 V1.6.3.3"
+  sense_export_subdirectory: Spectrum_Data
+  device_id: F1871328
+  sense_root_environment_variable: TOUCH_SENSE_ROOT
+  device_id_environment_variable: TOUCH_BAYSPEC_DEVICE_ID
+  require_wavelength_grid_for_formal_recognition: true
+
+spectrum_normalization:
+  enabled: true
+  method: no_contact_baseline_ratio
+  minimum_reference_counts: 100.0
+  minimum_valid_fraction: 0.80
+  output_field: normalized_intensity_ratio
+  model_input_source: raw_intensity
+
 # Operator response bands use the normalized visual-response proxy. They are
 # display/interaction levels only and are not calibrated force thresholds.
 # The light band is intentionally shifted upward and widened so weak residual

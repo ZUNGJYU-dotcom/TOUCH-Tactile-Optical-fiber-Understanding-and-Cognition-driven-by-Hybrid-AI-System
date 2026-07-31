@@ -61,8 +61,23 @@ class OperatorIconSimplificationContractTests(unittest.TestCase):
         self.assertNotIn("background: #f5f5f7", structural_pass)
         self.assertNotIn("background: #0071e3", structural_pass)
         self.assertIn("Surface Summary", self.html)
-        self.assertIn("Global FBG Fingerprint", self.html)
+        self.assertIn("Contact Map", self.html)
         self.assertIn("Optical Response", self.html)
+
+    def test_operator_contact_map_discloses_shared_proxy_scope(self) -> None:
+        self.assertIn(
+            '<div id="footprintTitle" class="section-label">Shared 3x3 Contact Map</div>',
+            self.html,
+        )
+        self.assertGreaterEqual(
+            self.app_js.count('setText("footprintTitle", "Shared 3x3 Contact Map")'),
+            1,
+        )
+        self.assertIn(
+            "One response is mirrored across the five fingertip views",
+            self.html,
+        )
+        self.assertNotIn('setText("footprintTitle", `${scope} 9-FBG Fingerprint`)', self.app_js)
 
 
 if __name__ == "__main__":

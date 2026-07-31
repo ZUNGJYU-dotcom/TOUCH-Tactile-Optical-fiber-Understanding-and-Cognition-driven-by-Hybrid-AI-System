@@ -46,6 +46,8 @@ SUMMARY_FIELDS = [
     "sync_method",
     "sync_quality",
     "sync_offset_ms",
+    "sync_within_target",
+    "calibration_sync_ok",
     "force_sample_count",
     "fx_raw_n",
     "fy_raw_n",
@@ -103,6 +105,10 @@ SPECTRUM_FIELDS = [
     "point_index",
     "wavelength_nm",
     "intensity_counts",
+    "baseline_intensity_counts",
+    "normalized_intensity_ratio",
+    "normalization_method",
+    "normalization_status",
     "position_label",
     "action_label",
     "trial_id",
@@ -145,6 +151,8 @@ FORCE_FIELDS = [
     "sync_method",
     "sync_quality",
     "sync_offset_ms",
+    "sync_within_target",
+    "calibration_sync_ok",
     "force_sample_count",
     "force_sequence_start",
     "force_sequence_end",
@@ -265,6 +273,39 @@ def _csv_rows_block(rows: list[dict[str, Any]], fieldnames: list[str]) -> str:
     return buffer.getvalue()
 
 
+def _flush_and_sync(handle: Any) -> None:
+    """Flush Python and operating-system buffers when the handle is durable."""
+    handle.flush()
+    try:
+        file_descriptor = handle.fileno()
+    except (AttributeError, io.UnsupportedOperation, OSError):
+        # StringIO and other in-memory test handles have no durable backing.
+        return
+    os.fsync(file_descriptor)
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.parent / (
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    encoded = json.dumps(
+        _sanitize_serializable(payload),
+        ensure_ascii=False,
+        indent=2,
+        default=_json_default,
+        allow_nan=False,
+    )
+    try:
+        with temporary_path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(encoded)
+            _flush_and_sync(handle)
+        os.replace(temporary_path, path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
 def _write_text_transaction(writes: list[tuple[Any, str]]) -> None:
     """Best-effort all-or-nothing append across the files for one capture frame."""
     checkpoints: list[tuple[Any, int]] = []
@@ -273,14 +314,14 @@ def _write_text_transaction(writes: list[tuple[Any, str]]) -> None:
         for handle, payload in writes:
             handle.write(payload)
         for handle, _payload in writes:
-            handle.flush()
+            _flush_and_sync(handle)
     except BaseException as exc:
         rollback_errors: list[str] = []
         for handle, checkpoint in checkpoints:
             try:
                 handle.seek(checkpoint)
                 handle.truncate()
-                handle.flush()
+                _flush_and_sync(handle)
             except BaseException as rollback_exc:
                 rollback_errors.append(
                     f"{type(rollback_exc).__name__}: {rollback_exc}"
@@ -304,6 +345,7 @@ class OpticalForceCaptureManager:
         force_provider: Callable[[dict[str, Any] | None], dict[str, Any]],
         force_status_provider: Callable[[], dict[str, Any]],
         model_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        provenance_provider: Callable[[], dict[str, Any]] | None = None,
         poll_interval_sec: float = 0.05,
         require_software_tare: bool = True,
     ) -> None:
@@ -312,6 +354,7 @@ class OpticalForceCaptureManager:
         self.force_provider = force_provider
         self.force_status_provider = force_status_provider
         self.model_provider = model_provider
+        self.provenance_provider = provenance_provider
         self.poll_interval_sec = max(0.01, min(1.0, float(poll_interval_sec)))
         self.require_software_tare = bool(require_software_tare)
         self._lock = threading.RLock()
@@ -321,6 +364,11 @@ class OpticalForceCaptureManager:
         self._start_cancel_requested = False
         self._start_done_event = threading.Event()
         self._start_done_event.set()
+        self._provenance_at_start: dict[str, Any] | None = None
+        self._provenance_start_error: str | None = None
+        self._provenance_latest: dict[str, Any] | None = None
+        self._provenance_latest_error: str | None = None
+        self._recovered_interrupted_sessions = self._recover_interrupted_sessions()
         self._state = self._idle_state()
 
     def _idle_state(self) -> dict[str, Any]:
@@ -351,13 +399,118 @@ class OpticalForceCaptureManager:
             "invalid_force_samples": 0,
             "timeline_timestamp_fallbacks": 0,
             "frames_missing_force_reference": 0,
+            "frames_outside_force_sync_tolerance": 0,
             "last_spectrum_frame_id": None,
             "last_sync_quality": None,
             "last_sync_offset_ms": None,
             "maximum_absolute_sync_offset_ms": None,
             "timeline_start_epoch_sec": None,
             "last_error": None,
+            "recovered_interrupted_session_count": len(
+                getattr(self, "_recovered_interrupted_sessions", [])
+            ),
+            "recovered_interrupted_session_ids": list(
+                getattr(self, "_recovered_interrupted_sessions", [])
+            ),
         }
+
+    def _recover_interrupted_sessions(self) -> list[str]:
+        """Mark sessions left active by an earlier process as interrupted."""
+        if not self.output_root.is_dir():
+            return []
+        active_statuses = {
+            "waiting_for_optical_frame",
+            "waiting_for_force_sample",
+            "waiting_for_force_reference",
+            "recording_selected_streams",
+            "force_sync_outside_calibration_tolerance",
+            "invalid_optical_frame",
+            "invalid_force_sample",
+        }
+        recovered: list[str] = []
+        for output_dir in sorted(self.output_root.iterdir()):
+            if not output_dir.is_dir():
+                continue
+            metadata_path = output_dir / "session_metadata.json"
+            if not metadata_path.is_file():
+                continue
+            try:
+                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            capture_status = str(payload.get("capture_status") or "")
+            if not bool(payload.get("running")) and capture_status not in active_statuses:
+                continue
+            recovered_at = time.time()
+            session_id = str(payload.get("session_id") or output_dir.name)
+            recovery = {
+                "detected_at_epoch_sec": recovered_at,
+                "previous_capture_status": capture_status or None,
+                "reason": "previous_process_terminated_before_clean_stop",
+            }
+            payload.update(
+                {
+                    "running": False,
+                    "capture_status": "interrupted_recovered",
+                    "ended_at_epoch_sec": payload.get("ended_at_epoch_sec")
+                    or recovered_at,
+                    "last_error": payload.get("last_error")
+                    or "previous_process_terminated_before_clean_stop",
+                    "recovery": recovery,
+                }
+            )
+            try:
+                _write_json_atomic(metadata_path, payload)
+                _write_json_atomic(
+                    output_dir / "capture_journal.json",
+                    {
+                        "schema_version": "touch_capture_journal_v1",
+                        "session_id": session_id,
+                        "running": False,
+                        "capture_status": "interrupted_recovered",
+                        "captured_timeline_frames": int(
+                            payload.get("captured_timeline_frames") or 0
+                        ),
+                        "last_spectrum_frame_id": payload.get(
+                            "last_spectrum_frame_id"
+                        ),
+                        "updated_at_epoch_sec": recovered_at,
+                        "recovery": recovery,
+                    },
+                )
+            except OSError:
+                continue
+            recovered.append(session_id)
+        return recovered
+
+    def _journal_payload_locked(self) -> dict[str, Any]:
+        return {
+            "schema_version": "touch_capture_journal_v1",
+            "session_id": self._state.get("session_id"),
+            "running": bool(self._state.get("running")),
+            "capture_status": self._state.get("capture_status"),
+            "captured_timeline_frames": int(
+                self._state.get("captured_timeline_frames") or 0
+            ),
+            "captured_paired_frames": int(
+                self._state.get("captured_paired_frames") or 0
+            ),
+            "started_at_epoch_sec": self._state.get("started_at_epoch_sec"),
+            "ended_at_epoch_sec": self._state.get("ended_at_epoch_sec"),
+            "last_spectrum_frame_id": self._state.get("last_spectrum_frame_id"),
+            "last_sync_offset_ms": self._state.get("last_sync_offset_ms"),
+            "last_error": self._state.get("last_error"),
+            "updated_at_epoch_sec": time.time(),
+        }
+
+    def _write_journal_locked(self) -> None:
+        output_directory = self._state.get("output_directory")
+        if not output_directory:
+            return
+        _write_json_atomic(
+            Path(str(output_directory)) / "capture_journal.json",
+            self._journal_payload_locked(),
+        )
 
     @staticmethod
     def _normalize_selected_outputs(values: Any) -> list[str]:
@@ -477,6 +630,17 @@ class OpticalForceCaptureManager:
         with self._lock:
             return self._start_cancel_requested
 
+    def _snapshot_provenance(self) -> tuple[dict[str, Any] | None, str | None]:
+        if self.provenance_provider is None:
+            return None, "provenance_provider_not_configured"
+        try:
+            snapshot = self.provenance_provider()
+            if not isinstance(snapshot, dict):
+                raise TypeError("provenance provider must return a dictionary")
+            return _sanitize_serializable(snapshot), None
+        except Exception as exc:
+            return None, f"{type(exc).__name__}: {exc}"
+
     def _cancelled_start_result(self, output_dir: Path | None = None) -> dict[str, Any]:
         if output_dir is not None:
             try:
@@ -559,6 +723,7 @@ class OpticalForceCaptureManager:
             output_dir = selected_output_root / session_id
             suffix += 1
         output_dir.mkdir(parents=True, exist_ok=False)
+        provenance_at_start, provenance_start_error = self._snapshot_provenance()
 
         with self._lock:
             if self._start_cancel_requested:
@@ -581,7 +746,30 @@ class OpticalForceCaptureManager:
                 "operator_note": str(operator_note or ""),
                 "selected_outputs": selected,
             }
+            self._provenance_at_start = provenance_at_start
+            self._provenance_start_error = provenance_start_error
+            self._provenance_latest = provenance_at_start
+            self._provenance_latest_error = provenance_start_error
             self._stop_event.clear()
+            try:
+                self._write_metadata_locked(
+                    refresh_provenance=False,
+                    session_initialized=True,
+                )
+                self._write_journal_locked()
+            except Exception as exc:
+                self._state["running"] = False
+                self._state["capture_status"] = "capture_error"
+                self._state["ended_at_epoch_sec"] = time.time()
+                self._state["last_error"] = (
+                    "capture_session_initialization_failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                return {
+                    "ok": False,
+                    "status": "capture_session_initialization_failed",
+                    **self.status(),
+                }
             worker = threading.Thread(
                 target=self._run,
                 args=(output_dir,),
@@ -599,6 +787,7 @@ class OpticalForceCaptureManager:
                 self._state["last_error"] = f"capture_thread_start_failed: {type(exc).__name__}: {exc}"
                 try:
                     self._write_metadata_locked()
+                    self._write_journal_locked()
                 except Exception as metadata_exc:
                     self._state["last_error"] += (
                         "; metadata_write_failed: "
@@ -663,6 +852,7 @@ class OpticalForceCaptureManager:
                 self._state["capture_status"] = "no_paired_frames"
             try:
                 self._write_metadata_locked()
+                self._write_journal_locked()
             except Exception as exc:
                 metadata_error = f"metadata_write_failed: {type(exc).__name__}: {exc}"
                 existing_error = str(self._state.get("last_error") or "").strip()
@@ -710,6 +900,7 @@ class OpticalForceCaptureManager:
             "lossless_combined_frames": "synchronized_frames.jsonl",
             "compatibility_summary": "frame_summary.csv",
             "metadata": "session_metadata.json",
+            "recovery_journal": "capture_journal.json",
         }
         return payload
 
@@ -729,6 +920,7 @@ class OpticalForceCaptureManager:
         last_written_key: tuple[Any, ...] | None = None
         last_candidate_key: tuple[Any, ...] | None = None
         last_missing_force_key: tuple[Any, ...] | None = None
+        last_outside_sync_key: tuple[Any, ...] | None = None
         last_invalid_spectrum_key: tuple[Any, ...] | None = None
         last_invalid_force_key: tuple[Any, ...] | None = None
         try:
@@ -763,6 +955,15 @@ class OpticalForceCaptureManager:
                     )
                     force_writer = csv.DictWriter(force_handle, fieldnames=FORCE_FIELDS)
                     force_writer.writeheader()
+                for handle in (
+                    jsonl_handle,
+                    summary_handle,
+                    spectrum_handle,
+                    response_handle,
+                    force_handle,
+                ):
+                    if handle is not None:
+                        _flush_and_sync(handle)
                 while not self._stop_event.is_set():
                     latest: dict[str, Any] | None = None
                     wavelengths: list[Any] = []
@@ -823,15 +1024,35 @@ class OpticalForceCaptureManager:
                             self._increment("timeline_timestamp_fallbacks")
                         if "force" in selected:
                             force = dict(self.force_provider(latest) or {})
-                            force_ready = bool(force.get("ok")) and (
+                            force_available = bool(force.get("ok")) and (
                                 not self.require_software_tare or bool(force.get("tare_ready"))
                             )
-                            if not force_ready:
+                            if not force_available:
                                 if key != last_missing_force_key:
                                     self._increment("frames_missing_force_reference")
                                     last_missing_force_key = key
                                 self._set_status(
                                     str(force.get("status") or "waiting_for_force_reference")
+                                )
+                                self._stop_event.wait(self.poll_interval_sec)
+                                continue
+                            try:
+                                sync_offset_ms = float(force.get("sync_offset_ms"))
+                            except (TypeError, ValueError):
+                                sync_offset_ms = math.nan
+                            calibration_sync_valid = (
+                                force.get("calibration_sync_ok") is True
+                                and force.get("sync_within_target") is True
+                                and math.isfinite(sync_offset_ms)
+                            )
+                            if not calibration_sync_valid:
+                                if key != last_outside_sync_key:
+                                    self._increment(
+                                        "frames_outside_force_sync_tolerance"
+                                    )
+                                    last_outside_sync_key = key
+                                self._set_status(
+                                    "force_sync_outside_calibration_tolerance"
                                 )
                                 self._stop_event.wait(self.poll_interval_sec)
                                 continue
@@ -921,6 +1142,18 @@ class OpticalForceCaptureManager:
                             "timestamp_epoch_sec": key[2],
                             "wavelength_nm": wavelengths,
                             "intensity_counts": intensities,
+                            "baseline_intensity_counts": (
+                                latest.get(
+                                    "normalization_reference_intensity_counts"
+                                )
+                                or []
+                            ),
+                            "normalized_intensity_ratio": (
+                                latest.get("normalized_intensity_ratio") or []
+                            ),
+                            "normalization": (
+                                latest.get("spectrum_normalization") or {}
+                            ),
                             "spectrum_peaks": latest.get("spectrum_peaks") or [],
                         }
                     if "response" in selected:
@@ -1011,6 +1244,7 @@ class OpticalForceCaptureManager:
                                 else max(float(previous_max), absolute_offset)
                             )
                         self._state["capture_status"] = "recording_selected_streams"
+                        self._write_journal_locked()
                     self._stop_event.wait(self.poll_interval_sec)
         except Exception as exc:  # pragma: no cover - surfaced by API and metadata
             with self._lock:
@@ -1033,6 +1267,7 @@ class OpticalForceCaptureManager:
                 self._state["ended_at_epoch_sec"] = time.time()
                 try:
                     self._write_metadata_locked()
+                    self._write_journal_locked()
                 except Exception as exc:  # retain terminal state even if audit I/O fails
                     self._state["capture_status"] = "capture_error"
                     metadata_error = f"metadata_write_failed: {type(exc).__name__}: {exc}"
@@ -1046,31 +1281,51 @@ class OpticalForceCaptureManager:
     @staticmethod
     def _spectrum_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
         spectrum = record["spectrum"]
+        wavelengths = list(spectrum.get("wavelength_nm") or [])
+        intensities = list(spectrum.get("intensity_counts") or [])
+        baseline = list(spectrum.get("baseline_intensity_counts") or [])
+        normalized = list(spectrum.get("normalized_intensity_ratio") or [])
+        normalization = dict(spectrum.get("normalization") or {})
         labels = {
             "position_label": record["position_label"],
             "action_label": record["action_label"],
             "trial_id": record["trial_id"],
         }
-        return [
-            {
-                "capture_index": record["capture_index"],
-                "timeline_timestamp_epoch_sec": record["timeline_timestamp_epoch_sec"],
-                "elapsed_time_sec": record["elapsed_time_sec"],
-                "spectrum_timestamp_epoch_sec": spectrum.get("timestamp_epoch_sec"),
-                "spectrum_source": spectrum.get("source"),
-                "spectrum_frame_id": spectrum.get("frame_id"),
-                "point_index": point_index,
-                "wavelength_nm": wavelength,
-                "intensity_counts": intensity,
-                **labels,
-            }
-            for point_index, (wavelength, intensity) in enumerate(
-                zip(
-                    spectrum.get("wavelength_nm") or [],
-                    spectrum.get("intensity_counts") or [],
-                )
+        rows: list[dict[str, Any]] = []
+        for point_index, (wavelength, intensity) in enumerate(
+            zip(wavelengths, intensities)
+        ):
+            rows.append(
+                {
+                    "capture_index": record["capture_index"],
+                    "timeline_timestamp_epoch_sec": record[
+                        "timeline_timestamp_epoch_sec"
+                    ],
+                    "elapsed_time_sec": record["elapsed_time_sec"],
+                    "spectrum_timestamp_epoch_sec": spectrum.get(
+                        "timestamp_epoch_sec"
+                    ),
+                    "spectrum_source": spectrum.get("source"),
+                    "spectrum_frame_id": spectrum.get("frame_id"),
+                    "point_index": point_index,
+                    "wavelength_nm": wavelength,
+                    "intensity_counts": intensity,
+                    "baseline_intensity_counts": (
+                        baseline[point_index]
+                        if point_index < len(baseline)
+                        else None
+                    ),
+                    "normalized_intensity_ratio": (
+                        normalized[point_index]
+                        if point_index < len(normalized)
+                        else None
+                    ),
+                    "normalization_method": normalization.get("method"),
+                    "normalization_status": normalization.get("status"),
+                    **labels,
+                }
             )
-        ]
+        return rows
 
     @staticmethod
     def _response_row(record: dict[str, Any]) -> dict[str, Any]:
@@ -1126,6 +1381,8 @@ class OpticalForceCaptureManager:
             "sync_method": force.get("sync_method"),
             "sync_quality": force.get("sync_quality"),
             "sync_offset_ms": force.get("sync_offset_ms"),
+            "sync_within_target": force.get("sync_within_target"),
+            "calibration_sync_ok": force.get("calibration_sync_ok"),
             "force_sample_count": force.get("sample_count"),
             "force_sequence_start": force.get("force_sequence_start"),
             "force_sequence_end": force.get("force_sequence_end"),
@@ -1216,6 +1473,8 @@ class OpticalForceCaptureManager:
             "sync_method": force.get("sync_method"),
             "sync_quality": force.get("sync_quality"),
             "sync_offset_ms": force.get("sync_offset_ms"),
+            "sync_within_target": force.get("sync_within_target"),
+            "calibration_sync_ok": force.get("calibration_sync_ok"),
             "force_sample_count": force.get("sample_count"),
             "fx_raw_n": raw.get("fx_n"),
             "fy_raw_n": raw.get("fy_n"),
@@ -1409,14 +1668,32 @@ class OpticalForceCaptureManager:
             "errors": errors,
         }
 
-    def _write_metadata_locked(self) -> None:
+    def _write_metadata_locked(
+        self,
+        *,
+        refresh_provenance: bool = True,
+        session_initialized: bool = False,
+    ) -> None:
         output_directory = self._state.get("output_directory")
         if not output_directory:
             return
         output_dir = Path(str(output_directory))
         output_dir.mkdir(parents=True, exist_ok=True)
         payload = self.status()
-        alignment_audit = self._alignment_audit_locked(output_dir)
+        alignment_audit = (
+            {
+                "status": "session_initialized",
+                "all_selected_streams_aligned": False,
+                "selected_outputs": list(
+                    self._state.get("selected_outputs") or []
+                ),
+                "expected_timeline_frames": 0,
+                "stream_frame_counts": {},
+                "errors": [],
+            }
+            if session_initialized
+            else self._alignment_audit_locked(output_dir)
+        )
         selected = set(self._state.get("selected_outputs") or [])
         force_status_snapshot_error = None
         if "force" in selected:
@@ -1427,9 +1704,31 @@ class OpticalForceCaptureManager:
                 force_status_snapshot_error = f"{type(exc).__name__}: {exc}"
         else:
             force_status = {}
+        if refresh_provenance:
+            provenance_at_end, provenance_end_error = self._snapshot_provenance()
+            if provenance_at_end is not None:
+                self._provenance_latest = provenance_at_end
+                self._provenance_latest_error = None
+            elif provenance_end_error and self._provenance_latest is None:
+                self._provenance_latest_error = provenance_end_error
         payload.update(
             {
-                "schema_version": "touch_synchronized_capture_v3",
+                "schema_version": "touch_synchronized_capture_v4",
+                "session_initialized": bool(session_initialized),
+                "provenance": {
+                    "start": self._provenance_at_start,
+                    "end": (
+                        None
+                        if session_initialized
+                        else self._provenance_latest
+                    ),
+                    "start_snapshot_error": self._provenance_start_error,
+                    "end_snapshot_error": (
+                        None
+                        if session_initialized
+                        else self._provenance_latest_error
+                    ),
+                },
                 "force_target": {
                     "mode": "continuous_fz_regression",
                     "field": "force_fz_n",
@@ -1449,7 +1748,8 @@ class OpticalForceCaptureManager:
                     ],
                     "optical_driven_timeline": (
                         "Spectrum and tactile-response captures use the spectrum host timestamp. "
-                        "PX6D samples are window-median aligned to that timestamp."
+                        "PX6D samples are window-median aligned to that timestamp, and frames "
+                        "outside the configured calibration tolerance are rejected."
                     ),
                     "force_only_timeline": (
                         "Force-only capture uses the PX6D host timestamp and unique force sequence."
@@ -1457,10 +1757,22 @@ class OpticalForceCaptureManager:
                 },
                 "alignment_audit": alignment_audit,
                 "spectrum_payload": (
-                    "one row per wavelength point in spectrum_timeseries.csv"
+                    "one row per wavelength point with raw counts and, when "
+                    "a stable no-contact reference is ready, aligned I0 and I/I0"
                     if "spectrum" in selected
                     else "not_selected"
                 ),
+                "spectrum_normalization_contract": {
+                    "method": "no_contact_baseline_ratio",
+                    "formula": "normalized_intensity_ratio = I(lambda,t) / I0(lambda)",
+                    "raw_counts_retained": True,
+                    "model_input_source": "raw_intensity",
+                    "per_frame_min_max_used": False,
+                    "missing_reference_behavior": (
+                        "normalized fields remain empty until an accepted "
+                        "no-contact baseline spectrum is available"
+                    ),
+                },
                 "tactile_response_payload": (
                     "one model response row per canonical frame in tactile_response_timeseries.csv"
                     if "response" in selected
@@ -1485,26 +1797,8 @@ class OpticalForceCaptureManager:
                     ),
                     "selected_payload_manifest_jsonl": "synchronized_frames.jsonl",
                     "timeline_summary_csv": "frame_summary.csv",
+                    "capture_recovery_journal_json": "capture_journal.json",
                 },
             }
         )
-        metadata_path = output_dir / "session_metadata.json"
-        temporary_path = output_dir / (
-            f".session_metadata.{os.getpid()}.{threading.get_ident()}.tmp"
-        )
-        encoded = json.dumps(
-            _sanitize_serializable(payload),
-            ensure_ascii=False,
-            indent=2,
-            default=_json_default,
-            allow_nan=False,
-        )
-        try:
-            with temporary_path.open("w", encoding="utf-8", newline="\n") as handle:
-                handle.write(encoded)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary_path, metadata_path)
-        except BaseException:
-            temporary_path.unlink(missing_ok=True)
-            raise
+        _write_json_atomic(output_dir / "session_metadata.json", payload)

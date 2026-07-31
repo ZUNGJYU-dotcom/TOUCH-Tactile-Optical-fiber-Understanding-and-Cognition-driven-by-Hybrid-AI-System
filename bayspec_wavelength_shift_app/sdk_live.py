@@ -16,7 +16,11 @@ import threading
 import time
 from typing import Any
 
-from bridge import DEFAULT_DEVICE_ID, DEFAULT_SENSE_ROOT
+from bridge import configured_device_id, configured_sense_export_root
+from spectrum_processing import SpectrumDisplayProcessor
+
+
+DEFAULT_INTEGRATION_US = 5000
 
 
 class BaySpecSdkLiveReader:
@@ -29,13 +33,21 @@ class BaySpecSdkLiveReader:
     def __init__(self, bridge: Any, app_root: Path) -> None:
         self.bridge = bridge
         self.app_root = Path(app_root)
+        config_root = (
+            self.app_root / "config"
+            if (self.app_root / "config").exists()
+            else self.app_root.parent / "config"
+        )
+        self.spectrum_processor = SpectrumDisplayProcessor(
+            config_root / "spectrum_processing.yaml"
+        )
         self.lock = threading.RLock()
         self.process: subprocess.Popen[str] | None = None
         self.thread: threading.Thread | None = None
         self.stderr_thread: threading.Thread | None = None
         self.channel_id = "P22"
         self.interval_ms = 100
-        self.integration = 40000
+        self.integration = DEFAULT_INTEGRATION_US
         self.started_at: float | None = None
         self.last_frame_time: float | None = None
         self.last_status: dict[str, Any] | None = None
@@ -142,9 +154,27 @@ class BaySpecSdkLiveReader:
                 "last_error": self.last_error,
                 "last_stderr": self.last_stderr,
                 "last_result": self.last_result,
+                "spectrum_processing": self.spectrum_processor.status(),
             }
 
-    def start(self, channel_id: str = "P22", interval_ms: int = 100, integration: int = 40000) -> dict[str, Any]:
+    def processing_status(self) -> dict[str, Any]:
+        return self.spectrum_processor.status()
+
+    def update_processing_settings(self, updates: dict[str, Any]) -> dict[str, Any]:
+        return self.spectrum_processor.update_settings(updates)
+
+    def capture_background(self) -> dict[str, Any]:
+        return self.spectrum_processor.capture_background()
+
+    def clear_background(self) -> dict[str, Any]:
+        return self.spectrum_processor.clear_background()
+
+    def start(
+        self,
+        channel_id: str = "P22",
+        interval_ms: int = 100,
+        integration: int = DEFAULT_INTEGRATION_US,
+    ) -> dict[str, Any]:
         with self.lock:
             # Start is intentionally idempotent. A duplicate UI/API request must
             # not wait on the live worker or turn a healthy session into an
@@ -277,6 +307,7 @@ class BaySpecSdkLiveReader:
             self.last_result = None
             self.last_frame_time = None
             self.wavelength_grid_cache = None
+            self.spectrum_processor.reset_session()
             self.frame_count = 0
             self.received_frame_count = 0
             self.rejected_frame_count = 0
@@ -884,7 +915,7 @@ class BaySpecSdkLiveReader:
             return self.wavelength_grid_cache
         try:
             grid = self.bridge._latest_wavelength_grid(  # noqa: SLF001 - bridge owns the Sense grid parser.
-                DEFAULT_SENSE_ROOT / "Spectrum_Data",
+                configured_sense_export_root(),
                 expected_points=expected_points,
             )
         except Exception:
@@ -945,9 +976,14 @@ class BaySpecSdkLiveReader:
             return False
 
         wavelength_grid = self._wavelength_grid(len(intensity))
+        processed = self.spectrum_processor.process(intensity)
         channel_payload: dict[str, Any] = {
             "channel_id": self.channel_id,
             "intensity": intensity,
+            "display_intensity": processed["display_intensity"],
+            "overlay_intensity": processed["overlay_intensity"],
+            "spectrum_processing": processed["spectrum_processing"],
+            "model_input_source": "raw_intensity",
             "spectrum_points": len(intensity),
             "sdk_frame_index": message.get("frame_index"),
             "sdk_timestamp_ms": message.get("timestamp_ms"),
@@ -982,7 +1018,7 @@ class BaySpecSdkLiveReader:
             result = self.bridge.ingest(
                 {
                     "source": "bayspec_direct_usb20bs_sdk",
-                    "device_id": DEFAULT_DEVICE_ID,
+                    "device_id": configured_device_id(),
                     "channels": [channel_payload],
                 }
             )

@@ -46,6 +46,21 @@ def test_desktop_window_uses_light_frameless_chrome() -> None:
     assert "webview.start(finish_startup, debug=False)" in launcher
 
 
+def test_frozen_beta_marker_is_read_from_executable_or_bundle_root() -> None:
+    launcher = (APP_ROOT / "desktop_launcher.py").read_text(encoding="utf-8")
+    beta_spec = (APP_ROOT / "desktop_launcher_beta_all_data.spec").read_text(
+        encoding="utf-8"
+    )
+
+    helper = launcher.split("def beta_all_data_runtime_requested", 1)[1].split(
+        "def bundle_root", 1
+    )[0]
+    assert "Path(sys.executable).resolve().parent" in helper
+    assert 'getattr(sys, "_MEIPASS"' in helper
+    assert "any(marker.is_file() for marker in marker_locations)" in helper
+    assert 'beta_all_data_runtime.flag"), "."' in beta_spec
+
+
 def test_borderless_window_restores_native_taskbar_toggle_contract() -> None:
     window = Mock()
     window.native.Handle.ToInt64.return_value = 1234

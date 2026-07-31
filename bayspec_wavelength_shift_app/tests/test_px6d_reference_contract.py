@@ -4,6 +4,7 @@ import struct
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -181,6 +182,14 @@ class Px6dReferenceForceTests(unittest.TestCase):
         class FakePort:
             def __init__(self) -> None:
                 self.closed = False
+                self.cancel_read_called = False
+                self.cancel_write_called = False
+
+            def cancel_read(self) -> None:
+                self.cancel_read_called = True
+
+            def cancel_write(self) -> None:
+                self.cancel_write_called = True
 
             def close(self) -> None:
                 self.closed = True
@@ -213,6 +222,8 @@ class Px6dReferenceForceTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["operation_status"], "stopped")
         self.assertTrue(worker.serial_was_closed_before_join)
+        self.assertTrue(port.cancel_read_called)
+        self.assertTrue(port.cancel_write_called)
         self.assertFalse(result["running"])
         self.assertFalse(result["worker_alive"])
         self.assertEqual(result["lifecycle_status"], "stopped")
@@ -407,7 +418,13 @@ class Px6dReferenceForceTests(unittest.TestCase):
         self.assertTrue(tare["ok"])
         self.assertEqual(tare["sampling_scope"], "post_request_samples")
         self.assertAlmostEqual(tare["tare"]["fz_n"], 1.0, places=6)
-        self.assertEqual(reader.trace()["count"], 0)
+        trace = reader.trace()
+        self.assertTrue(
+            all(
+                abs(float(sample["raw"]["fz_n"]) - 1.0) < 1e-9
+                for sample in trace["samples"]
+            )
+        )
 
     def test_spectrum_timestamp_uses_window_median_force_label(self) -> None:
         reader = Px6dReader(
@@ -814,6 +831,199 @@ class Px6dIntegrationContractTests(unittest.TestCase):
         self.assertTrue(config["enabled"])
         self.assertFalse(config["auto_start"])
         self.assertEqual(config["port"], "COM19")
+        self.assertTrue(config["isolate_process"])
+        self.assertGreater(config["worker_watchdog_sec"], 0.0)
+
+    def test_production_px6d_status_exposes_process_isolation_contract(self) -> None:
+        reader = Px6dReader(
+            {
+                "auto_tare_on_start": False,
+                "isolate_process": True,
+                "worker_watchdog_sec": 1.5,
+            }
+        )
+
+        status = reader.status()
+
+        self.assertTrue(status["serial_isolation_enabled"])
+        self.assertFalse(status["serial_worker_alive"])
+        self.assertFalse(status["serial_worker_job_guard_active"])
+        self.assertEqual(status["serial_worker_restart_count"], 0)
+        self.assertEqual(status["serial_worker_forced_termination_count"], 0)
+        self.assertEqual(status["consecutive_connection_failures"], 0)
+        self.assertFalse(status["port_busy_detected"])
+        self.assertIsNone(status["connection_error_kind"])
+        self.assertIsNone(status["next_reconnect_in_sec"])
+
+    def test_px6d_port_follows_exact_usb_identity_after_com_renumber(self) -> None:
+        reader = Px6dReader(
+            {
+                "port": "COM3",
+                "auto_detect_port": True,
+                "usb_vid": 0x1A86,
+                "usb_pid": 0x55D3,
+                "usb_serial_number": "5C7B025505",
+                "port_description_contains": "CH343",
+            }
+        )
+        detected = SimpleNamespace(
+            device="COM7",
+            description="USB-Enhanced-SERIAL CH343 (COM7)",
+            hwid="USB VID:PID=1A86:55D3 SER=5C7B025505",
+            vid=0x1A86,
+            pid=0x55D3,
+            serial_number="5C7B025505",
+            manufacturer="wch.cn",
+        )
+        with patch(
+            "backend.px6d_reader.serial_list_ports.comports",
+            return_value=[detected],
+        ):
+            active_port = reader._resolve_active_port()
+
+        status = reader.status()
+        self.assertEqual(active_port, "COM7")
+        self.assertEqual(status["configured_port"], "COM3")
+        self.assertEqual(status["active_port"], "COM7")
+        self.assertEqual(
+            status["port_detection_status"],
+            "matched_usb_identity_on_new_port",
+        )
+        self.assertEqual(
+            status["detected_device_identity"]["serial_number"],
+            "5C7B025505",
+        )
+
+    def test_px6d_port_discovery_does_not_open_an_unrelated_serial_device(self) -> None:
+        reader = Px6dReader(
+            {
+                "port": "COM3",
+                "auto_detect_port": True,
+                "usb_vid": 0x1A86,
+                "usb_pid": 0x55D3,
+                "usb_serial_number": "5C7B025505",
+            }
+        )
+        unrelated = SimpleNamespace(
+            device="COM3",
+            description="USB-Enhanced-SERIAL CH343 (COM3)",
+            hwid="USB VID:PID=1A86:55D3 SER=OTHER",
+            vid=0x1A86,
+            pid=0x55D3,
+            serial_number="OTHER",
+            manufacturer="wch.cn",
+        )
+        with patch(
+            "backend.px6d_reader.serial_list_ports.comports",
+            return_value=[unrelated],
+        ):
+            with self.assertRaises(FileNotFoundError):
+                reader._resolve_active_port()
+
+        status = reader.status()
+        self.assertIsNone(status["active_port"])
+        self.assertEqual(
+            status["port_detection_status"],
+            "configured_device_identity_not_detected",
+        )
+
+    def test_missing_port_is_not_misreported_as_port_busy(self) -> None:
+        kind = Px6dReader._classify_connection_error(
+            "SerialException: could not open port 'COM3': "
+            "FileNotFoundError(2, 'The system cannot find the file specified')"
+        )
+        self.assertEqual(kind, "port_not_found")
+
+    def test_runtime_status_self_heals_an_unexpected_reader_exit(self) -> None:
+        worker_exited = {
+            "worker_alive": False,
+            "stop_requested": False,
+            "lifecycle_status": "worker_exited",
+        }
+        restarted = {
+            "ok": True,
+            "worker_alive": True,
+            "lifecycle_status": "running",
+        }
+        with (
+            patch.dict(
+                backend_main.PX6D_REFERENCE_CONFIG,
+                {"enabled": True, "auto_start": True},
+            ),
+            patch.object(
+                backend_main.px6d_reader,
+                "status",
+                return_value=worker_exited,
+            ),
+            patch.object(
+                backend_main.px6d_reader,
+                "start",
+                return_value=restarted,
+            ) as start_mock,
+        ):
+            result = backend_main._px6d_runtime_status()
+
+        start_mock.assert_called_once_with()
+        self.assertTrue(result["worker_alive"])
+
+    def test_port_busy_failures_use_bounded_backoff_without_changing_api_state(self) -> None:
+        reader = Px6dReader(
+            {
+                "auto_tare_on_start": False,
+                "reconnect_interval_sec": 0.5,
+                "reconnect_max_interval_sec": 6.0,
+                "reconnect_backoff_multiplier": 2.0,
+                "port_busy_backoff_sec": 3.0,
+            }
+        )
+
+        first_delay = reader._record_connection_failure(
+            "SerialException: could not open port 'COM3': "
+            "PermissionError(13, 'Access is denied')"
+        )
+        second_delay = reader._record_connection_failure(
+            "SerialException: could not open port 'COM3': "
+            "PermissionError(13, 'Access is denied')"
+        )
+        third_delay = reader._record_connection_failure(
+            "SerialException: could not open port 'COM3': "
+            "PermissionError(13, 'Access is denied')"
+        )
+        status = reader.status()
+
+        self.assertEqual(first_delay, 3.0)
+        self.assertEqual(second_delay, 6.0)
+        self.assertEqual(third_delay, 6.0)
+        self.assertEqual(status["consecutive_connection_failures"], 3)
+        self.assertEqual(
+            status["connection_error_kind"], "port_busy_or_permission_denied"
+        )
+        self.assertTrue(status["port_busy_detected"])
+        self.assertEqual(status["reconnect_delay_sec"], 6.0)
+        self.assertGreater(status["next_reconnect_in_sec"], 0.0)
+        self.assertLessEqual(status["next_reconnect_in_sec"], 6.0)
+
+    def test_valid_sample_resets_reconnect_backoff_immediately(self) -> None:
+        reader = Px6dReader(
+            {
+                "auto_tare_on_start": False,
+                "reconnect_interval_sec": 0.5,
+                "reconnect_max_interval_sec": 6.0,
+                "port_busy_backoff_sec": 3.0,
+            }
+        )
+        reader._record_connection_failure(
+            "SerialException: could not open port 'COM3': PermissionError(13)"
+        )
+
+        reader._append_sample(make_sample(1, time.time(), fz_n=0.2))
+        status = reader.status()
+
+        self.assertEqual(status["consecutive_connection_failures"], 0)
+        self.assertEqual(status["reconnect_delay_sec"], 0.0)
+        self.assertIsNone(status["next_reconnect_in_sec"])
+        self.assertIsNone(status["connection_error_kind"])
+        self.assertFalse(status["port_busy_detected"])
 
     def test_config_and_ui_keep_reference_force_semantics_explicit(self) -> None:
         config_text = (PROJECT_ROOT / "config" / "px6d_reference.yaml").read_text(
@@ -845,6 +1055,10 @@ class Px6dIntegrationContractTests(unittest.TestCase):
         self.assertIn("diagnosticPx6dFilterStatus", html)
         self.assertIn("/api/px6d/tare", javascript)
         self.assertIn("/api/px6d/latest", javascript)
+        self.assertIn("/api/px6d/reconnect", backend)
+        self.assertIn("px6dConnectionDisplayState", javascript)
+        self.assertIn("waiting for sensor", javascript)
+        self.assertIn("port in use", javascript)
         self.assertIn("/api/px6d_capture/start", javascript)
         self.assertIn("selected_outputs: selectedOutputs", javascript)
         self.assertIn("output_root: px6dCaptureOutputRoot", javascript)
@@ -852,8 +1066,12 @@ class Px6dIntegrationContractTests(unittest.TestCase):
         self.assertIn("drift_offset_n", javascript)
         self.assertIn("function finiteNumberOrNull(value)", javascript)
         self.assertNotIn("const sampleAge = Number(status?.last_sample_age_sec)", javascript)
+        self.assertIn(
+            "const liveForceVisible = connected && fresh && Number.isFinite(referenceValue)",
+            javascript,
+        )
         self.assertIn("const currentForceReady = connected && tareReady && fresh", javascript)
-        self.assertIn("const displayedCompressionFz = currentForceReady", javascript)
+        self.assertIn("const displayedCompressionFz = liveForceVisible", javascript)
         self.assertIn('"px6d_reference": _px6d_reference_for_record', backend)
         self.assertIn("OpticalForceCaptureManager", backend)
 

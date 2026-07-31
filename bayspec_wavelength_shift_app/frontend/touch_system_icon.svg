@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img">
+  <title>TOUCH contact icon</title>
+  <desc>A flexible cyan form with a teal contact fold and a coral contact sphere.</desc>
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6DE0F2"/>
+      <stop offset="1" stop-color="#2AB9DC"/>
+    </linearGradient>
+    <linearGradient id="pocket" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#00758E"/>
+      <stop offset="1" stop-color="#003F59"/>
+    </linearGradient>
+    <linearGradient id="contact" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FF9F89"/>
+      <stop offset="1" stop-color="#F25D4C"/>
+    </linearGradient>
+    <clipPath id="body-clip">
+      <path d="M194 92C112 92 68 151 68 239V786C68 877 124 932 222 932H730C828 932 887 875 887 785V690C887 647 854 620 812 620C710 620 646 575 646 499C646 422 710 377 812 377C855 377 887 348 887 305V234C887 146 829 92 741 92Z"/>
+    </clipPath>
+  </defs>
+  <path fill="url(#body)" stroke="#159DBE" stroke-width="14" d="M194 92C112 92 68 151 68 239V786C68 877 124 932 222 932H730C828 932 887 875 887 785V690C887 647 854 620 812 620C710 620 646 575 646 499C646 422 710 377 812 377C855 377 887 348 887 305V234C887 146 829 92 741 92Z"/>
+  <circle cx="788" cy="499" r="190" fill="url(#pocket)" clip-path="url(#body-clip)"/>
+  <circle cx="866" cy="499" r="164" fill="url(#contact)" stroke="#D94E42" stroke-width="12"/>
+</svg>

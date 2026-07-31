@@ -108,8 +108,8 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
         )
         self.assertIn(".operator-mode .status-strip .qa-status-item", responsive_css)
         self.assertIn(".operator-mode .status-strip .status-item:nth-child(2) svg", responsive_css)
-        self.assertIn(".operator-mode .spectrum-open-chip", responsive_css)
-        self.assertIn("width: 38px !important", responsive_css)
+        self.assertNotIn("spectrum-open-chip", self.html)
+        self.assertNotIn(".operator-mode .spectrum-open-chip", responsive_css)
 
     def test_idle_spectrum_hides_only_empty_kpis(self) -> None:
         final_lock = self.css.index("/* Final cascade lock for the simplified Operator workspace. */")
@@ -138,8 +138,12 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
         self.assertLess(preview_call, visibility_gate)
 
     def test_operator_spectrum_has_a_state_driven_idle_overlay(self) -> None:
-        self.assertIn('class="optical-preview-empty-state"', self.html)
-        self.assertIn("No spectrum frame", self.html)
+        overlay = self.html.split('class="optical-preview-empty-state"', 1)[1].split(
+            "</div>", 1
+        )[0]
+        self.assertIn("No spectrum frame", overlay)
+        self.assertNotIn("data-lucide", overlay)
+        self.assertNotIn("IDLE", overlay)
         self.assertIn(
             '.operator-mode .summary-hud[data-measurement-state="no_data"] .optical-preview-empty-state',
             self.css,
@@ -149,17 +153,113 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
         )[0]
         self.assertNotIn('ctx.fillText("No spectrum frame"', preview_function)
 
+    def test_compact_evidence_rail_uses_single_line_sidebar_typography(self) -> None:
+        compact_pass = self.css.split("/* iOS clarity pass 12:", 1)[1]
+        self.assertIn(
+            "container: operator-left-evidence-rail / inline-size",
+            compact_pass,
+        )
+        title_rule = compact_pass.split(
+            ".operator-mode .left-panel .hud-title-row h2 {", 1
+        )[1].split("}", 1)[0]
+        self.assertIn("font-size: 15px !important", title_rule)
+        self.assertIn("text-overflow: ellipsis", title_rule)
+        self.assertIn("white-space: nowrap", title_rule)
+
+        kpi_rule = compact_pass.split(
+            ".operator-mode .optical-kpi-grid span {", 1
+        )[1].split("}", 1)[0]
+        self.assertIn("font-size: 9px !important", kpi_rule)
+        self.assertIn("white-space: nowrap", kpi_rule)
+
+        self.assertIn(
+            "@container operator-left-evidence-rail (max-width: 165px)",
+            compact_pass,
+        )
+        narrow_rule = compact_pass.split(
+            "@container operator-left-evidence-rail (max-width: 165px)", 1
+        )[1].split(
+            ".operator-mode .left-panel .hud-title-row h2 {", 1
+        )[1].split("}", 1)[0]
+        self.assertIn("font-size: 14px !important", narrow_rule)
+
+    def test_empty_spectrum_uses_compact_state_specific_track(self) -> None:
+        compact_pass = self.css.split("/* iOS clarity pass 13:", 1)[1]
+        empty_selector = (
+            '.operator-mode .left-panel:has(> '
+            '.summary-hud[data-measurement-state="no_data"])'
+        )
+        self.assertIn(empty_selector, compact_pass)
+
+        desktop_rule = compact_pass.split(empty_selector + " {", 1)[1].split("}", 1)[0]
+        self.assertIn(
+            "grid-template-rows: 144px clamp(214px, 29vh, 232px) auto !important",
+            desktop_rule,
+        )
+        self.assertIn("align-content: start !important", desktop_rule)
+
+        short_window = compact_pass.split("@media (max-height: 720px)", 1)[1]
+        short_rule = short_window.split(empty_selector + " {", 1)[1].split("}", 1)[0]
+        self.assertIn("grid-template-rows: 132px 210px 92px !important", short_rule)
+
+        self.assertIn(
+            "grid-template-rows: 144px minmax(264px, 1fr) auto !important",
+            self.css,
+        )
+
+    def test_operator_shell_removes_global_graph_paper_but_keeps_scene_grid(self) -> None:
+        clarity_pass = self.css.split("/* iOS clarity pass 14:", 1)[1]
+        shell_rule = clarity_pass.split(".operator-mode {", 1)[1].split("}", 1)[0]
+        self.assertIn("background: #f4f7fa !important", shell_rule)
+        self.assertIn("background-image: none !important", shell_rule)
+
+        pseudo_rule = clarity_pass.split(
+            ".operator-mode.app-shell::before {", 1
+        )[1].split("}", 1)[0]
+        self.assertIn("content: none !important", pseudo_rule)
+        self.assertIn("display: none !important", pseudo_rule)
+
+        self.assertNotIn(".three-mount", clarity_pass)
+        self.assertIn(".operator-mode .three-mount {", self.css)
+
+    def test_operator_evidence_cards_do_not_use_industrial_accent_rails(self) -> None:
+        clarity_pass = self.css.split("/* iOS clarity pass 15:", 1)[1]
+        self.assertIn(".operator-mode .hud-card", clarity_pass)
+        self.assertIn(".operator-mode .operator-summary-card", clarity_pass)
+        self.assertIn(".operator-mode .operator-footprint-card", clarity_pass)
+        self.assertIn(".operator-mode .operator-band-card", clarity_pass)
+        self.assertIn("background: #ffffff !important", clarity_pass)
+        self.assertIn("background-image: none !important", clarity_pass)
+        self.assertNotIn("linear-gradient", clarity_pass)
+        self.assertNotIn("inset", clarity_pass)
+
+        self.assertIn(
+            '#surfaceResponseLevel[data-response-tone="hard"]',
+            self.css,
+        )
+
     def test_trace_idle_state_is_status_only(self) -> None:
         draw_trace = self.app_js.split("function drawTrace(records)", 1)[1].split(
             "function globalEventResponseFromTrace", 1
         )[0]
         self.assertIn('"No response history"', draw_trace)
-        self.assertIn('ctx.fillText("IDLE"', draw_trace)
+        self.assertNotIn('ctx.fillText("IDLE"', draw_trace)
         self.assertNotIn("Start Live, Watch, or Response", draw_trace)
 
-    def test_active_state_kpis_use_compact_values_with_units_in_labels(self) -> None:
-        for label in ("Now · pm", "Peak · pm", "λ · nm", "Δλ · pm", "|Δλ| · pm"):
+        trace_kpis = self.app_js.split("function updateTraceKpis(records)", 1)[1].split(
+            "function drawTrace(records)", 1
+        )[0]
+        self.assertIn('setText("traceHistoryValue", "--")', trace_kpis)
+        self.assertNotIn('setText("traceHistoryValue", "IDLE")', trace_kpis)
+
+    def test_active_state_kpis_use_compact_values_with_shared_trace_unit(self) -> None:
+        for label in ("Now", "Peak", "λ · nm", "Δλ · pm", "|Δλ| · pm"):
             self.assertIn(label, self.html)
+        self.assertNotIn("Now · pm", self.html)
+        self.assertNotIn("Peak · pm", self.html)
+        self.assertIn('setText("traceCurrentLabel", "Now")', self.app_js)
+        self.assertIn('setText("tracePeakLabel", "Peak")', self.app_js)
+        self.assertIn('"Surface peak |Δλ| (pm)"', self.app_js)
         self.assertIn("function setCompactMetric", self.app_js)
         self.assertIn('setCompactMetric(\n    "traceCurrentValue"', self.app_js)
         self.assertIn('setCompactMetric(\n    "tracePeakValue"', self.app_js)
@@ -178,10 +278,20 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
         self.assertIn('title="Peak wavelength (nm)"', self.html)
 
     def test_operator_active_state_uses_short_source_and_coupling_tokens(self) -> None:
-        self.assertIn('label: operatorMode ? "LOCAL"', self.app_js)
+        self.assertIn(
+            '? state.displayMode === "operator" ? "LOCAL" : "SIMULATED"',
+            self.app_js,
+        )
         coupling_block = self.app_js.split('"surfaceRuleSource"', 1)[1].split(");", 1)[0]
+        self.assertIn('!measurementAvailable', coupling_block)
+        self.assertIn('? "--"', coupling_block)
         self.assertNotIn('"coupled response"', coupling_block)
         self.assertGreaterEqual(coupling_block.count('? "coupled"'), 3)
+
+        coupling_markup = self.html.split('id="surfaceRuleSource"', 1)[1].split(
+            "</strong>", 1
+        )[0]
+        self.assertIn(">--", coupling_markup)
 
     def test_source_status_uses_only_state_dot_and_text(self) -> None:
         source_status = self.html.split(
@@ -232,6 +342,76 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
         self.assertIn('? "contact"', summary)
         self.assertIn(': "no_contact"', summary)
         self.assertNotIn("levelLabel(", summary)
+
+    def test_short_native_window_keeps_bottom_evidence_inside_its_tracks(self) -> None:
+        pass5 = self.css.index("/* iOS clarity pass 5:")
+        compact_css = self.css[pass5:]
+        self.assertIn(
+            "grid-template-rows: 132px minmax(0, 1fr) 92px !important",
+            compact_css,
+        )
+        self.assertIn(
+            "grid-template-rows: 176px minmax(0, 1fr) 88px !important",
+            compact_css,
+        )
+        self.assertIn(".operator-mode .operator-force-readout > div", compact_css)
+        self.assertIn("height: 12px !important", compact_css)
+
+    def test_operator_evidence_titles_use_sidebar_typography(self) -> None:
+        pass16 = self.css.split("/* iOS clarity pass 16:", 1)[1]
+        self.assertIn(
+            ".operator-mode .left-panel .hud-title-row h2",
+            pass16,
+        )
+        self.assertIn("font-size: 13px !important", pass16)
+        self.assertIn("font-weight: 650 !important", pass16)
+        self.assertIn(
+            "@container operator-left-evidence-rail (max-width: 165px)",
+            pass16,
+        )
+        self.assertIn("font-size: 12px !important", pass16)
+
+    def test_operator_text_lines_keep_full_glyph_height_at_minimum_width(self) -> None:
+        pass18 = self.css.split("/* iOS clarity pass 18:", 1)[1]
+        self.assertIn(
+            ".operator-mode .left-panel .hud-title-row h2",
+            pass18,
+        )
+        self.assertIn("min-height: 17px", pass18)
+        self.assertIn("line-height: 1.2 !important", pass18)
+        self.assertIn(".operator-mode .section-label", pass18)
+        self.assertIn("min-height: 15px", pass18)
+        self.assertIn(
+            ".operator-mode .operator-summary-card .operator-summary-grid span",
+            pass18,
+        )
+        self.assertIn("line-height: 14px !important", pass18)
+        self.assertIn(".operator-mode .mini-pixel strong", pass18)
+        self.assertIn("line-height: 15px !important", pass18)
+
+    def test_operator_status_and_right_evidence_use_single_grouped_surfaces(self) -> None:
+        pass19 = self.css.split("/* iOS clarity pass 19:", 1)[1]
+        self.assertIn(".operator-mode .status-strip", pass19)
+        self.assertIn("gap: 0 !important", pass19)
+        self.assertIn("background: #f6f9fb", pass19)
+        self.assertIn(
+            ".operator-mode .status-strip .status-item + .status-item::before",
+            pass19,
+        )
+        self.assertIn("background: #dde6ec", pass19)
+
+        normal_right_rail = (
+            ".app-shell.operator-mode:not(.surface-fullscreen-active)"
+            ":not(.surface-only-view)"
+        )
+        self.assertIn(normal_right_rail, pass19)
+        self.assertIn(".right-panel", pass19)
+        self.assertIn("background: #ffffff !important", pass19)
+        self.assertIn("> .operator-summary-card", pass19)
+        self.assertIn("> .operator-footprint-card", pass19)
+        self.assertIn("> .operator-band-card", pass19)
+        self.assertIn("box-shadow: none !important", pass19)
+        self.assertIn("border-top: 1px solid #e2eaf0 !important", pass19)
 
 
 if __name__ == "__main__":

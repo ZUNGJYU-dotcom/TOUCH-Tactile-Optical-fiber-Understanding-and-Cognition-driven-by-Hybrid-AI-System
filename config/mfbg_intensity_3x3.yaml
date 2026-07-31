@@ -1,0 +1,180 @@
+profile:
+  profile_id: mfbg_intensity_3x3
+  display_name: mFBG 3x3 optical-intensity array
+  sensor_family: micro_fiber_bragg_grating
+  demodulation_mode: spectral_window_intensity
+  status: software_ready_pending_real_calibration
+  future_primary_profile: true
+  ordinary_fbg_profile_preserved: true
+
+physical_boundaries:
+  real_3x3_enabled: false
+  calibrated_force: false
+  force_N_output: false
+  calibrated_pressure_output: false
+  dense_reconstruction_status: interface_only_pending_real_training_data
+  surface_semantics: raw_coupled_optical_attenuation_proxy
+
+array:
+  channel_count: 9
+  channel_order: [P11, P21, P31, P12, P22, P32, P13, P23, P33]
+  display_rows:
+    - [P11, P21, P31]
+    - [P12, P22, P32]
+    - [P13, P23, P33]
+  responding_threshold_ratio: 0.05
+  contact_region_connectivity: 8
+
+demodulation:
+  primary_method: tracked_window_integrated_mean
+  feature_mode: peak
+  prefer_measured_wavelength: true
+  search_half_width_nm: 1.0
+  integration_half_width_nm: 0.35
+  maximum_tracking_offset_nm: 0.50
+  minimum_window_points: 3
+  local_baseline_edge_fraction: 0.20
+  epsilon: 1.0e-12
+  intensity_rise_warning_ratio: 1.05
+  minimum_peak_snr_warning: 3.0
+  retain_raw_spectrum_in_frame: true
+  wavelength_shift_role: auxiliary_diagnostic_only
+
+baseline:
+  minimum_frames: 20
+  estimator: median
+  noise_estimator: mad_sigma
+  minimum_intensity_counts: 1.0
+  automatic_runtime_rebaseline: false
+
+coupling:
+  interpretation: mixed mechanical and optical coupling, not independent force pixels
+  same_fiber_directed_paths:
+    fiber_1: [P13, P12, P11]
+    fiber_2: [P23, P22, P21]
+    fiber_3: [P33, P32, P31]
+  cross_fiber_neighbors:
+    P11: [P21, P12, P22]
+    P12: [P11, P13, P21, P22, P23]
+    P13: [P12, P22, P23]
+    P21: [P11, P31, P12, P22, P32]
+    P22: [P11, P21, P31, P12, P32, P13, P23, P33]
+    P23: [P12, P22, P32, P13, P33]
+    P31: [P21, P22, P32]
+    P32: [P21, P31, P22, P23, P33]
+    P33: [P22, P32, P23]
+
+wavelength_plan:
+  wavelength_unit: nm
+  status: preliminary_target_plan
+  note: Replace target wavelengths with measured no-contact wavelengths after fabrication.
+
+channels:
+  P11:
+    configured: true
+    enabled_for_real_demodulation: false
+    x: -1
+    y: 1
+    fiber_id: fiber_1
+    fiber_order: 1
+    target_wavelength_nm: 1540.0
+    measured_wavelength_nm:
+    search_half_width_nm: 1.0
+    integration_half_width_nm: 0.35
+    response_polarity: attenuation
+  P12:
+    configured: true
+    enabled_for_real_demodulation: false
+    x: -1
+    y: 0
+    fiber_id: fiber_1
+    fiber_order: 2
+    target_wavelength_nm: 1545.0
+    measured_wavelength_nm:
+    search_half_width_nm: 1.0
+    integration_half_width_nm: 0.35
+    response_polarity: attenuation
+  P13:
+    configured: true
+    enabled_for_real_demodulation: false
+    x: -1
+    y: -1
+    fiber_id: fiber_1
+    fiber_order: 3
+    target_wavelength_nm: 1550.0
+    measured_wavelength_nm:
+    search_half_width_nm: 1.0
+    integration_half_width_nm: 0.35
+    response_polarity: attenuation
+  P21:
+    configured: true
+    enabled_for_real_demodulation: false
+    x: 0
+    y: 1
+    fiber_id: fiber_2
+    fiber_order: 1
+    target_wavelength_nm: 1555.0
+    measured_wavelength_nm:
+    search_half_width_nm: 1.0
+    integration_half_width_nm: 0.35
+    response_polarity: attenuation
+  P22:
+    configured: true
+    enabled_for_real_demodulation: false
+    x: 0
+    y: 0
+    fiber_id: fiber_2
+    fiber_order: 2
+    target_wavelength_nm: 1560.0
+    measured_wavelength_nm:
+    search_half_width_nm: 1.0
+    integration_half_width_nm: 0.35
+    response_polarity: attenuation
+  P23:
+    configured: true
+    enabled_for_real_demodulation: false
+    x: 0
+    y: -1
+    fiber_id: fiber_2
+    fiber_order: 3
+    target_wavelength_nm: 1565.0
+    measured_wavelength_nm:
+    search_half_width_nm: 1.0
+    integration_half_width_nm: 0.35
+    response_polarity: attenuation
+  P31:
+    configured: true
+    enabled_for_real_demodulation: false
+    x: 1
+    y: 1
+    fiber_id: fiber_3
+    fiber_order: 1
+    target_wavelength_nm: 1570.0
+    measured_wavelength_nm:
+    search_half_width_nm: 1.0
+    integration_half_width_nm: 0.35
+    response_polarity: attenuation
+  P32:
+    configured: true
+    enabled_for_real_demodulation: false
+    x: 1
+    y: 0
+    fiber_id: fiber_3
+    fiber_order: 2
+    target_wavelength_nm: 1575.0
+    measured_wavelength_nm:
+    search_half_width_nm: 1.0
+    integration_half_width_nm: 0.35
+    response_polarity: attenuation
+  P33:
+    configured: true
+    enabled_for_real_demodulation: false
+    x: 1
+    y: -1
+    fiber_id: fiber_3
+    fiber_order: 3
+    target_wavelength_nm: 1580.0
+    measured_wavelength_nm:
+    search_half_width_nm: 1.0
+    integration_half_width_nm: 0.35
+    response_polarity: attenuation

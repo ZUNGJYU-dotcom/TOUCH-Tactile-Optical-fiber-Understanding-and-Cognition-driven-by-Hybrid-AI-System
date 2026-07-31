@@ -53,7 +53,7 @@ finger_sensor_array:
   geometry_status: solidworks_tilted_flush_max_area_recesses_integrated
   manufacturing_status: provisional_trial_dimensions
   data_status: synchronized_demo_only
-  default_selected_finger: thumb
+  default_selected_finger: all
   demo_sync_mode: synchronized_with_thumb
   spectrum_scope_mode: selected_finger
   array_scope_mode: selected_finger

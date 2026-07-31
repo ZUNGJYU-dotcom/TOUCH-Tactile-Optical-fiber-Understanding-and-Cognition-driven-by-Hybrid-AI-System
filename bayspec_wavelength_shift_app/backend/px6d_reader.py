@@ -10,6 +10,9 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 import math
+import multiprocessing as mp
+import os
+import queue
 import statistics
 import struct
 import threading
@@ -18,8 +21,10 @@ from typing import Any, Iterable
 
 try:
     import serial
+    from serial.tools import list_ports as serial_list_ports
 except Exception:  # pragma: no cover - exposed through status()
     serial = None
+    serial_list_ports = None
 
 
 AXIS_NAMES = ("fx_n", "fy_n", "fz_n", "mx_nm", "my_nm", "mz_nm")
@@ -28,6 +33,159 @@ FRAME_LENGTH = 29
 COMMAND_READ_FRAME = 0x05
 COMMAND_VERSION = 0x07
 RESPONSE_DATA = 0x03
+
+
+def _optional_usb_identifier(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        return int(value.strip(), 0)
+    return int(value)
+
+
+def _serial_port_identity(port_info: object) -> dict[str, Any]:
+    return {
+        "port": str(getattr(port_info, "device", "") or ""),
+        "description": str(getattr(port_info, "description", "") or ""),
+        "hwid": str(getattr(port_info, "hwid", "") or ""),
+        "vid": getattr(port_info, "vid", None),
+        "pid": getattr(port_info, "pid", None),
+        "serial_number": str(
+            getattr(port_info, "serial_number", "") or ""
+        ),
+        "manufacturer": str(getattr(port_info, "manufacturer", "") or ""),
+    }
+
+
+def _close_serial_port(port: Any) -> None:
+    """Best-effort close that also asks Windows serial reads to cancel."""
+
+    if port is None:
+        return
+    for method_name in ("cancel_read", "cancel_write"):
+        method = getattr(port, method_name, None)
+        if callable(method):
+            try:
+                method()
+            except Exception:
+                pass
+    try:
+        port.close()
+    except Exception:
+        pass
+
+
+def _attach_process_to_kill_on_close_job(process_id: int) -> int | None:
+    """Return a Windows job handle that terminates the worker with its parent."""
+
+    if os.name != "nt" or int(process_id or 0) <= 0:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        ]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.AssignProcessToJobObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.HANDLE,
+        ]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        job_handle = kernel32.CreateJobObjectW(None, None)
+        if not job_handle:
+            return None
+        info = ExtendedLimitInformation()
+        info.BasicLimitInformation.LimitFlags = 0x00002000
+        if not kernel32.SetInformationJobObject(
+            job_handle,
+            9,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            kernel32.CloseHandle(job_handle)
+            return None
+        process_handle = kernel32.OpenProcess(
+            0x0001 | 0x0100,
+            False,
+            int(process_id),
+        )
+        if not process_handle:
+            kernel32.CloseHandle(job_handle)
+            return None
+        try:
+            if not kernel32.AssignProcessToJobObject(job_handle, process_handle):
+                kernel32.CloseHandle(job_handle)
+                return None
+        finally:
+            kernel32.CloseHandle(process_handle)
+        return int(job_handle)
+    except Exception:
+        return None
+
+
+def _close_windows_handle(handle: int | None) -> None:
+    if os.name != "nt" or not handle:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle(wintypes.HANDLE(int(handle)))
+    except Exception:
+        pass
 
 
 def crc8(data: bytes | bytearray | Iterable[int], initial: int = 0) -> int:
@@ -64,6 +222,195 @@ def parse_data_frame(frame: bytes) -> tuple[float, float, float, float, float, f
     if not all(math.isfinite(value) for value in values):
         raise ValueError("PX6D frame contains a non-finite axis value")
     return values
+
+
+def _read_serial_packet(
+    port: Any,
+    *,
+    minimum_length: int,
+    timeout_sec: float,
+) -> bytes | None:
+    buffer = bytearray()
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        waiting = int(getattr(port, "in_waiting", 0) or 0)
+        chunk = port.read(max(1, min(256, waiting or minimum_length)))
+        if chunk:
+            buffer.extend(chunk)
+        start = buffer.find(FRAME_HEADER)
+        if start < 0:
+            if len(buffer) > 2:
+                del buffer[:-1]
+            continue
+        if start > 0:
+            del buffer[:start]
+        if len(buffer) >= minimum_length:
+            return bytes(buffer[:minimum_length])
+    return None
+
+
+def _emit_serial_worker_message(output_queue: Any, payload: dict[str, Any]) -> None:
+    """Keep the newest worker evidence without allowing queue backpressure."""
+
+    try:
+        output_queue.put_nowait(payload)
+        return
+    except queue.Full:
+        pass
+    except Exception:
+        return
+    try:
+        output_queue.get_nowait()
+    except Exception:
+        pass
+    try:
+        output_queue.put_nowait(payload)
+    except Exception:
+        pass
+
+
+def _px6d_serial_worker(
+    config: dict[str, Any],
+    output_queue: Any,
+    stop_event: Any,
+) -> None:
+    """Own the native serial handle in a disposable process.
+
+    Some Windows USB serial drivers can leave a native read blocked after a
+    cable or device reset. Keeping that handle outside the API process lets the
+    parent terminate and recreate this worker without freezing TOUCH.
+    """
+
+    port = None
+    try:
+        if serial is None:
+            raise RuntimeError("pyserial_not_installed")
+        _emit_serial_worker_message(
+            output_queue,
+            {"kind": "connecting", "timestamp_epoch_sec": time.time()},
+        )
+        port = serial.Serial(
+            str(config["port"]),
+            int(config["baud_rate"]),
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=0.01,
+            write_timeout=0.25,
+        )
+        port.reset_input_buffer()
+        port.reset_output_buffer()
+        stop_event.wait(float(config["device_settle_sec"]))
+        if stop_event.is_set():
+            return
+
+        firmware: str | None = None
+        handshake_attempts = max(1, int(config["handshake_attempts"]))
+        for attempt in range(handshake_attempts):
+            if stop_event.is_set():
+                return
+            port.reset_input_buffer()
+            port.write(
+                command_packet(
+                    COMMAND_VERSION,
+                    0x01,
+                    int(config["device_id"]),
+                )
+            )
+            port.flush()
+            raw = _read_serial_packet(
+                port,
+                minimum_length=13,
+                timeout_sec=float(config["handshake_timeout_sec"]),
+            )
+            if (
+                raw is not None
+                and len(raw) >= 13
+                and raw[3] == COMMAND_VERSION
+                and crc8(raw[:-1]) == raw[-1]
+            ):
+                firmware = (
+                    raw[5:12].decode("ascii", errors="ignore").rstrip("\x00")
+                    or None
+                )
+                break
+            if attempt + 1 < handshake_attempts:
+                stop_event.wait(0.05)
+        if firmware is None:
+            raise TimeoutError("PX6D firmware handshake returned no valid response")
+
+        _emit_serial_worker_message(
+            output_queue,
+            {
+                "kind": "connected",
+                "firmware_version": firmware,
+                "timestamp_epoch_sec": time.time(),
+            },
+        )
+        poll_hz = max(1.0, min(100.0, float(config["poll_hz"])))
+        poll_interval = 1.0 / poll_hz
+        while not stop_event.is_set():
+            loop_started = time.monotonic()
+            request_started = time.perf_counter()
+            port.write(
+                command_packet(
+                    COMMAND_READ_FRAME,
+                    0x01,
+                    int(config["device_id"]),
+                )
+            )
+            port.flush()
+            frame = _read_serial_packet(
+                port,
+                minimum_length=FRAME_LENGTH,
+                timeout_sec=float(config["read_timeout_sec"]),
+            )
+            if frame is None:
+                raise TimeoutError("PX6D frame timeout")
+            try:
+                values = parse_data_frame(frame)
+            except Exception as exc:
+                _emit_serial_worker_message(
+                    output_queue,
+                    {
+                        "kind": "invalid_frame",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "timestamp_epoch_sec": time.time(),
+                    },
+                )
+                continue
+            _emit_serial_worker_message(
+                output_queue,
+                {
+                    "kind": "sample",
+                    "timestamp_epoch_sec": time.time(),
+                    "timestamp_monotonic_sec": time.monotonic(),
+                    "values": list(values),
+                    "roundtrip_ms": (
+                        time.perf_counter() - request_started
+                    )
+                    * 1000.0,
+                },
+            )
+            remaining = poll_interval - (time.monotonic() - loop_started)
+            if remaining > 0:
+                stop_event.wait(remaining)
+    except BaseException as exc:
+        if not stop_event.is_set():
+            _emit_serial_worker_message(
+                output_queue,
+                {
+                    "kind": "error",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "timestamp_epoch_sec": time.time(),
+                },
+            )
+    finally:
+        _close_serial_port(port)
+        _emit_serial_worker_message(
+            output_queue,
+            {"kind": "stopped", "timestamp_epoch_sec": time.time()},
+        )
 
 
 @dataclass(frozen=True)
@@ -112,13 +459,58 @@ class Px6dReader:
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         payload = dict(config or {})
-        self.port = str(payload.get("port") or "COM3")
+        self.configured_port = str(payload.get("port") or "COM3")
+        self.port = self.configured_port
+        self.auto_detect_port = bool(payload.get("auto_detect_port", True))
+        self.usb_vid = _optional_usb_identifier(payload.get("usb_vid"))
+        self.usb_pid = _optional_usb_identifier(payload.get("usb_pid"))
+        self.usb_serial_number = str(
+            payload.get("usb_serial_number")
+            or payload.get("serial_number")
+            or ""
+        ).strip()
+        self.port_description_contains = str(
+            payload.get("port_description_contains")
+            or payload.get("description_contains")
+            or ""
+        ).strip()
         self.baud_rate = int(payload.get("baud_rate") or 921600)
         self.device_id = int(payload.get("device_id") or 0x7F)
         self.poll_hz = max(1.0, min(100.0, float(payload.get("poll_hz") or 50.0)))
         self.read_timeout_sec = max(0.02, float(payload.get("read_timeout_sec") or 0.20))
         self.reconnect_interval_sec = max(
             0.1, float(payload.get("reconnect_interval_sec") or 1.0)
+        )
+        self.reconnect_max_interval_sec = max(
+            self.reconnect_interval_sec,
+            float(payload.get("reconnect_max_interval_sec") or 8.0),
+        )
+        self.reconnect_backoff_multiplier = max(
+            1.0, float(payload.get("reconnect_backoff_multiplier") or 2.0)
+        )
+        self.port_busy_backoff_sec = min(
+            self.reconnect_max_interval_sec,
+            max(
+                self.reconnect_interval_sec,
+                float(payload.get("port_busy_backoff_sec") or 5.0),
+            ),
+        )
+        self.isolate_serial_process = bool(payload.get("isolate_process", False))
+        self.worker_watchdog_sec = max(
+            self.read_timeout_sec + 0.30,
+            float(payload.get("worker_watchdog_sec") or 1.5),
+        )
+        self.device_settle_sec = max(
+            0.05, float(payload.get("device_settle_sec") or 0.20)
+        )
+        self.worker_stop_timeout_sec = max(
+            0.10, float(payload.get("worker_stop_timeout_sec") or 0.50)
+        )
+        self.handshake_timeout_sec = max(
+            0.10, float(payload.get("handshake_timeout_sec") or 0.40)
+        )
+        self.handshake_attempts = max(
+            1, min(5, int(payload.get("handshake_attempts") or 3))
         )
         self.history_seconds = max(10.0, float(payload.get("history_seconds") or 300.0))
         self.compression_sign = -1.0 if float(payload.get("compression_sign") or -1.0) < 0 else 1.0
@@ -161,7 +553,7 @@ class Px6dReader:
             self.auto_zero_capture_limit_n,
             float(payload.get("maximum_drift_offset_n") or 0.50),
         )
-        self.auto_tare_on_start = bool(payload.get("auto_tare_on_start", True))
+        self.auto_tare_on_start = bool(payload.get("auto_tare_on_start", False))
         self.auto_tare_duration_sec = max(
             0.25, float(payload.get("auto_tare_duration_sec") or 1.0)
         )
@@ -210,6 +602,14 @@ class Px6dReader:
         self._thread: threading.Thread | None = None
         self._serial = None
         self._connecting_serial = None
+        self._serial_worker_process = None
+        self._serial_worker_queue = None
+        self._serial_worker_stop_event = None
+        self._serial_worker_pid: int | None = None
+        self._serial_worker_job_handle: int | None = None
+        self._serial_worker_restarts = 0
+        self._serial_worker_forced_terminations = 0
+        self._serial_worker_last_message_monotonic: float | None = None
         self._running = False
         self._connected = False
         self._lifecycle_status = "idle"
@@ -219,6 +619,17 @@ class Px6dReader:
         self._valid_frames = 0
         self._invalid_frames = 0
         self._connection_attempts = 0
+        self._consecutive_connection_failures = 0
+        self._current_reconnect_delay_sec = 0.0
+        self._next_reconnect_epoch_sec: float | None = None
+        self._port_busy_detected = False
+        self._connection_error_kind: str | None = None
+        self._active_port: str | None = self.configured_port
+        self._port_detection_status = "not_checked"
+        self._detected_device_identity: dict[str, Any] | None = None
+        self._available_serial_ports: list[dict[str, Any]] = []
+        self._port_scan_count = 0
+        self._last_port_scan_epoch_sec: float | None = None
         self._started_at_epoch_sec: float | None = None
         self._tare_values: tuple[float, float, float, float, float, float] | None = None
         self._tare_timestamp_epoch_sec: float | None = None
@@ -231,6 +642,8 @@ class Px6dReader:
         self._stationary_detected = False
         self._auto_zero_drift_active = False
         self._filter_status = "tare_required"
+        self._auto_zero_frozen = False
+        self._auto_zero_freeze_reason: str | None = None
 
     def start(self) -> dict[str, Any]:
         with self._lock:
@@ -257,13 +670,14 @@ class Px6dReader:
             self._close_serial_locked()
             self._thread = None
             self._stop_event.clear()
+            self._clear_reconnect_backoff_locked()
             self._running = True
             self._connected = False
             self._lifecycle_status = "running"
             self._started_at_epoch_sec = time.time()
             worker = threading.Thread(
                 target=self._run,
-                name="px6d-com3-reader",
+                name="px6d-reader",
                 daemon=True,
             )
             self._thread = worker
@@ -304,6 +718,7 @@ class Px6dReader:
             # Closing the handle first interrupts an in-flight serial read on
             # drivers that would otherwise outlive the join timeout.
             self._close_serial_locked()
+        self._stop_isolated_worker()
         thread.join(timeout=2.0)
         with self._lock:
             if thread.is_alive():
@@ -324,6 +739,212 @@ class Px6dReader:
             self._close_serial_locked()
         return {"ok": True, "operation_status": "stopped", **self.status()}
 
+    @staticmethod
+    def _classify_connection_error(error: object) -> str:
+        text = str(error or "").strip().lower()
+        if any(
+            token in text
+            for token in (
+                "filenotfounderror",
+                "file not found",
+                "no such file",
+                "cannot find",
+                "device_not_detected",
+                "port_not_detected",
+                "system cannot find",
+            )
+        ):
+            return "port_not_found"
+        if any(
+            token in text
+            for token in (
+                "permissionerror",
+                "access is denied",
+                "access denied",
+                "permission denied",
+                "拒绝访问",
+                "winerror 5",
+            )
+        ):
+            return "port_busy_or_permission_denied"
+        if any(
+            token in text
+            for token in (
+                "filenotfounderror",
+                "file not found",
+                "no such file",
+                "cannot find",
+                "系统找不到",
+            )
+        ):
+            return "port_not_found"
+        if "handshake" in text:
+            return "handshake_timeout"
+        if "timeout" in text:
+            return "device_timeout"
+        return "serial_connection_error"
+
+    def _identity_matches(self, identity: dict[str, Any]) -> bool:
+        if self.usb_serial_number and (
+            str(identity.get("serial_number") or "").casefold()
+            != self.usb_serial_number.casefold()
+        ):
+            return False
+        if self.usb_vid is not None and identity.get("vid") != self.usb_vid:
+            return False
+        if self.usb_pid is not None and identity.get("pid") != self.usb_pid:
+            return False
+        if self.port_description_contains and (
+            self.port_description_contains.casefold()
+            not in str(identity.get("description") or "").casefold()
+        ):
+            return False
+        return bool(
+            self.usb_serial_number
+            or self.usb_vid is not None
+            or self.usb_pid is not None
+            or self.port_description_contains
+        )
+
+    def _resolve_active_port(self) -> str:
+        if not self.auto_detect_port:
+            with self._lock:
+                self._active_port = self.configured_port
+                self.port = self.configured_port
+                self._port_detection_status = "auto_detection_disabled"
+            return self.configured_port
+        if serial_list_ports is None:
+            with self._lock:
+                self._active_port = self.configured_port
+                self.port = self.configured_port
+                self._port_detection_status = "list_ports_unavailable"
+            return self.configured_port
+
+        try:
+            identities = [
+                _serial_port_identity(port_info)
+                for port_info in serial_list_ports.comports()
+            ]
+        except Exception as exc:
+            with self._lock:
+                self._active_port = self.configured_port
+                self.port = self.configured_port
+                self._port_detection_status = "port_scan_failed"
+                self._last_error = (
+                    f"PX6D serial port scan failed: {type(exc).__name__}: {exc}"
+                )
+            return self.configured_port
+
+        configured = self.configured_port.casefold()
+        identity_configured = bool(
+            self.usb_serial_number
+            or self.usb_vid is not None
+            or self.usb_pid is not None
+            or self.port_description_contains
+        )
+        matching = (
+            [item for item in identities if self._identity_matches(item)]
+            if identity_configured
+            else [
+                item
+                for item in identities
+                if str(item.get("port") or "").casefold() == configured
+            ]
+        )
+        selected = next(
+            (
+                item
+                for item in matching
+                if str(item.get("port") or "").casefold() == configured
+            ),
+            matching[0] if matching else None,
+        )
+        with self._lock:
+            self._port_scan_count += 1
+            self._last_port_scan_epoch_sec = time.time()
+            self._available_serial_ports = identities
+            self._detected_device_identity = dict(selected) if selected else None
+            if selected is not None:
+                active_port = str(selected["port"])
+                self._active_port = active_port
+                self.port = active_port
+                self._port_detection_status = (
+                    "matched_configured_port"
+                    if active_port.casefold() == configured
+                    else "matched_usb_identity_on_new_port"
+                )
+                return active_port
+
+            if not identity_configured:
+                self._active_port = self.configured_port
+                self.port = self.configured_port
+                self._port_detection_status = "configured_port_unverified"
+                return self.configured_port
+
+            self._active_port = None
+            self.port = self.configured_port
+            self._port_detection_status = (
+                "device_not_detected"
+                if not identities
+                else "configured_device_identity_not_detected"
+            )
+        raise FileNotFoundError(
+            "PX6D device_not_detected; waiting for USB identity "
+            f"VID={self.usb_vid!r}, PID={self.usb_pid!r}, "
+            f"serial={self.usb_serial_number!r}"
+        )
+
+    def _clear_reconnect_backoff_locked(self) -> None:
+        self._consecutive_connection_failures = 0
+        self._current_reconnect_delay_sec = 0.0
+        self._next_reconnect_epoch_sec = None
+        self._port_busy_detected = False
+        self._connection_error_kind = None
+
+    def _record_connection_failure(self, error: object) -> float:
+        with self._lock:
+            return self._record_connection_failure_locked(error)
+
+    def _record_connection_failure_locked(self, error: object) -> float:
+        error_text = str(error or "PX6D serial connection error")
+        error_kind = self._classify_connection_error(error_text)
+        self._consecutive_connection_failures += 1
+        base_delay = (
+            self.port_busy_backoff_sec
+            if error_kind == "port_busy_or_permission_denied"
+            else self.reconnect_interval_sec
+        )
+        exponent = max(0, self._consecutive_connection_failures - 1)
+        delay = min(
+            self.reconnect_max_interval_sec,
+            base_delay * (self.reconnect_backoff_multiplier**exponent),
+        )
+        self._current_reconnect_delay_sec = float(delay)
+        self._next_reconnect_epoch_sec = time.time() + float(delay)
+        self._port_busy_detected = error_kind == "port_busy_or_permission_denied"
+        self._connection_error_kind = error_kind
+        self._connected = False
+        if not self._stop_event.is_set():
+            self._lifecycle_status = "reconnecting"
+            self._last_error = error_text
+        return float(delay)
+
+    def _wait_before_reconnect(self) -> None:
+        with self._lock:
+            delay = max(0.0, float(self._current_reconnect_delay_sec))
+            expected_deadline = self._next_reconnect_epoch_sec
+        self._stop_event.wait(delay)
+        with self._lock:
+            if (
+                self._next_reconnect_epoch_sec == expected_deadline
+                and (
+                    expected_deadline is None
+                    or time.time() >= expected_deadline
+                    or self._stop_event.is_set()
+                )
+            ):
+                self._next_reconnect_epoch_sec = None
+
     def _run(self) -> None:
         current_worker = threading.current_thread()
         try:
@@ -331,6 +952,10 @@ class Px6dReader:
                 with self._lock:
                     self._lifecycle_status = "unavailable"
                     self._last_error = "pyserial_not_installed"
+                return
+
+            if self.isolate_serial_process:
+                self._run_isolated_serial()
                 return
 
             auto_tare_pending = self.auto_tare_on_start and self._tare_values is None
@@ -360,13 +985,14 @@ class Px6dReader:
                             self._stop_event.wait(remaining)
                 except Exception as exc:  # pragma: no cover - hardware path
                     with self._lock:
-                        self._connected = False
                         if not self._stop_event.is_set():
-                            self._lifecycle_status = "reconnecting"
-                            self._last_error = f"{type(exc).__name__}: {exc}"
+                            self._record_connection_failure_locked(
+                                f"{type(exc).__name__}: {exc}"
+                            )
                         self._close_serial_locked()
-                    self._stop_event.wait(self.reconnect_interval_sec)
+                    self._wait_before_reconnect()
         finally:
+            self._stop_isolated_worker()
             with self._lock:
                 stop_requested = self._stop_event.is_set()
                 previous_lifecycle = self._lifecycle_status
@@ -388,11 +1014,278 @@ class Px6dReader:
                 if self._thread is current_worker:
                     self._thread = None
 
+    def _isolated_worker_config(self, active_port: str) -> dict[str, Any]:
+        return {
+            "port": active_port,
+            "baud_rate": self.baud_rate,
+            "device_id": self.device_id,
+            "poll_hz": self.poll_hz,
+            "read_timeout_sec": self.read_timeout_sec,
+            "device_settle_sec": self.device_settle_sec,
+            "handshake_timeout_sec": self.handshake_timeout_sec,
+            "handshake_attempts": self.handshake_attempts,
+        }
+
+    def _start_isolated_worker(self) -> None:
+        active_port = self._resolve_active_port()
+        context = mp.get_context("spawn")
+        output_queue = context.Queue(maxsize=256)
+        stop_event = context.Event()
+        process = context.Process(
+            target=_px6d_serial_worker,
+            args=(self._isolated_worker_config(active_port), output_queue, stop_event),
+            name="px6d-serial-worker",
+            daemon=True,
+        )
+        with self._lock:
+            self._connection_attempts += 1
+            self._connected = False
+            self._lifecycle_status = "connecting"
+            self._serial_worker_queue = output_queue
+            self._serial_worker_stop_event = stop_event
+            self._serial_worker_process = process
+            self._serial_worker_last_message_monotonic = time.monotonic()
+        try:
+            process.start()
+        except BaseException:
+            with self._lock:
+                if self._serial_worker_process is process:
+                    self._serial_worker_process = None
+                    self._serial_worker_queue = None
+                    self._serial_worker_stop_event = None
+                    self._serial_worker_pid = None
+            try:
+                output_queue.close()
+                output_queue.cancel_join_thread()
+            except Exception:
+                pass
+            raise
+        job_handle = _attach_process_to_kill_on_close_job(int(process.pid or 0))
+        with self._lock:
+            self._serial_worker_pid = process.pid
+            self._serial_worker_job_handle = job_handle
+
+    def _stop_isolated_worker(self) -> None:
+        with self._lock:
+            process = self._serial_worker_process
+            output_queue = self._serial_worker_queue
+            stop_event = self._serial_worker_stop_event
+            job_handle = self._serial_worker_job_handle
+            self._serial_worker_process = None
+            self._serial_worker_queue = None
+            self._serial_worker_stop_event = None
+            self._serial_worker_pid = None
+            self._serial_worker_job_handle = None
+        if stop_event is not None:
+            try:
+                stop_event.set()
+            except Exception:
+                pass
+        forced = False
+        if process is not None:
+            try:
+                process.join(timeout=self.worker_stop_timeout_sec)
+            except Exception:
+                pass
+            try:
+                alive = process.is_alive()
+            except Exception:
+                alive = False
+            if alive:
+                forced = True
+                _close_windows_handle(job_handle)
+                job_handle = None
+                try:
+                    process.join(timeout=self.worker_stop_timeout_sec)
+                except Exception:
+                    pass
+                try:
+                    alive = process.is_alive()
+                except Exception:
+                    alive = False
+            if alive:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+                try:
+                    process.join(timeout=self.worker_stop_timeout_sec)
+                except Exception:
+                    pass
+            try:
+                alive = process.is_alive()
+            except Exception:
+                alive = False
+            if alive and hasattr(process, "kill"):
+                forced = True
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+                try:
+                    process.join(timeout=self.worker_stop_timeout_sec)
+                except Exception:
+                    pass
+        _close_windows_handle(job_handle)
+        if output_queue is not None:
+            try:
+                output_queue.close()
+                output_queue.cancel_join_thread()
+            except Exception:
+                pass
+        if forced:
+            with self._lock:
+                self._serial_worker_forced_terminations += 1
+
+    def _process_isolated_message(self, message: dict[str, Any]) -> bool:
+        kind = str(message.get("kind") or "")
+        with self._lock:
+            self._serial_worker_last_message_monotonic = time.monotonic()
+        if kind == "connecting":
+            with self._lock:
+                self._connected = False
+                self._lifecycle_status = "connecting"
+            return False
+        if kind == "connected":
+            with self._lock:
+                self._connected = True
+                self._lifecycle_status = "running"
+                self._firmware_version = message.get("firmware_version") or None
+                self._last_error = None
+            return False
+        if kind == "invalid_frame":
+            with self._lock:
+                self._invalid_frames += 1
+                self._last_error = str(message.get("error") or "PX6D invalid frame")
+            return False
+        if kind == "error":
+            with self._lock:
+                self._record_connection_failure_locked(
+                    str(message.get("error") or "PX6D worker error")
+                )
+            return True
+        if kind == "stopped":
+            return True
+        if kind != "sample":
+            return False
+        values = tuple(float(value) for value in (message.get("values") or ()))
+        if len(values) != len(AXIS_NAMES) or not all(
+            math.isfinite(value) for value in values
+        ):
+            with self._lock:
+                self._invalid_frames += 1
+                self._last_error = "PX6D worker emitted invalid axis values"
+            return False
+        with self._lock:
+            self._sequence += 1
+            sequence = self._sequence
+        sample = Px6dSample(
+            sequence,
+            float(message.get("timestamp_epoch_sec") or time.time()),
+            float(message.get("timestamp_monotonic_sec") or time.monotonic()),
+            *values,
+            float(message.get("roundtrip_ms") or 0.0),
+        )
+        self._append_sample(sample)
+        return False
+
+    def _run_isolated_serial(self) -> None:
+        auto_tare_pending = self.auto_tare_on_start and self._tare_values is None
+        while not self._stop_event.is_set():
+            try:
+                self._start_isolated_worker()
+                auto_tare_start = time.monotonic()
+                restart_required = False
+                failure_registered = False
+                while not self._stop_event.is_set() and not restart_required:
+                    with self._lock:
+                        output_queue = self._serial_worker_queue
+                        process = self._serial_worker_process
+                        last_message = self._serial_worker_last_message_monotonic
+                    if output_queue is None or process is None:
+                        restart_required = True
+                        break
+                    try:
+                        message = output_queue.get(timeout=0.10)
+                    except queue.Empty:
+                        message = None
+                    except (EOFError, OSError, ValueError):
+                        restart_required = True
+                        message = None
+                    if isinstance(message, dict):
+                        last_message = time.monotonic()
+                        restart_required = self._process_isolated_message(message)
+                        failure_registered = (
+                            failure_registered
+                            or str(message.get("kind") or "") == "error"
+                        )
+                    if auto_tare_pending and self._connected:
+                        if (
+                            time.monotonic() - auto_tare_start
+                            >= self.auto_tare_duration_sec
+                        ):
+                            result = self.tare(
+                                duration_sec=self.auto_tare_duration_sec,
+                                max_std_n=self.auto_tare_max_std_n,
+                                wait_for_new_samples=False,
+                            )
+                            if result.get("ok"):
+                                auto_tare_pending = False
+                            else:
+                                auto_tare_start = time.monotonic()
+                    try:
+                        process_alive = process.is_alive()
+                    except Exception:
+                        process_alive = False
+                    silent_for = (
+                        time.monotonic() - last_message
+                        if last_message is not None
+                        else math.inf
+                    )
+                    if not process_alive:
+                        restart_required = True
+                        with self._lock:
+                            if not self._stop_event.is_set():
+                                if not failure_registered:
+                                    self._record_connection_failure_locked(
+                                        self._last_error
+                                        or "PX6D serial worker exited unexpectedly"
+                                    )
+                                    failure_registered = True
+                    elif silent_for > self.worker_watchdog_sec:
+                        restart_required = True
+                        with self._lock:
+                            if not failure_registered:
+                                self._record_connection_failure_locked(
+                                    "PX6D serial worker watchdog timeout "
+                                    f"after {silent_for:.2f}s"
+                                )
+                                failure_registered = True
+                self._stop_isolated_worker()
+                if not self._stop_event.is_set():
+                    with self._lock:
+                        self._serial_worker_restarts += 1
+                        if not failure_registered:
+                            self._record_connection_failure_locked(
+                                "PX6D serial worker restart requested"
+                            )
+                    self._wait_before_reconnect()
+            except BaseException as exc:
+                self._stop_isolated_worker()
+                with self._lock:
+                    if not self._stop_event.is_set():
+                        self._record_connection_failure_locked(
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        self._serial_worker_restarts += 1
+                self._wait_before_reconnect()
+
     def _connect(self) -> None:
+        active_port = self._resolve_active_port()
         with self._lock:
             self._connection_attempts += 1
         port = serial.Serial(
-            self.port,
+            active_port,
             self.baud_rate,
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
@@ -477,26 +1370,15 @@ class Px6dReader:
 
     @staticmethod
     def _read_packet(port: Any, *, minimum_length: int, timeout_sec: float) -> bytes | None:
-        buffer = bytearray()
-        deadline = time.monotonic() + timeout_sec
-        while time.monotonic() < deadline:
-            waiting = int(getattr(port, "in_waiting", 0) or 0)
-            chunk = port.read(max(1, min(256, waiting or minimum_length)))
-            if chunk:
-                buffer.extend(chunk)
-            start = buffer.find(FRAME_HEADER)
-            if start < 0:
-                if len(buffer) > 2:
-                    del buffer[:-1]
-                continue
-            if start > 0:
-                del buffer[:start]
-            if len(buffer) >= minimum_length:
-                return bytes(buffer[:minimum_length])
-        return None
+        return _read_serial_packet(
+            port,
+            minimum_length=minimum_length,
+            timeout_sec=timeout_sec,
+        )
 
     def _append_sample(self, sample: Px6dSample) -> None:
         with self._lock:
+            self._clear_reconnect_backoff_locked()
             evicted_sequence = (
                 self._samples[0].sequence_id
                 if len(self._samples) == self._samples.maxlen
@@ -592,6 +1474,13 @@ class Px6dReader:
         if self._tare_values is None:
             self._stationary_since_epoch_sec = None
             filter_status = "tare_required"
+        elif self._auto_zero_frozen:
+            self._stationary_since_epoch_sec = None
+            filter_status = (
+                f"auto_zero_frozen:{self._auto_zero_freeze_reason}"
+                if self._auto_zero_freeze_reason
+                else "auto_zero_frozen"
+            )
         elif not self.auto_zero_drift_enabled:
             self._stationary_since_epoch_sec = None
             filter_status = "filtered"
@@ -638,6 +1527,31 @@ class Px6dReader:
             filter_status=filter_status,
         )
 
+    def set_auto_zero_frozen(
+        self,
+        frozen: bool,
+        *,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Freeze drift adaptation while preserving filtering and raw samples."""
+
+        with self._lock:
+            self._auto_zero_frozen = bool(frozen)
+            self._auto_zero_freeze_reason = (
+                str(reason or "external_guard") if frozen else None
+            )
+            self._stationary_since_epoch_sec = None
+            if frozen:
+                self._auto_zero_drift_active = False
+                self._filter_status = (
+                    f"auto_zero_frozen:{self._auto_zero_freeze_reason}"
+                )
+        return {
+            "ok": True,
+            "auto_zero_frozen": self._auto_zero_frozen,
+            "auto_zero_freeze_reason": self._auto_zero_freeze_reason,
+        }
+
     def _reset_conditioner_locked(self) -> None:
         self._conditioned_samples.clear()
         self._filtered_axis_samples.clear()
@@ -663,10 +1577,7 @@ class Px6dReader:
             if port is None or id(port) in closed_ids:
                 continue
             closed_ids.add(id(port))
-            try:
-                port.close()
-            except Exception:
-                pass
+            _close_serial_port(port)
 
     def tare(
         self,
@@ -943,6 +1854,8 @@ class Px6dReader:
             tare = self._tare_values or (0.0,) * 6
             conditioned_by_sequence = dict(self._conditioned_samples)
             filtered_axes_by_sequence = dict(self._filtered_axis_samples)
+            auto_zero_frozen = self._auto_zero_frozen
+            auto_zero_freeze_reason = self._auto_zero_freeze_reason
         if not samples:
             return {"ok": False, "status": "px6d_sample_missing"}
         selected = [
@@ -957,6 +1870,8 @@ class Px6dReader:
                     "ok": False,
                     "status": "px6d_sample_too_far_from_spectrum",
                     "nearest_offset_ms": (nearest.timestamp_epoch_sec - target) * 1000.0,
+                    "sync_within_target": False,
+                    "calibration_sync_ok": False,
                 }
             selected = [nearest]
             method = "nearest_sample"
@@ -1019,9 +1934,16 @@ class Px6dReader:
         center_timestamp = statistics.median(sample.timestamp_epoch_sec for sample in selected)
         sync_offset_ms = (center_timestamp - target) * 1000.0
         sequence_ids = [sample.sequence_id for sample in selected]
+        calibration_sync_ok = (
+            abs(sync_offset_ms) <= self.sync_acceptable_max_offset_ms
+        )
         return {
             "ok": True,
-            "status": "synced",
+            "status": (
+                "synced"
+                if calibration_sync_ok
+                else "outside_calibration_sync_tolerance"
+            ),
             "sync_method": method,
             "sample_count": len(selected),
             "force_sequence_start": min(sequence_ids),
@@ -1030,7 +1952,8 @@ class Px6dReader:
             "force_timestamp_epoch_sec": center_timestamp,
             "sync_offset_ms": sync_offset_ms,
             "sync_quality": self._sync_quality(sync_offset_ms),
-            "sync_within_target": abs(sync_offset_ms) <= self.sync_acceptable_max_offset_ms,
+            "sync_within_target": calibration_sync_ok,
+            "calibration_sync_ok": calibration_sync_ok,
             "window_half_width_sec": half_window,
             "raw": dict(zip(AXIS_NAMES, raw_medians)),
             "zeroed": dict(zip(AXIS_NAMES, zeroed)),
@@ -1050,6 +1973,8 @@ class Px6dReader:
             "auto_zero_drift_active": bool(
                 latest_conditioned and latest_conditioned.auto_zero_drift_active
             ),
+            "auto_zero_frozen": auto_zero_frozen,
+            "auto_zero_freeze_reason": auto_zero_freeze_reason,
             "force_filter_status": (
                 latest_conditioned.filter_status
                 if latest_conditioned is not None
@@ -1070,6 +1995,13 @@ class Px6dReader:
             worker_alive = bool(
                 self._thread is not None and self._thread.is_alive()
             )
+            serial_process = self._serial_worker_process
+            try:
+                serial_worker_alive = bool(
+                    serial_process is not None and serial_process.is_alive()
+                )
+            except Exception:
+                serial_worker_alive = False
             latest = self._samples[-1] if self._samples else None
             now = time.time()
             age = now - latest.timestamp_epoch_sec if latest is not None else None
@@ -1091,19 +2023,66 @@ class Px6dReader:
                 if elapsed is not None and elapsed > 0
                 else None
             )
+            next_reconnect_in_sec = (
+                max(0.0, self._next_reconnect_epoch_sec - now)
+                if self._next_reconnect_epoch_sec is not None
+                else None
+            )
             return {
                 "running": self._running,
                 "worker_alive": worker_alive,
                 "connected": self._connected,
-                "connection_in_progress": self._connecting_serial is not None,
+                "connection_in_progress": bool(
+                    self._connecting_serial is not None
+                    or (
+                        self.isolate_serial_process
+                        and serial_worker_alive
+                        and not self._connected
+                    )
+                ),
                 "lifecycle_status": self._lifecycle_status,
                 "stop_requested": self._stop_event.is_set(),
-                "port": self.port,
+                "port": self._active_port or self.configured_port,
+                "configured_port": self.configured_port,
+                "active_port": self._active_port,
+                "auto_detect_port": self.auto_detect_port,
+                "port_detection_status": self._port_detection_status,
+                "detected_device_identity": (
+                    dict(self._detected_device_identity)
+                    if self._detected_device_identity is not None
+                    else None
+                ),
+                "available_serial_ports": [
+                    dict(item) for item in self._available_serial_ports
+                ],
+                "port_scan_count": self._port_scan_count,
+                "last_port_scan_epoch_sec": self._last_port_scan_epoch_sec,
                 "baud_rate": self.baud_rate,
                 "firmware_version": self._firmware_version,
                 "valid_frame_count": self._valid_frames,
                 "invalid_frame_count": self._invalid_frames,
                 "connection_attempts": self._connection_attempts,
+                "consecutive_connection_failures": (
+                    self._consecutive_connection_failures
+                ),
+                "connection_error_kind": self._connection_error_kind,
+                "port_busy_detected": self._port_busy_detected,
+                "reconnect_delay_sec": self._current_reconnect_delay_sec,
+                "next_reconnect_in_sec": next_reconnect_in_sec,
+                "reconnect_max_interval_sec": self.reconnect_max_interval_sec,
+                "serial_isolation_enabled": self.isolate_serial_process,
+                "serial_worker_alive": serial_worker_alive,
+                "serial_worker_pid": self._serial_worker_pid,
+                "serial_worker_job_guard_active": bool(
+                    self._serial_worker_job_handle
+                ),
+                "serial_worker_restart_count": self._serial_worker_restarts,
+                "serial_worker_forced_termination_count": (
+                    self._serial_worker_forced_terminations
+                ),
+                "serial_worker_watchdog_sec": self.worker_watchdog_sec,
+                "auto_zero_frozen": self._auto_zero_frozen,
+                "auto_zero_freeze_reason": self._auto_zero_freeze_reason,
                 "last_error": self._last_error,
                 "last_sample_age_sec": age,
                 "sample_fresh": sample_fresh,

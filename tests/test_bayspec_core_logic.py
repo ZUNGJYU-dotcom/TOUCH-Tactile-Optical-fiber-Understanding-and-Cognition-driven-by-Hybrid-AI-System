@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+import re
 import sys
 import time
 import unittest
@@ -401,7 +402,12 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
         self.assertIn("responseLevelFromSurfaceValue(proxyResponseRatio)", app_js)
         self.assertIn("const trainedModelTrace", app_js)
         self.assertIn("trace: trainedModelTrace || normalizedEventTrace", app_js)
-        self.assertIn('trainedModelDisplay ? "Visual response" : "Peak |Δλ|"', app_js)
+        self.assertRegex(
+            app_js,
+            re.compile(
+                r'trainedModelDisplay\s*\?\s*"Visual response"\s*:\s*"Peak \|[^"]+\|"'
+            ),
+        )
         self.assertIn("formatPercent(surfacePeakValue, 1)", app_js)
         self.assertIn("function snapDisplayedFrameToCurrentTargets()", app_js)
         self.assertIn("state.smoothSurfaceVisualPeak = state.targetSurfaceVisualPeak", app_js)
@@ -411,14 +417,15 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
         self.assertIn('state.arrayDemoPlaybackMode !== "loop"', app_js)
         self.assertIn('const frameScenario = actionFinished ? "no_contact"', app_js)
 
-    def test_operator_spectrum_entry_uses_compact_accessible_icon(self) -> None:
+    def test_operator_spectrum_entry_uses_accessible_card_without_redundant_icon(self) -> None:
         index_html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
-        styles_css = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
-
-        self.assertIn('class="chip spectrum-open-chip icon-chip"', index_html)
-        self.assertIn('data-lucide="chart-spline"', index_html)
-        self.assertIn(".operator-mode .icon-chip", styles_css)
-        self.assertIn("width: 28px;", styles_css)
+        spectrum_card = index_html.split('class="hud-card summary-hud"', 1)[1].split(
+            "</div>", 1
+        )[0]
+        self.assertIn('role="button"', spectrum_card)
+        self.assertIn('tabindex="0"', spectrum_card)
+        self.assertIn('aria-label="Open spectrum drawer"', spectrum_card)
+        self.assertNotIn("spectrum-open-chip", spectrum_card)
 
     def test_operator_status_strip_uses_compact_icons(self) -> None:
         index_html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
@@ -588,6 +595,17 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
 
 
 class WavelengthArraySimulationTests(unittest.TestCase):
+    SPECTRAL_CHANNEL_ORDER = [
+        "P11",
+        "P12",
+        "P13",
+        "P21",
+        "P22",
+        "P23",
+        "P31",
+        "P32",
+        "P33",
+    ]
     SCENARIO_STEPS = {
         "no_contact": 1,
         "center_press": 50,
@@ -618,19 +636,43 @@ class WavelengthArraySimulationTests(unittest.TestCase):
         self.assertGreater(contact_channels["P22"]["tracked_wavelength_nm"], contact_channels["P22"]["baseline_wavelength_nm"])
         self.assertNotIn("same_fiber_downstream_optical_coupling", contact["coupling_sources"])
 
-    def test_synthetic_spectrum_peak_centers_follow_channel_shifts(self) -> None:
+    def test_recorded_spectrum_peaks_follow_auto_discovered_wavelength_order(self) -> None:
         frame = backend_main.simulated_array_frame("center_press", step=30)
-        channels = {item["channel_id"]: item for item in frame["channels"]}
-        peaks = {item["channel_id"]: item for item in frame["spectrum"]["peaks"]}
-        self.assertAlmostEqual(
-            peaks["P22"]["peak_wavelength_nm"],
-            channels["P22"]["tracked_wavelength_nm"],
-            places=6,
+        spectrum = frame["spectrum"]
+        peaks = spectrum["peaks"]
+        self.assertEqual(len(peaks), 9)
+        self.assertEqual(
+            [item["provisional_channel_id"] for item in peaks],
+            self.SPECTRAL_CHANNEL_ORDER,
+        )
+        references = [
+            float(item["candidate_reference_wavelength_nm"]) for item in peaks
+        ]
+        self.assertEqual(references, sorted(references))
+        for peak in peaks:
+            self.assertLessEqual(
+                abs(
+                    float(peak["peak_wavelength_nm"])
+                    - float(peak["candidate_reference_wavelength_nm"])
+                ),
+                0.85,
+            )
+            self.assertEqual(
+                peak["peak_assignment_method"],
+                "automatic_no_contact_discovery_then_local_tracking",
+            )
+            self.assertFalse(peak["physical_channel_mapping_final"])
+        self.assertEqual(
+            spectrum["spectrum_peak_profile"], "recorded_auto_discovered_9fbg"
+        )
+        self.assertEqual(
+            spectrum["spectrum_peak_mapping_status"],
+            "wavelength_order_assignment",
         )
         self.assertEqual(frame["frame_sync_status"], "synced")
         self.assertIn("wavelength-shift", frame["surface_title"])
 
-    def test_synthetic_spectrum_peak_height_is_invariant_across_scenarios(self) -> None:
+    def test_recorded_spectrum_replaces_each_frame_and_preserves_measured_counts(self) -> None:
         frames = [
             backend_main.simulated_array_frame("no_contact", step=0),
             backend_main.simulated_array_frame("center_press", step=30),
@@ -639,12 +681,14 @@ class WavelengthArraySimulationTests(unittest.TestCase):
         ]
         maxima = [max(frame["spectrum"]["intensity"]) for frame in frames]
         for frame, maximum in zip(frames, maxima):
-            self.assertAlmostEqual(maximum, 44000.0, delta=0.01)
-            self.assertFalse(frame["spectrum"]["intensity_modulation_enabled"])
-            self.assertEqual(frame["spectrum"]["peak_height_mode"], "fixed_per_channel")
+            self.assertTrue(math.isfinite(maximum))
+            self.assertGreater(maximum, 0.0)
+            self.assertTrue(frame["spectrum"]["intensity_modulation_enabled"])
+            self.assertEqual(frame["spectrum"]["peak_height_mode"], "recorded_counts")
             self.assertEqual(frame["spectrum"]["frame_render_semantics"], "replace_previous_spectrum")
+        self.assertGreater(len({round(value, 6) for value in maxima}), 1)
 
-    def test_every_demo_frame_is_pure_wavelength_translation(self) -> None:
+    def test_every_recorded_demo_frame_has_valid_auto_discovered_peak_contract(self) -> None:
         for scenario, step_count in self.SCENARIO_STEPS.items():
             for step in range(step_count):
                 with self.subTest(scenario=scenario, step=step):
@@ -652,24 +696,25 @@ class WavelengthArraySimulationTests(unittest.TestCase):
                     spectrum = frame["spectrum"]
                     wavelengths = spectrum["wavelength_nm"]
                     counts = spectrum["intensity"]
-                    self.assertEqual(len(wavelengths), 4301)
-                    self.assertEqual(len(counts), 4301)
+                    peaks = spectrum["peaks"]
+                    self.assertEqual(len(wavelengths), 512)
+                    self.assertEqual(len(counts), 512)
                     self.assertTrue(all(math.isfinite(value) for value in counts))
-                    self.assertAlmostEqual(max(counts), 44000.0, delta=0.01)
-                    self.assertFalse(spectrum["intensity_modulation_enabled"])
-                    for channel in frame["channels"]:
-                        self.assertEqual(
-                            channel["intensity_counts"],
-                            channel["baseline_intensity_counts"],
-                        )
-                        self.assertEqual(channel["relative_intensity"], 1.0)
-                        self.assertEqual(channel["attenuation_ratio"], 0.0)
-                        self.assertAlmostEqual(
-                            channel["tracked_wavelength_nm"]
-                            - channel["baseline_wavelength_nm"],
-                            channel["delta_wavelength_pm"] / 1000.0,
-                            places=12,
-                        )
+                    self.assertGreater(max(counts), 0.0)
+                    self.assertEqual(len(peaks), 9)
+                    self.assertEqual(
+                        [item["provisional_channel_id"] for item in peaks],
+                        self.SPECTRAL_CHANNEL_ORDER,
+                    )
+                    self.assertEqual(
+                        spectrum["spectrum_peak_profile"],
+                        "recorded_auto_discovered_9fbg",
+                    )
+                    self.assertEqual(
+                        spectrum["frame_render_semantics"],
+                        "replace_previous_spectrum",
+                    )
+                    self.assertFalse(spectrum["physical_channel_mapping_final"])
 
     def test_release_finishes_at_no_contact(self) -> None:
         complete = backend_main.simulated_array_frame("release", step=9)

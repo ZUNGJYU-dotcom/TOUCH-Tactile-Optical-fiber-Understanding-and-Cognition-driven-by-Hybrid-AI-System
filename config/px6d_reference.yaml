@@ -3,11 +3,25 @@ auto_start: true
 
 serial:
   port: COM3
+  auto_detect_port: true
+  usb_vid: 0x1A86
+  usb_pid: 0x55D3
+  usb_serial_number: "5C7B025505"
+  port_description_contains: CH343
   baud_rate: 921600
   device_id: 127
   poll_hz: 50.0
   read_timeout_sec: 0.20
   reconnect_interval_sec: 1.0
+  reconnect_max_interval_sec: 8.0
+  reconnect_backoff_multiplier: 2.0
+  port_busy_backoff_sec: 5.0
+  isolate_process: true
+  worker_watchdog_sec: 1.5
+  worker_stop_timeout_sec: 0.5
+  device_settle_sec: 0.20
+  handshake_timeout_sec: 0.40
+  handshake_attempts: 3
 
 signal:
   history_seconds: 300.0
@@ -35,14 +49,14 @@ mechanical:
   note: "Configured nominal PX6D-75 axis ranges; raw and software-zeroed values are both retained."
 
 software_tare:
-  auto_tare_on_start: true
+  auto_tare_on_start: false
   duration_sec: 1.0
   maximum_fz_std_n: 0.12
-  note: "Software zero only; the PX6D hardware calibration command is never sent."
+  note: "Software zero only; the PX6D hardware calibration command is never sent. Tare is operator initiated so a real load cannot be silently absorbed at startup."
 
 synchronization:
   force_window_half_width_sec: 0.25
-  maximum_nearest_sample_age_sec: 1.0
+  maximum_nearest_sample_age_sec: 0.25
   timestamp_basis: host_epoch_clock
   aggregation: median
   excellent_max_offset_ms: 50.0
@@ -66,7 +80,7 @@ capture:
     - capture_index
     - timeline_timestamp_epoch_sec
     - elapsed_time_sec
-  note: "The user may save any one, two, or all three streams. Selected files share one canonical timeline; optical-driven captures align PX6D data to the spectrum host timestamp."
+  note: "The user may save any one, two, or all three streams. Selected files share one canonical timeline; optical-driven captures require PX6D alignment within 250 ms and freeze force auto-zero adaptation until recording stops."
 
 semantics:
   primary_display_axis: Fz

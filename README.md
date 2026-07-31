@@ -1,42 +1,86 @@
-# TOUCH System - Trained Static Spectrum Twin
+# TOUCH
 
-Research software for ordinary-FBG tactile recognition from a complete
-512-point BaySpec/Sense spectrum. This edition uses a trained full-spectrum
-fingerprint to estimate:
+Research software for optical-fiber tactile sensing. The current Beta Operator
+runtime uses a trained ordinary-FBG 512-point BaySpec/Sense all-data model to
+estimate:
 
 - contact or no contact;
 - approximate manual contact position `P11`-`P33`;
-- approximate manual response level `light`, `normal`, or `hard`.
+- continuous optical `Fz` in the current 0-5 N research range.
 
-It is a separate application. It does not replace or modify the retained PD
-voltage, optical-intensity, or provisional wavelength-shift editions.
+The model consumes optical features only at runtime. PX6D `Fz` was used as
+synchronized training and validation supervision and is not required for
+optical-force inference. The retained PD-voltage and earlier optical-intensity
+applications remain separate.
 
-## Latest Update - v0.15.4
+## mFBG Expansion Contract
 
-Version 0.15.4 improves perceived desktop startup without changing sensing,
-recognition, or visualization behavior. The native window now appears first
-with a lightweight TOUCH startup view while the local API and scientific
-runtime initialize in the background. The full workspace replaces that startup
-view as soon as the backend health check succeeds.
+The retained ordinary-FBG model remains the active runtime. A separate
+`mfbg_intensity_3x3` profile has now been added as the future primary sensor
+path. It provides nine-channel spectral-window intensity demodulation,
+multi-region frame structures, baseline-aware recording adapters, and isolated
+`/api/mfbg-intensity/*` endpoints without changing the existing ordinary-FBG
+inference contract.
 
-The packaged build displayed its startup window in about 1.8 seconds and
-navigated to the complete application in about 5.1 seconds on the development
-machine. These timings are indicative rather than a hardware-independent
-guarantee.
+Real mFBG 3x3 mode is still disabled. The 1540-1580 nm channel table is a
+preliminary target plan, measured wavelengths are not populated, no new mFBG
+training data have been used, and the continuous surface remains a raw coupled
+optical-response proxy rather than calibrated force or pressure. See
+[docs/mfbg_intensity_profile.md](docs/mfbg_intensity_profile.md) for the
+demodulation, frame, recording, and activation contracts.
 
-The trained model, BaySpec demodulation, coupling logic, PX6D synchronization,
-five-finger geometry, and scientific interpretation are unchanged. See
-[CHANGELOG.md](CHANGELOG.md) for the complete release summary.
+## Latest Update - v0.18.5 Beta
+
+The Beta runtime deploys the latest all-data optical bundle: temporal optical
+context supports contact and nine-position inference, while the current-frame
+optical head estimates `Fz`. Grouped evaluation is by `session_id`; force-sensor
+measurements are never model inputs.
+
+The built-in demonstration now replays synchronized real 512-point BaySpec
+spectra. Its nine spectral peaks are discovered automatically from the robust
+no-contact median and tracked locally in every frame. The provisional spectral
+assignment follows ascending wavelength order:
+
+```text
+P11, P12, P13, P21, P22, P23, P31, P32, P33
+```
+
+This wavelength-order assignment is separate from the 3x3 screen layout and is
+not a final measured physical channel map. The complete automated suite passes
+with 467 tests and 172 subtests.
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete release summary.
+
+## Spectrum Normalization
+
+TOUCH can display and record a wavelength-aligned no-contact ratio:
+
+```text
+normalized_intensity_ratio(lambda,t) = I(lambda,t) / I0(lambda)
+```
+
+`I0` is the median full spectrum accepted by the existing stable
+post-release/no-contact baseline gate. The normalization control remains in
+Settings. Before an accepted baseline exists, the display falls back to the
+processed or raw spectrum and reports that normalization is waiting.
+
+The deployed ordinary-FBG recognition model still receives the original raw
+512-point intensity array. Synchronized recordings retain raw counts and add
+the aligned `I0` plus `I/I0` when available. Per-frame min-max normalization is
+not used because it would erase absolute response evidence and amplify weak
+noise. The future mFBG profile retains its separate channel-level `I_i/I0_i`
+demodulation contract.
 
 ## Recognition Contract
 
 ```text
 current 512-point full spectrum
+  + trailing optical context
   + stable current-session post-release recovery baseline
-  -> contact detector
-  -> manual-domain 9-position classifier
-  -> position-conditioned light/normal/hard classifier
-  -> broad fingertip digital-twin response patch
+  -> optical contact detector
+  -> optical 9-position classifier
+  -> optical Fz estimator (0-5 N research range)
+  -> continuous digital-twin response
 ```
 
 The main model domain is manual pressing: approximate position and a broad
@@ -54,12 +98,11 @@ release contact, wait for a stable spectrum, and set a multi-frame baseline.
 Evaluation uses leave-one-repeat-index-out groups over independent static CSV
 files. Random snapshot splitting is not used.
 
-| Output | Selected model | OOF result |
+| Output | Selected Beta model | Grouped result |
 | --- | --- | ---: |
-| contact | Logistic Regression + current spectrum shape | 100.00% accuracy |
-| position | Extra Trees + current spectrum shape | 100.00% accuracy |
-| response level | position-conditioned Extra Trees | 97.78% macro-F1 |
-| position + level | hierarchical output | 97.78% joint accuracy |
+| contact | temporal Extra Trees | 94.13% macro-F1 |
+| position | temporal Extra Trees | 98.85% macro-F1 |
+| optical Fz | current-frame Extra Trees | 0.268 N MAE |
 
 These are single-session baseline results. They are not a final cross-session
 generalization claim. The position model was stable across the available early
@@ -105,8 +148,9 @@ diagnostic-only and cannot drive the UI or deformation.
 
 ## Scientific Boundary
 
-- `light`, `normal`, and `hard` are approximate operator response levels.
-- The optical model does not output calibrated force, pressure, or displacement.
+- The Beta optical model outputs an experimental `Fz` estimate learned from
+  synchronized PX6D supervision; it is not a certified force measurement.
+- The optical model does not output calibrated pressure or displacement.
 - `PX6D Reference Fz` is an independently measured ground-truth label in N;
   it is not an optical-model force prediction.
 - Static snapshots do not support tap, slide, or release-dynamics recognition.
@@ -122,9 +166,11 @@ diagnostic-only and cannot drive the UI or deformation.
 | `bayspec_wavelength_shift_app/` | Desktop launcher, local API, BaySpec acquisition, and UI |
 | `models/` | Deployed model plus non-deployed candidate bundles |
 | `src/hybrid_spectrum/` | Dataset features and runtime model adapter |
+| `src/mfbg_intensity/` | Isolated future mFBG 3x3 intensity profile and recorder adapters |
 | `scripts/record_live_shadow_comparison.py` | Same-frame deployed/candidate logger |
 | `scripts/run_guided_live_shadow_validation.py` | Interactive 9-position/3-level live validation |
 | `config/` | Acquisition, baseline, array, and scene configuration |
+| `config/mfbg_intensity_3x3.yaml` | Preliminary mFBG channel, intensity, baseline, and coupling contract |
 | `tests/` | Demodulation, array orientation, baseline gate, and trained-model tests |
 
 ## Run
@@ -135,7 +181,7 @@ run_desktop.bat
 ```
 
 For the packaged Windows build, download
-`TOUCH-v0.15.4-windows-x64.zip` from the GitHub release, extract the complete
+`TOUCH-v0.18.5-beta-windows-x64.zip` from the release, extract the complete
 `TOUCH` folder, and run `TOUCH\TOUCH.exe`. Do not move only the executable out
 of the extracted folder because its bundled runtime and assets are required.
 

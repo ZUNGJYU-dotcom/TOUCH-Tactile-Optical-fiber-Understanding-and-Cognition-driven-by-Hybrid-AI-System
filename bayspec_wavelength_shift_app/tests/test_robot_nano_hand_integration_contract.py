@@ -252,7 +252,7 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
             '"all",\n  "thumb",\n  "little",\n  "ring",\n  "middle",\n  "index",\n  "thumb",\n  "all",',
             self.app_js,
         )
-        self.assertIn("fingerNavigationIndex: 1", self.app_js)
+        self.assertIn("fingerNavigationIndex: 0", self.app_js)
         self.assertIn(
             "? currentIndex >= lastIndex",
             self.app_js,
@@ -267,8 +267,22 @@ class RobotNanoHandIntegrationContractTests(unittest.TestCase):
         self.assertNotIn("translateY(-50%)", self.css)
         self.assertIn("FINGER_OVERVIEW_DURATION_MS", self.app_js)
         self.assertIn("navigationVisible: keepFingerNavigation && wholeHandMode", self.app_js)
+        self.assertIn("keepFingerNavigation = true", self.app_js)
         self.assertIn("controls.enabled = false", self.app_js)
         self.assertIn("controls.enabled = true", self.app_js)
+
+    def test_whole_hand_operator_view_defaults_to_all_fingers(self) -> None:
+        self.assertEqual(
+            self.config["finger_sensor_array"]["default_selected_finger"],
+            "all",
+        )
+        self.assertIn('selectedFinger: "all"', self.app_js)
+        self.assertIn('default_selected_finger: "all"', self.app_js)
+        self.assertIn(
+            '<h2 id="tactileSurfaceTitle">Five-Finger Tactile Surface</h2>',
+            self.html,
+        )
+        self.assertIn('<option value="all" selected>All</option>', self.html)
 
     def test_whole_hand_canvas_uses_stable_desktop_cursor(self) -> None:
         self.assertIn(

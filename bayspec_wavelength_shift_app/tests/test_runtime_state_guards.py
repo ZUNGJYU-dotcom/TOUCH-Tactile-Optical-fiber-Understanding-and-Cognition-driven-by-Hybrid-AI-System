@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -21,8 +22,10 @@ from bridge import BaySpecWavelengthShiftBridge
 from desktop_launcher import (
     health_payload_is_expected,
     load_application_when_ready,
+    port_is_free,
     run_backend,
     run_self_test,
+    select_backend_port,
     startup_document,
     stop_owned_backend,
     wait_until_ready,
@@ -236,8 +239,37 @@ class DesktopBackendShutdownTests(unittest.TestCase):
         document = startup_document(Path(__file__).resolve().parents[1])
 
         self.assertIn("<strong>TOUCH</strong>", document)
-        self.assertIn("<h1>Starting</h1>", document)
+        self.assertIn("<h1>TOUCH</h1>", document)
+        self.assertIn(
+            "Tactile Optical-fiber Understanding and Cognition driven by "
+            "Hybrid-AI System",
+            document,
+        )
+        self.assertIn('<span class="status-title">Starting</span>', document)
         self.assertIn("Preparing workspace", document)
+        self.assertIn('src="data:image/png;base64,', document)
+        self.assertIn('class="logo-stage"', document)
+        self.assertIn('class="contact-ball"', document)
+        self.assertIn('class="body-shape morph-shell"', document)
+        self.assertIn('class="cavity-wall"', document)
+        self.assertIn("@keyframes contact-press", document)
+        self.assertIn("@keyframes shell-morph", document)
+        self.assertIn("@keyframes elastic-recoil", document)
+        self.assertIn("@keyframes cavity-capture", document)
+        self.assertIn("@keyframes haptic-pulse", document)
+        self.assertIn("@keyframes settle-glow", document)
+        self.assertIn("#78E2FE", document)
+        self.assertIn("#FE9985", document)
+        self.assertIn("#075C73", document)
+        self.assertNotIn("startup-pocket", document)
+        self.assertNotIn("startup-pocket-depth", document)
+        self.assertNotIn("#023D50", document)
+        self.assertNotIn('class="grip-lobes"', document)
+        self.assertNotIn('class="indentation-mask"', document)
+        self.assertIn("scaleX(0.84) scaleY(1.12)", document)
+        self.assertNotIn('stroke="#159DBE" stroke-width="14"', document)
+        self.assertIn('class="progress"', document)
+        self.assertNotIn("file:///", document)
         self.assertNotIn("uvicorn", document)
         self.assertNotIn("model bundle", document)
 
@@ -892,6 +924,53 @@ class ModelDisplaySourceGateTests(unittest.TestCase):
         self.assertFalse(gate["model_input_source_allowed"])
         self.assertEqual(gate["selected_live_source"], "unmatched_live_source")
 
+    def test_pixel_index_axis_is_diagnostics_only(self) -> None:
+        gate = _model_display_source_gate(
+            {
+                "source": "static_http_ingest",
+                "peak_axis_type": "pixel_index",
+                "qa_status": "ok",
+            },
+            {"active": False, "freshness": "stopped"},
+            {"active": False, "freshness": "stopped"},
+        )
+        self.assertTrue(gate["model_input_source_allowed"])
+        self.assertFalse(gate["wavelength_axis_valid"])
+        self.assertFalse(gate["formal_spectrum_input_allowed"])
+        self.assertFalse(gate["operator_display_valid"])
+
+    def test_wavelength_grid_fallback_flag_blocks_formal_recognition(self) -> None:
+        gate = _model_display_source_gate(
+            {
+                "source": "static_http_ingest",
+                "peak_axis_type": "wavelength_nm",
+                "qa_status": "warning",
+                "qa_flags": ["using_pixel_index_fallback"],
+            },
+            {"active": False, "freshness": "stopped"},
+            {"active": False, "freshness": "stopped"},
+        )
+        self.assertEqual(
+            gate["wavelength_axis_blockers"],
+            ["using_pixel_index_fallback"],
+        )
+        self.assertFalse(gate["formal_spectrum_input_allowed"])
+
+    def test_physical_wavelength_axis_remains_eligible(self) -> None:
+        gate = _model_display_source_gate(
+            {
+                "source": "static_http_ingest",
+                "peak_axis_type": "wavelength_nm",
+                "qa_status": "ok",
+                "qa_flags": [],
+            },
+            {"active": False, "freshness": "stopped"},
+            {"active": False, "freshness": "stopped"},
+        )
+        self.assertTrue(gate["wavelength_axis_valid"])
+        self.assertTrue(gate["formal_spectrum_input_allowed"])
+        self.assertTrue(gate["operator_display_valid"])
+
 
 class StaticCandidateShadowTests(unittest.TestCase):
     def test_shadow_candidate_never_claims_operator_or_twin_control(self) -> None:
@@ -1299,6 +1378,8 @@ class DynamicTemporalShadowEndpointTests(unittest.TestCase):
         self.assertTrue(result["drives_operator_ui"])
         self.assertTrue(result["drives_digital_twin"])
         self.assertFalse(result["deployment_ready"])
+        self.assertTrue(result["validation_only"])
+        self.assertEqual(result["runtime_role"], "operator_validation_candidate")
         prediction = result["prediction"]
         self.assertEqual(prediction["position"]["label"], "P21")
         self.assertEqual(prediction["force_level"]["label"], "normal")
@@ -1386,7 +1467,13 @@ class DynamicTemporalShadowEndpointTests(unittest.TestCase):
         with patch.object(
             backend_main.bridge,
             "frame",
-            return_value={"ok": True, "latest": None},
+            return_value={
+                "ok": True,
+                "latest": {
+                    "source": "static_http_ingest",
+                    "qa_status": "ok",
+                },
+            },
         ), patch.object(
             backend_main.export_watcher,
             "status",
@@ -1418,6 +1505,7 @@ class DynamicTemporalShadowEndpointTests(unittest.TestCase):
 
         self.assertTrue(result["temporal_validation_mode"])
         self.assertTrue(result["model_assisted_display_allowed"])
+        self.assertTrue(result["temporal_model_assisted_display_allowed"])
         self.assertEqual(
             result["active_spectral_model_source"],
             "dynamic_temporal_v3_validation",
@@ -1426,6 +1514,8 @@ class DynamicTemporalShadowEndpointTests(unittest.TestCase):
             result["active_spectral_prediction"]["position"]["label"],
             "P32",
         )
+        self.assertTrue(result["dynamic_temporal_display"]["drives_operator_ui"])
+        self.assertTrue(result["dynamic_temporal_display"]["drives_digital_twin"])
         self.assertEqual(
             result["active_spectral_prediction"]["digital_twin"]["deformation_proxy"],
             0.28,
@@ -1881,7 +1971,10 @@ class FrontendRequestLifecycleContractTests(unittest.TestCase):
         # prevents setup, source-switch, and diagnostics commands from hanging
         # forever when a device endpoint stops responding.
         self.assertEqual(self.source.count("await fetch("), 1)
-        self.assertIn('await requestJSON(\n      "/api/reset?keep_baseline=false"', self.source)
+        self.assertIn(
+            'await requestJSON("/api/reset?keep_baseline=true", { method: "POST" })',
+            self.source,
+        )
         self.assertIn('console.error("[input source change]", error);', self.source)
 
     def test_hidden_page_suspends_polling_and_aborts_obsolete_requests(self) -> None:
@@ -1902,6 +1995,20 @@ class FrontendRequestLifecycleContractTests(unittest.TestCase):
         self.assertIn("if (state.bootStarted) return;", self.source)
         self.assertIn("refresh: false", self.source)
         self.assertIn('boot().catch((error) => {', self.source)
+
+    def test_frontend_recovers_an_already_running_live_source(self) -> None:
+        self.assertIn("const LIVE_SOURCE_PROBE_INTERVAL_MS = 1500;", self.source)
+        self.assertIn("async function reconcileLiveSourceState", self.source)
+        self.assertIn(
+            '"/api/frame?trace_limit=1&include_spectrum=false"',
+            self.source,
+        )
+        self.assertIn(
+            "const liveSourceActive = await reconcileLiveSourceState({ force: true });",
+            self.source,
+        )
+        self.assertIn("if (!sourceActive) return;", self.source)
+        self.assertIn("invalidateLiveSourceProbe();", self.source)
 
     def test_backend_imports_from_app_directory_without_external_pythonpath(self) -> None:
         env = os.environ.copy()
@@ -2234,7 +2341,7 @@ class AcquisitionSourceMutualExclusionTests(unittest.TestCase):
             "freshness": "live",
             "channel_id": "P22",
             "interval_ms": 2000,
-            "integration": 40000,
+            "integration": backend_main.DEFAULT_INTEGRATION_US,
         }
         with patch.object(
             backend_main.sdk_live_reader, "status", return_value=sdk_status
@@ -2793,6 +2900,70 @@ class BridgeResetTests(unittest.TestCase):
 
 
 class UnifiedBaselineEndpointTests(unittest.TestCase):
+    def test_global_baseline_requires_explicit_no_contact_attestation(self) -> None:
+        with patch.object(
+            backend_main.bridge,
+            "set_global_candidate_baseline",
+        ) as set_candidate_baseline, patch.object(
+            backend_main.bridge,
+            "set_baseline",
+        ) as set_model_baseline:
+            result = backend_main.set_global_candidate_baseline(minimum_frames=30)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["status"],
+            "operator_no_contact_attestation_required",
+        )
+        self.assertTrue(result["baseline_unchanged"])
+        set_model_baseline.assert_not_called()
+        set_candidate_baseline.assert_not_called()
+
+    def test_untared_force_offset_does_not_block_operator_baseline(self) -> None:
+        candidate_result = {"ok": True, "frame_count": 30}
+        model_result = {
+            "ok": True,
+            "baseline_set": True,
+            "static_model_spectrum_baseline_ready": True,
+            "static_model_spectrum_baseline_status": "stable_post_release_recovery_baseline",
+        }
+        with patch.object(
+            backend_main.px6d_reader,
+            "status",
+            return_value={
+                "connected": True,
+                "tare_ready": False,
+                "sample_fresh": True,
+            },
+        ), patch.object(
+            backend_main,
+            "_px6d_reference_for_record",
+            return_value={
+                "ok": True,
+                "tare_ready": False,
+                "sample_fresh": True,
+                "force_fz_n": 1.5,
+            },
+        ), patch.object(
+            backend_main.bridge,
+            "set_global_candidate_baseline",
+            return_value=candidate_result,
+        ), patch.object(
+            backend_main.bridge,
+            "set_baseline",
+            return_value=model_result,
+        ):
+            result = backend_main.set_global_candidate_baseline(
+                minimum_frames=30,
+                no_contact_attested=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["no_contact_attestation"]["status"],
+            "operator_confirmed_force_reference_pending_zero",
+        )
+
     def test_global_baseline_passes_required_frames_to_model_baseline(self) -> None:
         candidate_result = {"ok": True, "frame_count": 30}
         model_result = {
@@ -2814,7 +2985,10 @@ class UnifiedBaselineEndpointTests(unittest.TestCase):
             "set_baseline",
             return_value=model_result,
         ) as set_model_baseline:
-            result = backend_main.set_global_candidate_baseline(minimum_frames=30)
+            result = backend_main.set_global_candidate_baseline(
+                minimum_frames=30,
+                no_contact_attested=True,
+            )
 
         set_model_baseline.assert_called_once_with(
             {
@@ -2843,7 +3017,10 @@ class UnifiedBaselineEndpointTests(unittest.TestCase):
                 "baseline_spectrum_sample_count_by_channel": {"P22": 6},
             },
         ):
-            result = backend_main.set_global_candidate_baseline(minimum_frames=30)
+            result = backend_main.set_global_candidate_baseline(
+                minimum_frames=30,
+                no_contact_attested=True,
+            )
 
         self.assertFalse(result["ok"])
         self.assertIn("insufficient_recovery_baseline_frames", result["message"])
@@ -2851,6 +3028,41 @@ class UnifiedBaselineEndpointTests(unittest.TestCase):
 
 
 class DesktopLauncherIdentityTests(unittest.TestCase):
+    def test_bound_port_is_not_free_even_when_it_is_not_accepting_connections(
+        self,
+    ) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held_socket:
+            held_socket.bind(("127.0.0.1", 0))
+            occupied_port = int(held_socket.getsockname()[1])
+
+            self.assertFalse(port_is_free(occupied_port))
+
+    def test_stale_preferred_port_uses_first_free_fallback(self) -> None:
+        with patch(
+            "desktop_launcher.port_is_free",
+            side_effect=lambda port: port == 8641,
+        ), patch(
+            "desktop_launcher.backend_is_ready",
+            return_value=False,
+        ), patch("desktop_launcher.write_log"):
+            port, should_start = select_backend_port(8640, candidate_count=3)
+
+        self.assertEqual(port, 8641)
+        self.assertTrue(should_start)
+
+    def test_compatible_backend_on_preferred_port_is_reused(self) -> None:
+        with patch(
+            "desktop_launcher.port_is_free",
+            return_value=False,
+        ), patch(
+            "desktop_launcher.backend_is_ready",
+            return_value=True,
+        ), patch("desktop_launcher.write_log"):
+            port, should_start = select_backend_port(8640, candidate_count=3)
+
+        self.assertEqual(port, 8640)
+        self.assertFalse(should_start)
+
     def test_source_self_test_loads_runtime_without_hardware_autostart(self) -> None:
         with patch.dict("os.environ", {}, clear=False), patch(
             "desktop_launcher.write_log"
@@ -2868,7 +3080,10 @@ class DesktopLauncherIdentityTests(unittest.TestCase):
                     "app": "TOUCH System Trained Static Spectrum Twin",
                     "mode": "standalone_bayspec_trained_static_spectrum_twin",
                     "backend_contract_version": "trained_static_spectrum_api_v2",
-                    "trained_static_model_primary": True,
+                    "dynamic_temporal_validation_primary": True,
+                    "default_operator_recognition": (
+                        "dynamic_temporal_v3_validation"
+                    ),
                 }
             )
         )
@@ -2880,7 +3095,10 @@ class DesktopLauncherIdentityTests(unittest.TestCase):
                     "ok": True,
                     "app": "TOUCH System Trained Static Spectrum Twin",
                     "mode": "standalone_bayspec_trained_static_spectrum_twin",
-                    "trained_static_model_primary": True,
+                    "dynamic_temporal_validation_primary": True,
+                    "default_operator_recognition": (
+                        "dynamic_temporal_v3_validation"
+                    ),
                 }
             )
         )
@@ -2893,7 +3111,10 @@ class DesktopLauncherIdentityTests(unittest.TestCase):
                     "app": "TOUCH System Trained Static Spectrum Twin",
                     "mode": "standalone_bayspec_trained_static_spectrum_twin",
                     "backend_contract_version": "trained_static_spectrum_api_v1",
-                    "trained_static_model_primary": True,
+                    "dynamic_temporal_validation_primary": True,
+                    "default_operator_recognition": (
+                        "dynamic_temporal_v3_validation"
+                    ),
                 }
             )
         )

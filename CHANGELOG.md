@@ -1,5 +1,148 @@
 # Changelog
 
+## Unreleased
+
+### v0.18.5 Beta all-data runtime and recorded-spectrum peak mapping
+
+- Deploy the latest optical-only all-data bundle for contact, nine-position,
+  and continuous `Fz` estimation; PX6D force is supervision and validation,
+  not a runtime model input.
+- Drive the built-in demonstration with synchronized real 512-point BaySpec
+  spectra and recorded PX6D references instead of the previous fixed-height
+  synthetic spectrum.
+- Discover the nine demonstration peaks automatically from the robust
+  no-contact median spectrum, then track each peak inside a bounded local
+  wavelength window.
+- Assign the discovered peaks provisionally in ascending wavelength order as
+  `P11, P12, P13, P21, P22, P23, P31, P32, P33`. This does not replace the
+  independent 3x3 spatial display order or a future measured physical map.
+- Suppress the preliminary 1540-1580 nm target markers when a recorded
+  auto-discovered profile is active, so P11-P33 labels align with the visible
+  measured peaks.
+- Validate the complete source tree with 467 tests and 172 subtests.
+
+### Baseline-referenced spectrum normalization
+
+- Added wavelength-aligned full-spectrum normalization using
+  `I(lambda,t) / I0(lambda)`, where `I0` is the accepted multi-frame
+  no-contact baseline.
+- Kept the original raw spectrum as the deployed recognition-model input;
+  normalization is an independently selectable display and recording output.
+- Extended synchronized spectrum recordings with raw counts, aligned baseline
+  counts, normalized intensity ratio, method, and readiness status.
+- Added explicit baseline-readiness fallback and low-reference guards. No
+  per-frame min-max normalization is used.
+- Kept the existing mFBG per-channel `I_i / I0_i` path separate from this
+  ordinary-FBG full-spectrum normalization.
+
+## v0.17.1 - 2026-07-31
+
+### PX6D reconnect hardening
+
+- Added bounded reconnect backoff for an unavailable or busy COM port instead
+  of launching a new serial helper every second.
+- Added explicit `port_busy_or_permission_denied` diagnostics, reconnect delay,
+  and consecutive-failure status without changing the existing PX6D API.
+- Reset reconnect state immediately after the first valid force frame so a
+  reconnected sensor becomes available without restarting TOUCH.
+- Attached isolated Windows serial helpers to a kill-on-close Job Object so a
+  forced desktop shutdown cannot leave a child process holding COM3.
+- Kept force filtering, tare semantics, BaySpec acquisition, recognition, and
+  recording contracts unchanged.
+
+### Validation boundary
+
+- The complete automated suite passes with 439 tests and 170 subtests.
+- Backoff behavior and Windows child-process cleanup were exercised directly.
+- COM3 is currently held by a stale driver request from an earlier process, so
+  live PX6D force frames still require a physical USB reconnect or Windows
+  restart before hardware validation can be completed.
+
+## v0.17.0 - 2026-07-30
+
+### Stable 5 ms spectrum display path
+
+- Hardened desktop port selection with a real bind check, so a stale process
+  that rejects connections is not mistaken for a free backend port.
+- Added auditable display-only spectrum processing with optional overlay,
+  background subtraction, baseline correction, and smoothing.
+- Set the default BaySpec exposure request to 5 ms and exposed 5, 10, 20, and
+  40 ms choices in Settings.
+- Preserved the original raw 512-point intensity array for recognition and
+  synchronized recording; display processing does not alter model input.
+- Added lightweight frontend source recovery so a page reload reconnects to an
+  already-running SDK stream without opening a second hardware session.
+- Kept the process-per-frame SDK isolation strategy because repeated in-process
+  vendor SDK acquisition previously caused Windows access violations.
+
+### Validation boundary
+
+- Real BaySpec hardware produced 60 unique 512-point frames with nine detected
+  peaks, no invalid values, and about 3.2 observed frames per second.
+- The 5 ms setting is detector exposure time, not end-to-end frame period; the
+  isolated helper-process startup remains the dominant latency.
+- No unattended baseline was captured, so the Operator correctly remained in
+  a baseline-required neutral state during the hardware check.
+- Per-channel intensity normalization is intentionally deferred. A future
+  implementation must use stored no-contact baselines and robust noise scales,
+  never per-frame min-max normalization.
+
+## v0.16.0 - 2026-07-29
+
+### Acceptance remediation
+
+- Fail closed in the Operator view for invalid, stale, fallback, or missing
+  formal spectrum input while retaining raw evidence in Diagnostics.
+- Keep the deployed static spectrum model as the only Operator model; the
+  temporal candidate is diagnostics-only and is consumed from cache by the
+  recorder.
+- Require explicit no-contact attestation before baseline capture and reject
+  out-of-order temporal frames.
+- Make demo playback local-only, default it to a single cycle, and prevent it
+  from mutating live acquisition, recording, or baseline state.
+- Use one atomic presentation frame for the trace, summary, response map, and
+  3D surface.
+- Replace the permanent WebGL animation loop with demand-driven rendering and
+  dispose GPU resources on teardown.
+- Validate optical-force synchronization before recording, persist release and
+  calibration provenance, journal capture progress, flush data to disk, and
+  recover interrupted sessions.
+- Freeze PX6D automatic zero tracking during recording and require explicit
+  operator tare by default.
+- Use configuration and environment overrides for BaySpec device and Sense
+  export paths instead of hard-coded acquisition assumptions.
+- Expose one release identity through `VERSION.json`, the health endpoint, and
+  the frozen build.
+- Store packaged capture output under `Documents/TOUCH/captures` by default.
+
+### Isolated mFBG intensity path
+
+- Added a future-primary `mfbg_intensity_3x3` profile without replacing the
+  active ordinary-FBG runtime.
+- Added validated nine-channel configuration, multi-frame baseline estimation,
+  tracked spectral-window intensity demodulation, and coupled response frames.
+- Added multi-region contact structures and explicit configured, analyzed, and
+  real-enabled channel counts.
+- Added tidy and wide recording adapters plus isolated
+  `/api/mfbg-intensity/*` endpoints.
+- Added a compact read-only sensor-profile card to Diagnostics; Operator view
+  remains unchanged.
+- Replaced the developer-facing runtime mode label with a concise sensor
+  profile status that distinguishes active Ordinary FBG operation from the
+  integrated, calibration-pending mFBG profile.
+- Kept real 3x3 activation, dense reconstruction, calibrated force, and
+  calibrated pressure disabled pending new real mFBG data.
+- Refined the compact desktop hierarchy: whole-hand navigation is available
+  immediately in Operator and fullscreen views, while Diagnostics keeps
+  complete workspace labels without camera-arrow clutter.
+
+### Validation boundary
+
+- Automated source and contract tests cover the remediation logic.
+- Real BaySpec press/release, PX6D reconnect/tare/synchronization, long-duration
+  soak, power-loss interruption, Windows DPI, and clean-machine checks remain
+  explicit release-validation tasks and are not claimed by this changelog.
+
 ## v0.15.4 - 2026-07-27
 
 ### Faster visible startup
