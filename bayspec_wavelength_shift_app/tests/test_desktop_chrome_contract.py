@@ -61,6 +61,21 @@ def test_frozen_beta_marker_is_read_from_executable_or_bundle_root() -> None:
     assert 'beta_all_data_runtime.flag"), "."' in beta_spec
 
 
+def test_stable_package_promotes_the_latest_model_runtime() -> None:
+    launcher = (APP_ROOT / "desktop_launcher.py").read_text(encoding="utf-8")
+    stable_spec = (APP_ROOT / "desktop_launcher_stable_latest.spec").read_text(
+        encoding="utf-8"
+    )
+
+    helper = launcher.split("def beta_all_data_runtime_requested", 1)[1].split(
+        "def bundle_root", 1
+    )[0]
+    assert "TOUCH_LATEST_ALL_DATA_MODEL" in helper
+    assert "LATEST_RUNTIME_FLAG_FILENAME" in helper
+    assert 'latest_all_data_runtime.flag"), "."' in stable_spec
+    assert 'release_manifests" / "stable" / "VERSION.json"' in stable_spec
+
+
 def test_borderless_window_restores_native_taskbar_toggle_contract() -> None:
     window = Mock()
     window.native.Handle.ToInt64.return_value = 1234

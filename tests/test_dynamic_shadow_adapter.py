@@ -254,6 +254,26 @@ class RuntimeBaselineRecoveryGuardTests(unittest.TestCase):
             }
         )
 
+    def test_confirmed_baseline_can_prime_next_motion_measurement(self) -> None:
+        guard = self._guard()
+        baseline = np.linspace(1000.0, 2000.0, 64)
+        guard.prime_physical_spectrum(baseline)
+
+        state, recovered = guard.observe(
+            baseline * 0.98,
+            physical_frame=True,
+            external_no_contact_hint=False,
+            release_event_probability=None,
+            position_confidence=0.90,
+            contact_probability=0.95,
+            contact_label="contact",
+            baseline_spectrum=baseline,
+            timestamp_sec=0.2,
+        )
+
+        self.assertIsNone(recovered)
+        self.assertGreater(state["common_gain_motion"], 0.006)
+
     def test_stable_release_reanchors_only_after_physical_frames(self) -> None:
         guard = self._guard()
         baseline = np.linspace(1000.0, 2000.0, 64)
@@ -347,11 +367,40 @@ class RuntimeBaselineRecoveryGuardTests(unittest.TestCase):
         self.assertFalse(state["runtime_reference_reanchored"])
         self.assertIsNone(recovered)
 
-    def test_stable_raw_no_contact_fallback_recovers_missed_release_edge(self) -> None:
+    def test_position_confidence_alone_cannot_unlock_runtime_rest(self) -> None:
         guard = self._production_guard()
         baseline = np.linspace(1000.0, 2000.0, 64)
         residual = baseline.copy()
-        residual[20:44] *= 0.93
+        residual[20:44] *= 0.98
+        guard._fallback_locked_until_contact = True
+        guard.prime_physical_spectrum(residual)
+
+        recovered = None
+        for index in range(4):
+            state, recovered = guard.observe(
+                residual,
+                physical_frame=True,
+                external_no_contact_hint=False,
+                release_event_probability=None,
+                position_confidence=0.99,
+                contact_probability=0.99,
+                contact_label="contact",
+                baseline_spectrum=baseline,
+                timestamp_sec=index * 0.4,
+            )
+
+        self.assertTrue(state["spatial_contact_support"])
+        self.assertFalse(state["slow_baseline_departure"])
+        self.assertTrue(state["fallback_locked_until_new_contact"])
+        self.assertFalse(state["contact_armed"])
+        self.assertTrue(state["suppress_contact"])
+        self.assertIsNone(recovered)
+
+    def test_stable_near_baseline_no_contact_recovers_missed_release_edge(self) -> None:
+        guard = self._production_guard()
+        baseline = np.linspace(1000.0, 2000.0, 64)
+        residual = baseline.copy()
+        residual[20:44] *= 0.997
         recovered = None
         for index in range(15):
             state, recovered = guard.observe(
@@ -412,6 +461,152 @@ class RuntimeBaselineRecoveryGuardTests(unittest.TestCase):
         self.assertFalse(state["runtime_rest_latched"])
         self.assertFalse(state["suppress_contact"])
         self.assertTrue(state["contact_armed"])
+
+    def test_far_stationary_no_contact_hint_cannot_replace_runtime_baseline(self) -> None:
+        guard = self._production_guard()
+        baseline = np.linspace(1000.0, 2000.0, 64)
+        shifted = baseline.copy()
+        shifted[20:44] *= 0.92
+
+        recovered = None
+        for index in range(16):
+            state, recovered = guard.observe(
+                shifted,
+                physical_frame=True,
+                external_no_contact_hint=True,
+                release_event_probability=None,
+                position_confidence=0.20,
+                contact_probability=0.10,
+                contact_label="no_contact",
+                baseline_spectrum=baseline,
+                timestamp_sec=index * 0.4,
+            )
+
+        self.assertFalse(state["stationary_rest_baseline_safe"])
+        self.assertFalse(state["stable_release_candidate"])
+        self.assertFalse(state["runtime_reference_reanchored"])
+        self.assertIsNone(recovered)
+
+    def test_model_dip_without_spectral_recovery_does_not_reanchor_held_press(self) -> None:
+        guard = self._production_guard()
+        baseline = np.linspace(1000.0, 2000.0, 64)
+        held = baseline.copy()
+        held[20:44] *= 0.82
+
+        for index in range(2):
+            state, recovered = guard.observe(
+                held,
+                physical_frame=True,
+                external_no_contact_hint=False,
+                release_event_probability=None,
+                position_confidence=0.90,
+                contact_probability=0.98,
+                contact_label="contact",
+                baseline_spectrum=baseline,
+                timestamp_sec=index * 0.4,
+            )
+            self.assertIsNone(recovered)
+        self.assertTrue(state["contact_armed"])
+
+        for index in range(2, 16):
+            state, recovered = guard.observe(
+                held,
+                physical_frame=True,
+                external_no_contact_hint=True,
+                release_event_probability=None,
+                position_confidence=0.20,
+                contact_probability=0.10,
+                contact_label="no_contact",
+                baseline_spectrum=baseline,
+                timestamp_sec=index * 0.4,
+            )
+
+        self.assertTrue(state["contact_armed"])
+        self.assertFalse(state["stationary_rest_baseline_safe"])
+        self.assertFalse(state["stable_release_candidate"])
+        self.assertFalse(state["runtime_reference_reanchored"])
+        self.assertIsNone(recovered)
+
+    def test_high_confidence_gradual_press_then_slow_release_reanchors(self) -> None:
+        guard = RuntimeBaselineRecoveryGuard(
+            {
+                "quiet_hold_sec": 0.5,
+                "minimum_quiet_physical_frames": 2,
+                "max_shape_motion_rms": 0.0045,
+                "max_common_gain_motion": 0.0030,
+                "activity_shape_motion_rms": 0.0060,
+                "activity_common_gain_motion": 0.0060,
+                "contact_probability_arm": 0.65,
+                "contact_arm_physical_frames": 1,
+                "stationary_rest_fallback_enabled": True,
+                "minimum_spatial_contact_confidence": 0.60,
+                "minimum_slow_release_recovery_fraction": 0.45,
+            }
+        )
+        baseline = np.linspace(1000.0, 2000.0, 64)
+        residual = baseline.copy()
+        residual[20:44] *= 0.997
+
+        recovered = None
+        for index in range(8):
+            state, recovered = guard.observe(
+                residual,
+                physical_frame=True,
+                external_no_contact_hint=True,
+                release_event_probability=None,
+                position_confidence=0.20,
+                contact_probability=0.95,
+                contact_label="contact",
+                baseline_spectrum=baseline,
+                timestamp_sec=index * 0.4,
+            )
+            if recovered is not None:
+                break
+        self.assertIsNotNone(recovered)
+        self.assertTrue(state["fallback_locked_until_new_contact"])
+
+        timestamp = 4.0
+        for attenuation in (0.006, 0.012, 0.018):
+            pressed = recovered.copy()
+            pressed[20:44] *= 1.0 - attenuation
+            state, second = guard.observe(
+                pressed,
+                physical_frame=True,
+                external_no_contact_hint=False,
+                release_event_probability=None,
+                position_confidence=0.92,
+                contact_probability=0.98,
+                contact_label="contact",
+                baseline_spectrum=recovered,
+                timestamp_sec=timestamp,
+            )
+            timestamp += 0.4
+            self.assertIsNone(second)
+        self.assertTrue(state["spatial_contact_support"])
+        self.assertTrue(state["contact_armed"])
+        self.assertFalse(state["fallback_locked_until_new_contact"])
+
+        released = recovered.copy()
+        released[20:44] *= 0.994
+        for _ in range(4):
+            state, second = guard.observe(
+                released,
+                physical_frame=True,
+                external_no_contact_hint=True,
+                release_event_probability=None,
+                position_confidence=0.35,
+                contact_probability=0.70,
+                contact_label="no_contact",
+                baseline_spectrum=recovered,
+                timestamp_sec=timestamp,
+            )
+            timestamp += 0.4
+            if second is not None:
+                break
+        self.assertTrue(state["slow_release_transition"])
+        self.assertTrue(state["runtime_reference_reanchored"])
+        self.assertIn("slow_release_after_contact_peak", state["release_evidence"])
+        self.assertIsNotNone(second)
 
 
 @unittest.skipUnless(V1_MODEL.exists(), "dynamic v1 candidate artifact is unavailable")

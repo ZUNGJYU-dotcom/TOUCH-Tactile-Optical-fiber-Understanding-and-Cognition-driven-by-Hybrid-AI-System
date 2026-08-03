@@ -36,13 +36,19 @@ from bridge import (
     BAYSPEC_CHANNEL_CONFIG,
     CHANNEL_CONFIG_PATH,
     CHANNEL_ORDER,
+    configured_device_id,
+    configured_sense_export_root,
     normalize_spectrum_to_baseline_ratio,
 )
 from backend.optical_force_capture import OpticalForceCaptureManager
 from backend.mfbg_intensity_api import router as mfbg_intensity_router
 from backend.px6d_reader import Px6dReader
 from backend.recorded_demo import RecordedDemoLibrary
-from sdk_live import DEFAULT_INTEGRATION_US, BaySpecSdkLiveReader
+from sdk_live import (
+    DEFAULT_INTEGRATION_US,
+    DEFAULT_INTERVAL_MS,
+    BaySpecSdkLiveReader,
+)
 from src.array_surface.surface_mapper import SurfaceConfig, map_surface, matrices_from_channels
 from src.hybrid_spectrum.all_source_runtime_adapter import (
     AllSourceOpticalForceAdapter,
@@ -91,7 +97,9 @@ async def _read_limited_ingest_body(request: Request) -> bytes:
     return bytes(body)
 PROJECT_ROOT = APP_ROOT if getattr(sys, "frozen", False) else APP_ROOT.parent
 ALL_SOURCE_BETA_ENABLED = (
-    os.environ.get("TOUCH_BETA_ALL_DATA_MODEL", "").strip().lower()
+    os.environ.get("TOUCH_LATEST_ALL_DATA_MODEL", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+    or os.environ.get("TOUCH_BETA_ALL_DATA_MODEL", "").strip().lower()
     in {"1", "true", "yes", "on"}
 )
 THUMB_SCENE_CONFIG_PATH = PROJECT_ROOT / "config" / "thumb_holder_scene.yaml"
@@ -649,6 +657,16 @@ def _load_response_level_postprocess_config() -> dict[str, Any]:
     return dict(section) if isinstance(section, dict) else {}
 
 
+def _load_all_source_runtime_gate_config() -> dict[str, Any]:
+    if yaml is None or not RUNTIME_CONTACT_STATE_CONFIG_PATH.exists():
+        return {}
+    payload = yaml.safe_load(
+        RUNTIME_CONTACT_STATE_CONFIG_PATH.read_text(encoding="utf-8")
+    ) or {}
+    section = payload.get("all_source_runtime_gate", {})
+    return dict(section) if isinstance(section, dict) else {}
+
+
 if ALL_SOURCE_BETA_ENABLED:
     # The Beta package intentionally ships one model only. Keep old model
     # branches out of memory and fail explicitly if the latest artifact cannot
@@ -694,6 +712,8 @@ if ALL_SOURCE_BETA_ENABLED:
         ALL_SOURCE_BETA_ADAPTER = AllSourceOpticalForceAdapter.from_paths(
             ALL_SOURCE_BETA_MODEL_PATH,
             DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH,
+            runtime_recovery_config=_load_runtime_baseline_recovery_config(),
+            runtime_gate_config=_load_all_source_runtime_gate_config(),
         )
         ALL_SOURCE_BETA_ERROR = None
     except Exception as exc:  # pragma: no cover - exposed through diagnostics
@@ -803,6 +823,8 @@ def _all_source_beta_status() -> dict[str, Any]:
         "estimated_force_output": "continuous_optical_fz_0_to_5_n",
         "old_model_fallback_enabled": False,
         "unique_frame_count": ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT,
+        "runtime_contact_gate": _load_all_source_runtime_gate_config(),
+        "runtime_baseline_recovery": _load_runtime_baseline_recovery_config(),
     }
 
 
@@ -902,6 +924,57 @@ def _predict_all_source_beta(
                 latest["intensity"],
                 source_timestamp_sec=source_timestamp_sec,
             )
+            runtime_baseline_update = None
+            pending_baseline = adapter.consume_pending_runtime_baseline_update()
+            if pending_baseline is not None:
+                try:
+                    runtime_baseline_update = (
+                        bridge.set_runtime_recovery_spectrum_baseline(
+                            "P22",
+                            pending_baseline["wavelength_nm"],
+                            pending_baseline["intensity"],
+                            sample_count=int(
+                                pending_baseline.get("sample_count") or 1
+                            ),
+                            span_sec=float(
+                                pending_baseline.get("span_sec") or 0.0
+                            ),
+                            shape_motion_rms=pending_baseline.get(
+                                "shape_motion_rms"
+                            ),
+                            common_gain_motion=pending_baseline.get(
+                                "common_gain_motion"
+                            ),
+                            policy=str(
+                                pending_baseline.get("policy")
+                                or "multi_evidence_release_then_spectral_stationarity"
+                            ),
+                        )
+                    )
+                except Exception as exc:  # keep adapter and bridge references aligned
+                    runtime_baseline_update = {
+                        "ok": False,
+                        "status": "runtime_recovery_baseline_commit_error",
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    }
+                if runtime_baseline_update.get("ok"):
+                    ALL_SOURCE_BETA_BASELINE_TOKEN = _spectrum_token(
+                        pending_baseline["wavelength_nm"].tolist(),
+                        pending_baseline["intensity"].tolist(),
+                    )
+                else:
+                    adapter.set_baseline(
+                        baseline["wavelength_nm"],
+                        baseline["intensity"],
+                    )
+                    ALL_SOURCE_BETA_BASELINE_TOKEN = baseline_token
+                    ALL_SOURCE_BETA_LAST_FRAME_KEY = None
+                    ALL_SOURCE_BETA_LAST_PAYLOAD = None
+                    runtime_baseline_update = {
+                        **runtime_baseline_update,
+                        "adapter_baseline_rollback_applied": True,
+                        "rollback_baseline_token": baseline_token,
+                    }
             ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT += 1
             payload = {
                 **prediction,
@@ -916,6 +989,7 @@ def _predict_all_source_beta(
                 * 1000.0,
                 "duplicate_frame_ignored": False,
                 "cache_lookup_latency_ms": 0.0,
+                "runtime_baseline_update": runtime_baseline_update,
             }
             ALL_SOURCE_BETA_LAST_FRAME_KEY = frame_key
             ALL_SOURCE_BETA_LAST_PAYLOAD = copy.deepcopy(payload)
@@ -1103,23 +1177,36 @@ def _predict_dynamic_temporal_shadow(
             runtime_baseline_update = None
             pending_baseline = adapter.consume_pending_runtime_baseline_update()
             if pending_baseline is not None:
-                runtime_baseline_update = (
-                    bridge.set_runtime_recovery_spectrum_baseline(
-                        "P22",
-                        pending_baseline["wavelength_nm"],
-                        pending_baseline["intensity"],
-                        sample_count=int(pending_baseline.get("sample_count") or 1),
-                        span_sec=float(pending_baseline.get("span_sec") or 0.0),
-                        shape_motion_rms=pending_baseline.get("shape_motion_rms"),
-                        common_gain_motion=pending_baseline.get(
-                            "common_gain_motion"
-                        ),
-                        policy=str(
-                            pending_baseline.get("policy")
-                            or "multi_evidence_release_then_spectral_stationarity"
-                        ),
+                try:
+                    runtime_baseline_update = (
+                        bridge.set_runtime_recovery_spectrum_baseline(
+                            "P22",
+                            pending_baseline["wavelength_nm"],
+                            pending_baseline["intensity"],
+                            sample_count=int(
+                                pending_baseline.get("sample_count") or 1
+                            ),
+                            span_sec=float(
+                                pending_baseline.get("span_sec") or 0.0
+                            ),
+                            shape_motion_rms=pending_baseline.get(
+                                "shape_motion_rms"
+                            ),
+                            common_gain_motion=pending_baseline.get(
+                                "common_gain_motion"
+                            ),
+                            policy=str(
+                                pending_baseline.get("policy")
+                                or "multi_evidence_release_then_spectral_stationarity"
+                            ),
+                        )
                     )
-                )
+                except Exception as exc:
+                    runtime_baseline_update = {
+                        "ok": False,
+                        "status": "runtime_recovery_baseline_commit_error",
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    }
                 if runtime_baseline_update.get("ok"):
                     baseline_token = _spectrum_token(
                         pending_baseline["wavelength_nm"].tolist(),
@@ -2736,9 +2823,9 @@ def _capture_provenance_snapshot() -> dict[str, Any]:
             "operator_attestation": dict(GLOBAL_BASELINE_ATTESTATION),
         },
         "optical_device": {
-            "configured_device_id": bridge.configured_device_id(),
+            "configured_device_id": configured_device_id(),
             "configured_sense_export_root": str(
-                bridge.configured_sense_export_root()
+                configured_sense_export_root()
             ),
             **{
                 key: sdk_status.get(key)
@@ -2815,6 +2902,7 @@ optical_force_capture = OpticalForceCaptureManager(
         PX6D_REFERENCE_CONFIG.get("capture_require_software_tare", True)
     ),
 )
+PX6D_CAPTURE_CONTROL_LOCK = threading.Lock()
 
 WAVELENGTH_PLAN_ORDER = ["P11", "P12", "P13", "P21", "P22", "P23", "P31", "P32", "P33"]
 SIMULATED_FBG_WAVELENGTHS = {
@@ -3951,6 +4039,12 @@ def health() -> dict:
         "px6d_reference": _px6d_runtime_status(),
         "optical_force_capture": optical_force_capture.status(),
         "recorded_demo": recorded_demo_library.status(),
+        "recognition_runtime": {
+            "active_model_id": "dynamic_temporal_v3_validation",
+            "display_name": "Temporal validation",
+            "switchable": True,
+            "legacy_models_enabled": True,
+        },
     }
     if ALL_SOURCE_BETA_ENABLED:
         payload.update(
@@ -3974,6 +4068,12 @@ def health() -> dict:
                 ),
                 "force_sensor_is_runtime_model_input": False,
                 "old_model_fallback_enabled": False,
+                "recognition_runtime": {
+                    "active_model_id": "ordinary_fbg_all_data_beta_v1",
+                    "display_name": "All-data spectral model",
+                    "switchable": False,
+                    "legacy_models_enabled": False,
+                },
             }
         )
     else:
@@ -4035,14 +4135,37 @@ def px6d_reconnect() -> dict:
 
 @app.post("/api/px6d/tare")
 def px6d_tare(duration_sec: float = Query(default=1.0, ge=0.25, le=5.0)) -> dict:
-    result = px6d_reader.tare(duration_sec=duration_sec)
-    result.update(
-        {
+    if not PX6D_CAPTURE_CONTROL_LOCK.acquire(blocking=False):
+        return {
+            "ok": False,
             "mode": "px6d_software_tare",
+            "status": "capture_control_busy",
+            "reason": "wait_for_recording_or_force_zero_command_to_finish",
             "hardware_calibration_command_used": False,
         }
-    )
-    return result
+    try:
+        capture_status = optical_force_capture.status()
+        if any(
+            bool(capture_status.get(field))
+            for field in ("running", "start_in_progress", "worker_alive")
+        ):
+            return {
+                "ok": False,
+                "mode": "px6d_software_tare",
+                "status": "recording_active",
+                "reason": "stop_synchronized_recording_before_force_zero",
+                "hardware_calibration_command_used": False,
+            }
+        result = px6d_reader.tare(duration_sec=duration_sec)
+        result.update(
+            {
+                "mode": "px6d_software_tare",
+                "hardware_calibration_command_used": False,
+            }
+        )
+        return result
+    finally:
+        PX6D_CAPTURE_CONTROL_LOCK.release()
 
 
 @app.get("/api/px6d/latest")
@@ -4103,25 +4226,37 @@ async def px6d_capture_start(request: Request) -> dict:
             "status": "capture_request_invalid",
             "reason": "request body must be a JSON object",
         }
-    px6d_reader.set_auto_zero_frozen(
-        True,
-        reason="synchronized_recording",
-    )
-    try:
-        result = await asyncio.to_thread(
-            optical_force_capture.start,
-            position_label=str(payload.get("position_label") or "unlabeled"),
-            action_label=str(payload.get("action_label") or "unlabeled"),
-            trial_id=str(payload.get("trial_id") or "trial_001"),
-            operator_note=str(payload.get("operator_note") or ""),
-            output_root=payload.get("output_root"),
-            selected_outputs=payload.get("selected_outputs"),
-        )
-    except Exception:
-        px6d_reader.set_auto_zero_frozen(False)
-        raise
-    if not result.get("ok"):
-        px6d_reader.set_auto_zero_frozen(False)
+    def start_with_force_zero_guard() -> dict:
+        if not PX6D_CAPTURE_CONTROL_LOCK.acquire(blocking=False):
+            return {
+                "ok": False,
+                "status": "force_zero_in_progress",
+                "reason": "wait_for_force_zero_to_finish_before_recording",
+            }
+        try:
+            px6d_reader.set_auto_zero_frozen(
+                True,
+                reason="synchronized_recording",
+            )
+            try:
+                result = optical_force_capture.start(
+                    position_label=str(payload.get("position_label") or "unlabeled"),
+                    action_label=str(payload.get("action_label") or "unlabeled"),
+                    trial_id=str(payload.get("trial_id") or "trial_001"),
+                    operator_note=str(payload.get("operator_note") or ""),
+                    output_root=payload.get("output_root"),
+                    selected_outputs=payload.get("selected_outputs"),
+                )
+            except Exception:
+                px6d_reader.set_auto_zero_frozen(False)
+                raise
+            if not result.get("ok"):
+                px6d_reader.set_auto_zero_frozen(False)
+            return result
+        finally:
+            PX6D_CAPTURE_CONTROL_LOCK.release()
+
+    result = await asyncio.to_thread(start_with_force_zero_guard)
     return {"mode": "optical_px6d_synchronized_capture", **result}
 
 
@@ -4541,7 +4676,7 @@ def export_watch_status() -> dict:
 @_serialized_live_source_control
 def sdk_start(
     channel_id: str = Query(default="P22"),
-    interval_ms: int = Query(default=100, ge=20, le=2000),
+    interval_ms: int = Query(default=DEFAULT_INTERVAL_MS, ge=20, le=2000),
     integration: int = Query(default=DEFAULT_INTEGRATION_US, ge=1, le=10000000),
 ) -> dict:
     existing_status = sdk_live_reader.status()
@@ -4673,7 +4808,7 @@ def sense_stop() -> dict:
 def live_start(
     channel_id: str = Query(default="P22"),
     export_root: str | None = Query(default=None),
-    interval_sec: float = Query(default=0.1, ge=0.1, le=5.0),
+    interval_sec: float = Query(default=0.02, ge=0.02, le=5.0),
     integration: int = DEFAULT_INTEGRATION_US,
     control_sense: bool = Query(default=True),
     source: str = Query(default="direct_sdk"),
@@ -4736,6 +4871,8 @@ def live_start(
     if not _live_source_stop_completed(sdk_status):
         return _source_switch_blocked(source="sdk_live", status=sdk_status)
     existing_watch = export_watcher.status()
+    # Export watching is disk-bound and gains nothing from the SDK's 20 ms
+    # post-frame idle budget. Keep its established 100 ms lower bound.
     requested_interval_sec = max(0.1, min(float(interval_sec), 5.0))
     if _export_watch_session_matches(
         existing_watch,
@@ -5220,8 +5357,12 @@ def global_spectrum_frame(
     # Restore the pre-review runtime contract: temporal validation drives the
     # live twin when selected, while the much slower static ensemble remains an
     # explicit fallback or diagnostic comparison.
+    # The Beta edition is latest-model-only. Running the legacy static model
+    # before replacing its result with the Beta prediction adds avoidable work
+    # to every UI poll and delays delivery of a newly acquired frame.
     static_inference_requested = bool(
-        not temporal_validation_enabled or include_shadow
+        not ALL_SOURCE_BETA_ENABLED
+        and (not temporal_validation_enabled or include_shadow)
     )
     if (
         source_gate["formal_spectrum_input_allowed"]
@@ -5267,7 +5408,10 @@ def global_spectrum_frame(
         if static_shadow is not None and static_shadow.get("ok")
         else None
     )
-    dynamic_requested = bool(include_dynamic_shadow is True or temporal_validation_enabled)
+    dynamic_requested = bool(
+        not ALL_SOURCE_BETA_ENABLED
+        and (include_dynamic_shadow is True or temporal_validation_enabled)
+    )
     if not dynamic_requested:
         dynamic_temporal_shadow = {
             "ok": False,
@@ -5352,7 +5496,9 @@ def global_spectrum_frame(
     all_source_beta_prediction: dict[str, Any] | None = None
     if ALL_SOURCE_BETA_ENABLED:
         if source_gate["model_input_source_allowed"]:
-            all_source_beta_prediction = _predict_all_source_beta()
+            all_source_beta_prediction = _predict_all_source_beta(
+                latest_override=latest,
+            )
         else:
             all_source_beta_prediction = {
                 "ok": False,
@@ -5425,8 +5571,9 @@ def global_spectrum_frame(
         static_model_assisted_display_allowed = False
         global_frame_qa["formal_recognition_allowed"] = beta_ready
         global_frame_qa["response_allowed"] = beta_ready
-        global_frame_qa["model_baseline_ready"] = (
-            all_source_beta_prediction.get("status") != "baseline_required"
+        global_frame_qa["model_baseline_ready"] = bool(
+            all_source_beta_prediction.get("ok")
+            and all_source_beta_prediction.get("status") == "ready"
         )
         global_frame_qa["blockers"] = (
             []

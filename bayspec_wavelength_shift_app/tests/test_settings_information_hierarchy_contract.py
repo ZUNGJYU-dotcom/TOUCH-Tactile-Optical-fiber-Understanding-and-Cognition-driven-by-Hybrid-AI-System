@@ -28,10 +28,17 @@ class SettingsInformationHierarchyContractTests(unittest.TestCase):
         self.assertIn('id="recognitionModeStatus"', acquisition)
         self.assertIn('id="settingsTemporalValidationButton"', acquisition)
         self.assertIn('id="settingsStaticFallbackButton"', acquisition)
+        self.assertIn('id="legacyRecognitionRuntimeControls"', acquisition)
         self.assertLess(
             acquisition.index("Recognition runtime"),
             acquisition.index("Source adapter"),
         )
+
+    def test_beta_runtime_hides_legacy_model_switches_and_disables_shadow_request(self) -> None:
+        self.assertIn('legacyRecognitionRuntimeControls?.toggleAttribute("hidden", state.betaRecognitionRuntime)', JS)
+        self.assertIn('state.betaRecognitionRuntime = false', JS)
+        self.assertIn('"All-data spectral model"', JS)
+        self.assertIn('!state.betaRecognitionRuntime && state.temporalValidationMode', JS)
 
     def test_removed_workspace_controls_leave_no_dead_js_bindings(self) -> None:
         self.assertNotIn("settingsOperatorModeButton", JS)
@@ -42,6 +49,11 @@ class SettingsInformationHierarchyContractTests(unittest.TestCase):
         self.assertIn("width: min(320px, calc(100vw - 24px));", CSS)
         self.assertIn(".diagnostics-mode .diagnostic-runtime-content", CSS)
         self.assertIn(".diagnostics-mode .diagnostic-runtime-buttons button.active", CSS)
+        self.assertIn(
+            ".diagnostics-mode .diagnostic-runtime-buttons[hidden]",
+            CSS,
+        )
+        self.assertIn("display: none !important;", CSS)
 
     def test_settings_focus_moves_inside_and_returns_to_its_opener(self) -> None:
         self.assertIn("let settingsPanelOpener = null", JS)

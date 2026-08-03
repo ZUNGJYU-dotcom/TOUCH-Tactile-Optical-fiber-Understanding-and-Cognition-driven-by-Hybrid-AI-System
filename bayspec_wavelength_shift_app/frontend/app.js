@@ -76,6 +76,7 @@ const spectrumProcessingStatus = document.getElementById("spectrumProcessingStat
 const spectrumBackgroundStatus = document.getElementById("spectrumBackgroundStatus");
 const settingsTemporalValidationButton = document.getElementById("settingsTemporalValidationButton");
 const settingsStaticFallbackButton = document.getElementById("settingsStaticFallbackButton");
+const legacyRecognitionRuntimeControls = document.getElementById("legacyRecognitionRuntimeControls");
 const operatorDiagnosticsButton = document.getElementById("operatorDiagnosticsButton");
 const demoModule = document.querySelector(".demo-module");
 const opticalSummaryCard = document.querySelector(".summary-hud");
@@ -90,6 +91,7 @@ const operatorAlertMessage = document.getElementById("operatorAlertMessage");
 const operatorAlertDiagnosticsButton = document.getElementById("operatorAlertDiagnosticsButton");
 const px6dTareButton = document.getElementById("px6dTareButton");
 const diagnosticPx6dTareButton = document.getElementById("diagnosticPx6dTareButton");
+const px6dCaptureTareButton = document.getElementById("px6dCaptureTareButton");
 const px6dCapturePosition = document.getElementById("px6dCapturePosition");
 const px6dCapturePositionButtons = Array.from(document.querySelectorAll("[data-capture-position]"));
 const px6dCaptureTrial = document.getElementById("px6dCaptureTrial");
@@ -272,14 +274,15 @@ const DIAGNOSTICS_CENTER_COMPACT_MIN_WIDTH_PX = 420;
 const DIAGNOSTICS_COMPACT_BREAKPOINT_PX = 1100;
 const DEMO_PLAYBACK_RATE_MIN = 0.1;
 const DEMO_PLAYBACK_RATE_MAX = 2.0;
-// Reach a new physical-frame target in about 0.2 s while retaining continuous
-// requestAnimationFrame interpolation between the slower BaySpec SDK frames.
-const THREE_ATTENUATION_EASING = 14.0;
-const THREE_DEFORMATION_EASING = 16.0;
+// Apply a newly acquired contact frame quickly, then keep the established
+// slower release constants below. This reduces visual onset latency without
+// turning release residuals into an abrupt or unstable animation.
+const THREE_ATTENUATION_EASING = 28.0;
+const THREE_DEFORMATION_EASING = 26.0;
 const THREE_ATTENUATION_RELEASE_EASING = 16.0;
 const THREE_DEFORMATION_RELEASE_EASING = 14.0;
 const THREE_SURFACE_RELEASE_EASING = 18.0;
-const THREE_SPATIAL_EASING = 14.0;
+const THREE_SPATIAL_EASING = 24.0;
 const THREE_SETTLE_EPSILON = 0.00035;
 const THREE_MAX_DEVICE_PIXEL_RATIO = 1.25;
 const THREE_GEOMETRY_UPDATE_INTERVAL_MS = 33;
@@ -312,10 +315,10 @@ const CHART_EASING = 8.5;
 const CHART_SETTLE_COUNTS = 0.55;
 const TRACE_WINDOW_POINTS = 120;
 const DEMO_TRACE_WINDOW_POINTS = 80;
-// The stable BaySpec SDK fallback produces a new physical frame roughly every
-// 0.4 s. Polling at 25 Hz only redrew identical spectra and made the desktop UI
-// contend with model inference. Animation remains requestAnimationFrame-based.
-const LIVE_MODEL_POLL_INTERVAL_MS = 160;
+// Poll often enough that a completed SDK frame is normally observed within
+// one display frame. Requests never overlap and duplicate physical frames are
+// cached by the backend, so this does not repeat model inference.
+const LIVE_MODEL_POLL_INTERVAL_MS = 50;
 const LIVE_SOURCE_PROBE_INTERVAL_MS = 1500;
 const PX6D_UI_POLL_INTERVAL_MS = 100;
 const PX6D_CAPTURE_POLL_INTERVAL_MS = 500;
@@ -1013,6 +1016,8 @@ const state = {
   paused: false,
   frame: null,
   betaForceDisplayEnabled: false,
+  betaRecognitionRuntime: false,
+  activeRecognitionModelLabel: "Loading...",
   lastRenderedSourceFrameKey: null,
   selectedChannel: "P22",
   smoothAttenuation: 0,
@@ -1216,6 +1221,35 @@ function px6dConnectionDisplayState(status = {}) {
   return status.running === true ? "reconnecting" : "stopped";
 }
 
+function px6dCaptureIsBusy() {
+  const capture = state.px6dCaptureStatus || {};
+  return Boolean(
+    capture.running === true ||
+    capture.start_in_progress === true ||
+    capture.worker_alive === true ||
+    state.px6dCaptureRequestInFlight
+  );
+}
+
+function updatePx6dZeroButtonState() {
+  const connected = state.px6dUiStatus?.connected === true;
+  const captureBusy = px6dCaptureIsBusy();
+  const commandBusy = state.commandPending !== null;
+  const disabled = !connected || captureBusy || commandBusy;
+  const title = captureBusy
+    ? "Stop recording before zeroing the force sensor"
+    : commandBusy
+      ? "Wait for the current command to finish"
+      : connected
+        ? "Zero force sensor"
+        : "Force sensor is offline";
+  [px6dTareButton, diagnosticPx6dTareButton, px6dCaptureTareButton].forEach((button) => {
+    if (!button) return;
+    button.disabled = disabled;
+    button.title = title;
+  });
+}
+
 function updatePx6dPanel(payload = {}) {
   if (Object.prototype.hasOwnProperty.call(payload, "px6d_reference")) {
     state.px6dAligned = payload?.px6d_reference || null;
@@ -1288,9 +1322,7 @@ function updatePx6dPanel(payload = {}) {
   setText("px6dReferenceStatus", stateLabel);
   const statusElement = document.getElementById("px6dReferenceStatus");
   if (statusElement) statusElement.dataset.state = stateTone;
-  [px6dTareButton, diagnosticPx6dTareButton].forEach((button) => {
-    if (button) button.disabled = !connected || state.commandPending !== null;
-  });
+  updatePx6dZeroButtonState();
 
   const px6dPort = status.active_port || status.port || status.configured_port || "COM3";
   setText(
@@ -1543,8 +1575,14 @@ function updateCaptureReadiness() {
   const statusElement = document.getElementById("px6dCaptureStatus");
   if (statusElement) statusElement.title = String(payload.capture_status || "idle").replaceAll("_", " ");
   if (px6dCaptureStartButton) {
-    px6dCaptureStartButton.disabled = running || state.px6dCaptureRequestInFlight || !ready;
-    px6dCaptureStartButton.title = ready ? "Start recording" : `Check ${missing.join(", ")}`;
+    const commandBusy = state.commandPending !== null;
+    px6dCaptureStartButton.disabled = running || state.px6dCaptureRequestInFlight || commandBusy;
+    px6dCaptureStartButton.dataset.readiness = ready ? "ready" : "setup-required";
+    px6dCaptureStartButton.title = commandBusy
+      ? "Wait for force zero to finish"
+      : ready
+        ? "Start recording"
+        : `Check ${missing.join(", ")}`;
   }
   return { ready, running, selected, missing };
 }
@@ -1611,6 +1649,7 @@ function updatePx6dCapturePanel(payload = {}) {
   });
   updateCapturePositionSelection();
   if (px6dCaptureStopButton) px6dCaptureStopButton.disabled = !running || state.px6dCaptureRequestInFlight;
+  updatePx6dZeroButtonState();
   updateCaptureReadiness();
 }
 
@@ -2314,7 +2353,7 @@ function responseText(record) {
       if (record?.active_spectral_model_loaded === true) {
         return `All-data optical model loaded · input waiting (${activeStatus || "no frame"}).`;
       }
-      return "Latest Beta model unavailable · Diagnostics contains the explicit load error.";
+      return "Latest deployed model unavailable · Diagnostics contains the explicit load error.";
     }
     if (record?.active_spectral_model_source === "dynamic_temporal_v3_validation") {
       const progress = record?.active_spectral_model_progress || {};
@@ -5362,6 +5401,12 @@ async function setSurfaceFullscreen(active) {
 }
 
 function updateRecognitionValidationMode(useTemporal, { announce = true, refresh = true } = {}) {
+  if (state.betaRecognitionRuntime) {
+    state.temporalValidationMode = false;
+    legacyRecognitionRuntimeControls?.setAttribute("hidden", "");
+    setText("recognitionModeStatus", state.activeRecognitionModelLabel);
+    return;
+  }
   state.temporalValidationMode = Boolean(useTemporal);
   settingsTemporalValidationButton?.classList.toggle("active", state.temporalValidationMode);
   settingsStaticFallbackButton?.classList.toggle("active", !state.temporalValidationMode);
@@ -8546,7 +8591,9 @@ async function fetchFrame({ force = false } = {}) {
       if (!sourceActive) return;
     }
     const traceLimit = state.demoModeActive ? DEMO_TRACE_WINDOW_POINTS : TRACE_WINDOW_POINTS;
-    const temporalValidation = state.temporalValidationMode ? "true" : "false";
+    const temporalValidation = !state.betaRecognitionRuntime && state.temporalValidationMode
+      ? "true"
+      : "false";
     const rawFrame = await requestJSON(
       `/api/global_spectrum_frame?trace_limit=${traceLimit}&include_spectrum=true&include_dynamic_shadow=${temporalValidation}&temporal_validation_mode=${temporalValidation}`,
       { cache: "no-store" },
@@ -8710,10 +8757,27 @@ async function loadRuntimeCapabilities() {
       payload?.all_source_beta_primary === true &&
       payload?.all_source_beta_model?.enabled === true
     );
+    const runtime = payload?.recognition_runtime || {};
+    state.betaRecognitionRuntime = Boolean(
+      payload?.all_source_beta_primary === true || runtime?.switchable === false
+    );
+    state.activeRecognitionModelLabel = String(
+      runtime?.display_name ||
+      (state.betaRecognitionRuntime ? "All-data spectral model" : "Temporal validation")
+    );
+    legacyRecognitionRuntimeControls?.toggleAttribute("hidden", state.betaRecognitionRuntime);
+    if (state.betaRecognitionRuntime) {
+      state.temporalValidationMode = false;
+    }
+    setText("recognitionModeStatus", state.activeRecognitionModelLabel);
     return payload;
   } catch (error) {
     console.warn("[runtime capabilities]", error);
     state.betaForceDisplayEnabled = false;
+    state.betaRecognitionRuntime = false;
+    state.activeRecognitionModelLabel = "Runtime unavailable";
+    legacyRecognitionRuntimeControls?.removeAttribute("hidden");
+    setText("recognitionModeStatus", state.activeRecognitionModelLabel);
     return null;
   }
 }
@@ -9025,9 +9089,10 @@ liveTwinButton.addEventListener("click", () => {
           resetTrainedModelTraceHistory();
           const source = inputSourceSelect.value === "export_watch" ? "export_watch" : "direct_sdk";
           const controlSense = source === "export_watch" ? "true" : "false";
+          const sourceIntervalSec = source === "direct_sdk" ? 0.02 : 0.1;
           const integration = Number(state.spectrumProcessing?.settings?.integration_us) || 5000;
           await requestJSON(
-            `/api/live/start?channel_id=${channel}&interval_sec=0.1&integration=${integration}&control_sense=${controlSense}&source=${source}`,
+            `/api/live/start?channel_id=${channel}&interval_sec=${sourceIntervalSec}&integration=${integration}&control_sense=${controlSense}&source=${source}`,
             { method: "POST" },
             { timeoutMs: 12000 }
           );
@@ -9646,8 +9711,13 @@ demoResetButton?.addEventListener("click", async () => {
 
 async function performPx6dSoftwareZero() {
   if (state.commandPending) return;
+  if (px6dCaptureIsBusy()) {
+    setCommandFeedback("Stop recording before zeroing the force sensor.", "warning", { autoHideMs: 4500 });
+    updatePx6dZeroButtonState();
+    return;
+  }
   state.commandPending = "PX6D software zero";
-  [px6dTareButton, diagnosticPx6dTareButton].forEach((button) => {
+  [px6dTareButton, diagnosticPx6dTareButton, px6dCaptureTareButton].forEach((button) => {
     if (!button) return;
     button.disabled = true;
     const label = button.querySelector("span");
@@ -9670,21 +9740,24 @@ async function performPx6dSoftwareZero() {
     setCommandFeedback(commandErrorMessage(error, "PX6D software zero failed"), "error", { autoHideMs: 6000 });
   } finally {
     state.commandPending = null;
-    if (px6dTareButton) {
-      px6dTareButton.textContent = "Zero Fz";
-      px6dTareButton.disabled = false;
-    }
+    if (px6dTareButton) px6dTareButton.textContent = "Zero Fz";
     if (diagnosticPx6dTareButton) {
       const label = diagnosticPx6dTareButton.querySelector("span");
       if (label) label.textContent = "Zero six-axis reference";
-      diagnosticPx6dTareButton.disabled = false;
-      refreshLucideIcons();
     }
+    if (px6dCaptureTareButton) {
+      const label = px6dCaptureTareButton.querySelector("span");
+      if (label) label.textContent = "Zero";
+    }
+    updatePx6dZeroButtonState();
+    updateCaptureReadiness();
+    refreshLucideIcons();
   }
 }
 
 px6dTareButton?.addEventListener("click", performPx6dSoftwareZero);
 diagnosticPx6dTareButton?.addEventListener("click", performPx6dSoftwareZero);
+px6dCaptureTareButton?.addEventListener("click", performPx6dSoftwareZero);
 
 px6dCaptureOutputRoot?.addEventListener("input", () => {
   px6dCaptureOutputRoot.dataset.userEdited = "true";
@@ -9736,6 +9809,10 @@ px6dCaptureBrowseButton?.addEventListener("click", async () => {
 
 px6dCaptureStartButton?.addEventListener("click", async () => {
   if (state.px6dCaptureRequestInFlight) return;
+  if (state.commandPending) {
+    setCommandFeedback("Wait for force zero to finish.", "warning", { autoHideMs: 4000 });
+    return;
+  }
   const selectedOutputs = selectedCaptureOutputs();
   if (!selectedOutputs.length) {
     setCommandFeedback("Select data to save.", "warning", { autoHideMs: 4000 });

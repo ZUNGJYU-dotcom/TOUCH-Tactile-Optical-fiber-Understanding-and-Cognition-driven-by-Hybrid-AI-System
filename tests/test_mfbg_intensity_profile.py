@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -246,6 +247,22 @@ class MfbgIntensityProfileTests(unittest.TestCase):
             payload["source_commit"],
             payload["release"]["source_commit"],
         )
+
+    def test_beta_health_exposes_one_non_switchable_current_model(self) -> None:
+        from backend import main as backend_main
+
+        with patch.object(backend_main, "ALL_SOURCE_BETA_ENABLED", True):
+            payload = backend_main.health()
+
+        runtime = payload["recognition_runtime"]
+        self.assertEqual(
+            runtime["active_model_id"],
+            "ordinary_fbg_all_data_beta_v1",
+        )
+        self.assertEqual(runtime["display_name"], "All-data spectral model")
+        self.assertFalse(runtime["switchable"])
+        self.assertFalse(runtime["legacy_models_enabled"])
+        self.assertFalse(payload["old_model_fallback_enabled"])
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ from desktop_launcher import (
     stop_owned_backend,
     wait_until_ready,
 )
-from sdk_live import BaySpecSdkLiveReader
+from sdk_live import DEFAULT_INTERVAL_MS, BaySpecSdkLiveReader
 from src.hybrid_spectrum.session_level_calibration import (
     CORE_FEATURE_NAMES,
     PerPositionOrdinalCalibrator,
@@ -471,10 +471,65 @@ class CaptureApiThreadingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "capture_request_invalid")
         start.assert_not_called()
 
+    async def test_force_zero_is_rejected_while_capture_is_running(self) -> None:
+        with patch.object(
+            backend_main.optical_force_capture,
+            "status",
+            return_value={"running": True, "start_in_progress": False, "worker_alive": True},
+        ), patch.object(backend_main.px6d_reader, "tare") as tare:
+            result = backend_main.px6d_tare(duration_sec=1.0)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "recording_active")
+        self.assertEqual(
+            result["reason"],
+            "stop_synchronized_recording_before_force_zero",
+        )
+        tare.assert_not_called()
+
+    async def test_capture_start_is_rejected_while_force_zero_control_is_busy(self) -> None:
+        class JsonRequest:
+            async def json(self) -> dict:
+                return {
+                    "position_label": "P22",
+                    "trial_id": "zero_guard_probe",
+                    "selected_outputs": ["spectrum", "force"],
+                }
+
+        acquired = backend_main.PX6D_CAPTURE_CONTROL_LOCK.acquire(blocking=False)
+        self.assertTrue(acquired)
+        try:
+            with patch.object(backend_main.optical_force_capture, "start") as start:
+                result = await backend_main.px6d_capture_start(  # type: ignore[arg-type]
+                    JsonRequest()
+                )
+        finally:
+            backend_main.PX6D_CAPTURE_CONTROL_LOCK.release()
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "force_zero_in_progress")
+        start.assert_not_called()
+
 
 class SdkLiveReaderStateTests(unittest.TestCase):
     def _reader(self) -> BaySpecSdkLiveReader:
         return BaySpecSdkLiveReader(_BridgeStub(), Path("."))
+
+    def test_default_interval_uses_low_latency_idle_budget(self) -> None:
+        reader = self._reader()
+
+        self.assertEqual(DEFAULT_INTERVAL_MS, 20)
+        self.assertEqual(reader.interval_ms, DEFAULT_INTERVAL_MS)
+
+    def test_one_frame_helper_does_not_sleep_after_final_frame(self) -> None:
+        helper_source = (
+            Path(__file__).resolve().parents[1]
+            / "sdk_probe"
+            / "BaySpecSdkStream.cs"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("if (maxFrames <= 0 || frame < maxFrames)", helper_source)
+        self.assertIn("Thread.Sleep(intervalMs);", helper_source)
 
     def test_start_is_idempotent_while_session_is_active(self) -> None:
         reader = self._reader()
@@ -881,7 +936,10 @@ class SdkLiveReaderStateTests(unittest.TestCase):
 
         self.assertEqual(reader.frame_count, 1)
         self.assertEqual(len(observed_delays), 1)
-        self.assertGreaterEqual(observed_delays[0], 0.019)
+        # Windows may overshoot the mocked 80 ms acquisition sleep by a few
+        # milliseconds. Keep enough tolerance to verify that acquisition time
+        # is subtracted without making the assertion scheduler-sensitive.
+        self.assertGreaterEqual(observed_delays[0], 0.015)
         self.assertLess(observed_delays[0], 0.06)
         self.assertGreater(reader.last_acquisition_duration_ms or 0.0, 70.0)
 
@@ -1296,6 +1354,67 @@ class DynamicTemporalShadowEndpointTests(unittest.TestCase):
         )
         self.assertEqual(result["baseline_token"], update["rollback_baseline_token"])
 
+    def test_runtime_baseline_commit_exception_is_rolled_back_in_adapter(self) -> None:
+        pair = self._spectrum_pair(frame_id=8, timestamp=8.0)
+        original_baseline = np.asarray(pair["baseline"]["intensity"], dtype=float)
+
+        class AdapterStub:
+            bundle = {"frame_interval_sec_estimated": 0.04}
+
+            def __init__(self) -> None:
+                self.baselines: list[np.ndarray] = []
+                self.pending = {
+                    "wavelength_nm": np.asarray(
+                        pair["baseline"]["wavelength_nm"], dtype=float
+                    ),
+                    "intensity": original_baseline * 1.04,
+                    "sample_count": 6,
+                    "span_sec": 1.0,
+                }
+
+            def clear(self) -> None:
+                return None
+
+            def set_baseline(self, _wavelength, intensity) -> None:
+                self.baselines.append(np.asarray(intensity, dtype=float).copy())
+
+            def consume_pending_runtime_baseline_update(self):
+                pending, self.pending = self.pending, None
+                return pending
+
+            def update(self, *_args, **_kwargs) -> dict:
+                return {
+                    "status": "runtime_reference_reanchored",
+                    "ready": False,
+                }
+
+        adapter = AdapterStub()
+        with patch.object(
+            backend_main,
+            "DYNAMIC_TEMPORAL_SHADOW_ADAPTER",
+            adapter,
+        ), patch.object(
+            backend_main.bridge,
+            "spectral_model_input",
+            return_value=pair,
+        ), patch.object(
+            backend_main.bridge,
+            "set_runtime_recovery_spectrum_baseline",
+            side_effect=RuntimeError("commit failed"),
+        ):
+            backend_main._reset_dynamic_temporal_shadow("test_commit_exception")
+            result = backend_main._predict_dynamic_temporal_shadow()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(adapter.baselines), 2)
+        np.testing.assert_allclose(adapter.baselines[-1], original_baseline)
+        update = result["runtime_baseline_update"]
+        self.assertEqual(
+            update["status"], "runtime_recovery_baseline_commit_error"
+        )
+        self.assertTrue(update["adapter_baseline_rollback_applied"])
+        self.assertIn("commit failed", update["reason"])
+
     def test_global_frame_does_not_run_dynamic_shadow_by_default(self) -> None:
         stopped = {"active": False, "freshness": "stopped"}
         with patch.object(
@@ -1524,6 +1643,82 @@ class DynamicTemporalShadowEndpointTests(unittest.TestCase):
         self.assertEqual(
             result["trained_static_spectral_frame"]["status"],
             "skipped_temporal_validation_mode",
+        )
+
+    def test_beta_global_frame_skips_legacy_models_and_reuses_latest_frame(self) -> None:
+        stopped = {"active": False, "freshness": "stopped"}
+        latest = {
+            "source": "static_http_ingest",
+            "qa_status": "ok",
+            "wavelength_nm": [1540.0, 1545.0, 1550.0],
+            "intensity": [10.0, 20.0, 15.0],
+        }
+        beta_payload = {
+            "ok": True,
+            "status": "ready",
+            "contact": {"label": "no_contact", "confidence": 0.98},
+            "position": {"label": None, "confidence": 0.0},
+            "estimated_force_n": 0.0,
+            "digital_twin": {"active": False},
+        }
+        with patch.object(
+            backend_main,
+            "ALL_SOURCE_BETA_ENABLED",
+            True,
+        ), patch.object(
+            backend_main.bridge,
+            "frame",
+            return_value={"ok": True, "latest": latest},
+        ), patch.object(
+            backend_main.export_watcher,
+            "status",
+            return_value=stopped,
+        ), patch.object(
+            backend_main.sdk_live_reader,
+            "status",
+            return_value=stopped,
+        ), patch.object(
+            backend_main.sense_controller,
+            "status",
+            return_value={"ok": True},
+        ), patch.object(
+            backend_main,
+            "_predict_static_spectral_frame",
+        ) as predict_static, patch.object(
+            backend_main,
+            "_predict_dynamic_temporal_shadow",
+        ) as predict_dynamic, patch.object(
+            backend_main,
+            "_predict_all_source_beta",
+            return_value=beta_payload,
+        ) as predict_beta:
+            result = backend_main.global_spectrum_frame(
+                trace_limit=8,
+                include_spectrum=False,
+                include_shadow=True,
+                include_dynamic_shadow=True,
+                temporal_validation_mode=False,
+            )
+
+        predict_static.assert_not_called()
+        predict_dynamic.assert_not_called()
+        predict_beta.assert_called_once()
+        latest_override = predict_beta.call_args.kwargs["latest_override"]
+        self.assertIsInstance(latest_override, dict)
+        self.assertEqual(latest_override["source"], latest["source"])
+        self.assertEqual(latest_override["wavelength_nm"], latest["wavelength_nm"])
+        self.assertEqual(latest_override["intensity"], latest["intensity"])
+        self.assertEqual(
+            result["active_spectral_model_source"],
+            "ordinary_fbg_all_data_beta_v1",
+        )
+        self.assertEqual(
+            result["trained_static_spectral_frame"]["status"],
+            "skipped_beta_latest_model_only",
+        )
+        self.assertEqual(
+            result["dynamic_temporal_shadow"]["status"],
+            "skipped_beta_latest_model_only",
         )
 
     def test_reset_clears_cached_dynamic_trial_state(self) -> None:
@@ -1932,6 +2127,23 @@ class FrontendRequestLifecycleContractTests(unittest.TestCase):
             r"state\.px6dCapturePollInFlight",
         )
         self.assertIn("state.px6dCapturePollInFlight = false", self.source)
+
+    def test_live_frame_delivery_uses_low_latency_nonoverlapping_polling(self) -> None:
+        self.assertIn("const LIVE_MODEL_POLL_INTERVAL_MS = 50;", self.source)
+        self.assertIn(
+            'const sourceIntervalSec = source === "direct_sdk" ? 0.02 : 0.1;',
+            self.source,
+        )
+        self.assertIn("frameRequestInFlight: false", self.source)
+        self.assertIn("if (state.frameRequestInFlight) {", self.source)
+        self.assertIn("if (force) state.forcedFrameRequestQueued = true;", self.source)
+
+    def test_contact_animation_has_fast_attack_and_stable_release(self) -> None:
+        self.assertIn("const THREE_ATTENUATION_EASING = 28.0;", self.source)
+        self.assertIn("const THREE_DEFORMATION_EASING = 26.0;", self.source)
+        self.assertIn("const THREE_SPATIAL_EASING = 24.0;", self.source)
+        self.assertIn("const THREE_ATTENUATION_RELEASE_EASING = 16.0;", self.source)
+        self.assertIn("const THREE_DEFORMATION_RELEASE_EASING = 14.0;", self.source)
 
     def test_capture_commands_invalidate_stale_status_poll(self) -> None:
         self.assertIn("px6dCapturePollController: null", self.source)
@@ -2388,6 +2600,32 @@ class AcquisitionSourceMutualExclusionTests(unittest.TestCase):
 
         reset_bridge.assert_called_once_with(keep_baseline=False)
         self.assertTrue(result["acquisition_session_reset"]["baseline_invalidated"])
+
+    def test_direct_live_start_uses_20_ms_low_latency_interval(self) -> None:
+        sdk_status = {"active": True, "freshness": "waiting"}
+        stopped_watch = {"ok": True, "active": False, "ingest_in_progress": False}
+        with patch.object(
+            backend_main.export_watcher,
+            "stop",
+            return_value=stopped_watch,
+        ), patch.object(
+            backend_main.sdk_live_reader, "start", return_value=sdk_status
+        ) as start_sdk, patch.object(
+            backend_main.bridge, "reset", return_value={"ok": True}
+        ):
+            backend_main.live_start(
+                channel_id="P22",
+                export_root=None,
+                interval_sec=0.02,
+                control_sense=False,
+                source="direct_sdk",
+            )
+
+        start_sdk.assert_called_once_with(
+            channel_id="P22",
+            interval_ms=20,
+            integration=backend_main.DEFAULT_INTEGRATION_US,
+        )
 
     def test_export_watch_start_is_blocked_when_sdk_does_not_stop(self) -> None:
         sdk_status = {
@@ -3144,6 +3382,201 @@ class OperatorQaProjectionTests(unittest.TestCase):
         )
         self.assertIn("diagnostic_only_qa_flags: diagnosticOnlyRawQaFlags", app_js)
         self.assertIn("carrier_qa_flags: rawQaFlags", app_js)
+
+
+class AllSourceBetaBaselineTransactionTests(unittest.TestCase):
+    class _Adapter:
+        def __init__(self, pending_baseline: dict[str, object]) -> None:
+            self.pending_baseline = pending_baseline
+            self.set_baseline_calls: list[tuple[list[float], list[float]]] = []
+
+        def set_baseline(self, wavelength, intensity) -> None:
+            self.set_baseline_calls.append((list(wavelength), list(intensity)))
+
+        def update(self, *_args, **_kwargs):
+            return {
+                "ok": True,
+                "status": "ready",
+                "contact": {"label": "no_contact"},
+            }
+
+        def consume_pending_runtime_baseline_update(self):
+            pending = self.pending_baseline
+            self.pending_baseline = None
+            return pending
+
+    class _Bridge:
+        def __init__(self, pair, commit_result=None, commit_error=None) -> None:
+            self.pair = pair
+            self.commit_result = commit_result
+            self.commit_error = commit_error
+            self.commit_calls = []
+
+        def spectral_model_input(self, channel_id="P22"):
+            return self.pair
+
+        def set_runtime_recovery_spectrum_baseline(self, *args, **kwargs):
+            self.commit_calls.append((args, kwargs))
+            if self.commit_error is not None:
+                raise self.commit_error
+            return dict(self.commit_result or {"ok": True})
+
+    @staticmethod
+    def _spectral_pair():
+        wavelength = np.linspace(1539.0, 1582.0, 64).tolist()
+        baseline = (3200.0 + 100.0 * np.sin(np.linspace(0, 4, 64))).tolist()
+        latest = (np.asarray(baseline) * 1.001).tolist()
+        return {
+            "ok": True,
+            "baseline": {
+                "wavelength_nm": wavelength,
+                "intensity": baseline,
+            },
+            "latest": {
+                "wavelength_nm": wavelength,
+                "intensity": latest,
+                "frame_id": 7,
+                "timestamp": 1.2,
+                "source": "test",
+            },
+        }
+
+    def _run_prediction(self, *, commit_result=None, commit_error=None):
+        pair = self._spectral_pair()
+        recovered = {
+            "wavelength_nm": np.asarray(pair["baseline"]["wavelength_nm"]),
+            "intensity": np.asarray(pair["baseline"]["intensity"]) * 1.002,
+            "sample_count": 5,
+            "span_sec": 1.1,
+            "shape_motion_rms": 0.0004,
+            "common_gain_motion": 0.0003,
+            "policy": "test_release_recovery",
+        }
+        adapter = self._Adapter(recovered)
+        bridge_stub = self._Bridge(
+            pair,
+            commit_result=commit_result,
+            commit_error=commit_error,
+        )
+        with patch.multiple(
+            backend_main,
+            ALL_SOURCE_BETA_ENABLED=True,
+            ALL_SOURCE_BETA_ADAPTER=adapter,
+            ALL_SOURCE_BETA_ERROR=None,
+            ALL_SOURCE_BETA_BASELINE_TOKEN=None,
+            ALL_SOURCE_BETA_LAST_FRAME_KEY=None,
+            ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT=0,
+            ALL_SOURCE_BETA_LAST_PAYLOAD=None,
+            bridge=bridge_stub,
+        ):
+            result = backend_main._predict_all_source_beta()
+            active_token = backend_main.ALL_SOURCE_BETA_BASELINE_TOKEN
+        return result, adapter, bridge_stub, pair, recovered, active_token
+
+    def test_runtime_recovery_baseline_is_committed_to_bridge(self) -> None:
+        result, adapter, bridge_stub, _pair, recovered, active_token = (
+            self._run_prediction(commit_result={"ok": True, "status": "set"})
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["runtime_baseline_update"]["status"], "set")
+        self.assertEqual(len(bridge_stub.commit_calls), 1)
+        self.assertEqual(len(adapter.set_baseline_calls), 1)
+        self.assertEqual(
+            active_token,
+            backend_main._spectrum_token(
+                recovered["wavelength_nm"].tolist(),
+                recovered["intensity"].tolist(),
+            ),
+        )
+
+    def test_rejected_runtime_baseline_rolls_adapter_back(self) -> None:
+        result, adapter, _bridge, pair, _recovered, active_token = (
+            self._run_prediction(
+                commit_result={"ok": False, "status": "candidate_rejected"}
+            )
+        )
+
+        update = result["runtime_baseline_update"]
+        self.assertTrue(update["adapter_baseline_rollback_applied"])
+        self.assertEqual(len(adapter.set_baseline_calls), 2)
+        self.assertEqual(
+            adapter.set_baseline_calls[-1][1],
+            pair["baseline"]["intensity"],
+        )
+        self.assertEqual(
+            active_token,
+            backend_main._spectrum_token(
+                pair["baseline"]["wavelength_nm"],
+                pair["baseline"]["intensity"],
+            ),
+        )
+
+    def test_runtime_baseline_commit_exception_also_rolls_back(self) -> None:
+        result, adapter, _bridge, _pair, _recovered, _active_token = (
+            self._run_prediction(commit_error=RuntimeError("commit failed"))
+        )
+
+        update = result["runtime_baseline_update"]
+        self.assertEqual(
+            update["status"], "runtime_recovery_baseline_commit_error"
+        )
+        self.assertTrue(update["adapter_baseline_rollback_applied"])
+        self.assertEqual(len(adapter.set_baseline_calls), 2)
+
+
+class CaptureProvenanceContractTests(unittest.TestCase):
+    def test_optical_device_identity_uses_bridge_module_resolvers(self) -> None:
+        with (
+            patch.object(
+                backend_main,
+                "_current_runtime_baseline_token",
+                return_value=(
+                    "baseline-token",
+                    {"ok": True, "baseline_spectrum_status": "ready"},
+                ),
+            ),
+            patch.object(
+                backend_main,
+                "_static_spectral_model_status",
+                return_value={"loaded": True},
+            ),
+            patch.object(
+                backend_main.sdk_live_reader,
+                "status",
+                return_value={"source": "test_sdk", "active": False},
+            ),
+            patch.object(
+                backend_main.px6d_reader,
+                "status",
+                return_value={"connected": False},
+            ),
+            patch.object(
+                backend_main,
+                "configured_device_id",
+                return_value="F1871328",
+            ),
+            patch.object(
+                backend_main,
+                "configured_sense_export_root",
+                return_value=Path("C:/Sense/Spectrum_Data"),
+            ),
+            patch.object(
+                backend_main,
+                "_artifact_identity",
+                side_effect=lambda path: {"path": str(path)},
+            ),
+        ):
+            payload = backend_main._capture_provenance_snapshot()
+
+        self.assertEqual(
+            payload["optical_device"]["configured_device_id"],
+            "F1871328",
+        )
+        self.assertEqual(
+            payload["optical_device"]["configured_sense_export_root"],
+            "C:\\Sense\\Spectrum_Data",
+        )
 
 
 if __name__ == "__main__":

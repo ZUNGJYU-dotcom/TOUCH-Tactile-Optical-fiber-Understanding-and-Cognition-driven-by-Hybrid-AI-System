@@ -2,6 +2,73 @@
 
 ## Unreleased
 
+### v0.18.9 Stable promotion
+
+- Promote the validated v0.18.9 Beta all-data optical model and low-latency
+  runtime to the Stable release channel.
+- Ship one deployable optical model only, with no legacy static or dynamic
+  inference fallback in the Stable package.
+- Add a Stable release manifest and a dedicated PyInstaller contract while
+  retaining the Beta package as a local rollback build.
+- Verify the frozen Windows executable, bundled model hash, SDK helper hash,
+  and selected runtime contract before publishing.
+
+### v0.18.9 Beta recording readiness repair
+
+- Add a compact `Zero` command beside the live Force Sensor value in Data
+  recording, sharing the same PX6D software-zero state as Force and
+  Diagnostics.
+- Refresh recording readiness immediately after zeroing so Force changes from
+  `Zero` to `Ready` without leaving the recording panel.
+- Keep Start actionable while setup is incomplete; clicking it now reports the
+  exact missing items instead of remaining silently disabled.
+- Preserve the required position label, optical-frame, force, and output-folder
+  validation before any recording can begin.
+
+### v0.18.8 Beta idle residual and position-jitter repair
+
+- Keep brief low-confidence spatial frames latched during a real contact, but
+  release a residual contact after about one second of stationary full-spectrum
+  evidence with no fresh spectral activity and no credible spatial fingerprint.
+- Require credible spatial evidence before a slow baseline departure can arm a
+  new contact. Slow drift alone can no longer reactivate the tactile surface.
+- Establish a provisional visual position only around real spectral activity,
+  then hold that location through quiet classifier jitter instead of moving the
+  digital-twin patch between P11-P33.
+- Feed the timed quiet no-contact decision into the existing baseline recovery
+  guard so subsequent stable frames can re-anchor the runtime reference.
+- Validate the complete source tree with 490 tests and 172 subtests.
+
+### v0.18.7 Beta contact response repair
+
+- Stop treating low position-classifier confidence as release evidence. A
+  stationary physical press now remains latched until optical contact evidence
+  falls below the contact gate, the spectrum returns near baseline, or recovery
+  explicitly suppresses contact.
+- Add a display-only provisional position fallback for physically verified
+  contact frames. It restores the digital-twin deformation when the best
+  position is useful but below the formal acceptance threshold, while keeping
+  the formal position result unaccepted and visibly uncertain.
+- Keep the fallback bounded by confidence and margin checks and never default
+  an unknown location to P22.
+- Validate the complete source tree with 488 tests and 172 subtests.
+
+### v0.18.6 Beta live contact and position guard
+
+- Gate learned contact output with fresh full-spectrum activity or credible
+  spatial evidence, preventing stationary baseline residuals from appearing as
+  an active press.
+- Suppress optical force and position output whenever contact is not accepted.
+- Stabilize live position with probability smoothing, confidence and margin
+  checks, and a short hold instead of allowing ambiguous frames to jump across
+  the array.
+- Re-anchor the runtime reference after a stationary release while preserving
+  the learned model and its grouped training contract.
+- Validate latest-session replay at 97.4% mean active-contact recall, 99.1%
+  mean active-position accuracy, and 0% false contact on the independent
+  no-contact recording.
+- Validate the source tree with 468 tests and 172 subtests.
+
 ### v0.18.5 Beta all-data runtime and recorded-spectrum peak mapping
 
 - Deploy the latest optical-only all-data bundle for contact, nine-position,

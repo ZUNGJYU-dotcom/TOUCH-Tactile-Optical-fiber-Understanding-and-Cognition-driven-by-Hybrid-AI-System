@@ -11,6 +11,7 @@ import joblib
 import numpy as np
 
 from .dynamic_sequence_dataset import extract_baseline_relative_frame_features
+from .dynamic_shadow_adapter import RuntimeBaselineRecoveryGuard
 from .dynamic_temporal_features import temporal_summary_features
 from .features import PeakWindow, load_peak_windows
 
@@ -74,6 +75,19 @@ def _set_single_thread(model: Any) -> None:
             pass
 
 
+def _top_probability(
+    probabilities: dict[str, float],
+) -> tuple[str | None, float, float]:
+    if not probabilities:
+        return None, 0.0, 0.0
+    ordered = sorted(
+        probabilities.items(), key=lambda item: item[1], reverse=True
+    )
+    label, confidence = ordered[0]
+    runner_up = ordered[1][1] if len(ordered) > 1 else 0.0
+    return label, float(confidence), float(confidence - runner_up)
+
+
 class AllSourceOpticalForceAdapter:
     """Run the grouped-evaluated all-source model from optical spectra only."""
 
@@ -83,6 +97,8 @@ class AllSourceOpticalForceAdapter:
         peak_windows: Iterable[PeakWindow],
         *,
         window_seconds: float = 2.0,
+        runtime_recovery_config: dict[str, Any] | None = None,
+        runtime_gate_config: dict[str, Any] | None = None,
     ) -> None:
         if bundle.get("schema_version") != MODEL_SCHEMA:
             raise ValueError("unsupported all-source candidate model schema")
@@ -131,10 +147,111 @@ class AllSourceOpticalForceAdapter:
         self.force_min_n = float(force_range[0])
         self.force_max_n = float(force_range[1])
 
+        gate_config = dict(runtime_gate_config or {})
+        self.runtime_gate_enabled = bool(gate_config.get("enabled", True))
+        self.contact_off_threshold = float(
+            gate_config.get("contact_probability_off", 0.55)
+        )
+        self.position_confidence_min = float(
+            gate_config.get("position_confidence_min", 0.45)
+        )
+        self.position_margin_min = float(
+            gate_config.get("position_margin_min", 0.08)
+        )
+        self.visual_position_fallback_enabled = bool(
+            gate_config.get("visual_position_fallback_enabled", True)
+        )
+        self.visual_position_confidence_min = float(
+            gate_config.get("visual_position_confidence_min", 0.18)
+        )
+        self.visual_position_margin_min = float(
+            gate_config.get("visual_position_margin_min", 0.015)
+        )
+        self.position_ema_alpha = float(
+            gate_config.get("position_probability_ema_alpha", 0.55)
+        )
+        self.position_hold_sec = float(
+            gate_config.get("position_hold_sec", 0.75)
+        )
+        self.position_switch_frames = int(
+            gate_config.get("position_switch_frames", 2)
+        )
+        self.release_ambiguous_frames = int(
+            gate_config.get("release_ambiguous_frames", 2)
+        )
+        self.ambiguous_quiet_release_sec = float(
+            gate_config.get("ambiguous_quiet_release_sec", 1.0)
+        )
+        self.release_near_baseline_frames = int(
+            gate_config.get("release_near_baseline_frames", 2)
+        )
+        self.baseline_release_distance = float(
+            gate_config.get("baseline_release_distance", 0.0050)
+        )
+        self.require_baseline_separation = bool(
+            gate_config.get("require_baseline_separation", True)
+        )
+        self.activity_memory_sec = float(
+            gate_config.get("activity_memory_sec", 1.25)
+        )
+        self.activity_shape_motion_rms = float(
+            gate_config.get("activity_shape_motion_rms", 0.0060)
+        )
+        self.activity_common_gain_motion = float(
+            gate_config.get("activity_common_gain_motion", 0.0060)
+        )
+        if not 0.0 <= self.contact_off_threshold <= self.contact_threshold:
+            raise ValueError("runtime contact off threshold is invalid")
+        if not 0.0 <= self.position_confidence_min <= 1.0:
+            raise ValueError("runtime position confidence threshold is invalid")
+        if not 0.0 <= self.position_margin_min <= 1.0:
+            raise ValueError("runtime position margin threshold is invalid")
+        if not 0.0 <= self.visual_position_confidence_min <= 1.0:
+            raise ValueError("visual position confidence threshold is invalid")
+        if not 0.0 <= self.visual_position_margin_min <= 1.0:
+            raise ValueError("visual position margin threshold is invalid")
+        if not 0.0 < self.position_ema_alpha <= 1.0:
+            raise ValueError("runtime position EMA alpha is invalid")
+        if self.position_switch_frames < 1:
+            raise ValueError("runtime position switch frame count is invalid")
+        if (
+            self.release_ambiguous_frames < 1
+            or self.ambiguous_quiet_release_sec < 0.0
+            or self.release_near_baseline_frames < 1
+            or self.baseline_release_distance < 0.0
+        ):
+            raise ValueError("runtime release configuration is invalid")
+
+        recovery_config = dict(runtime_recovery_config or {})
+        for key in (
+            "contact_arm_physical_frames",
+            "max_position_confidence",
+            "quiet_hold_sec",
+            "stationary_rest_candidate_delay_sec",
+        ):
+            if key in gate_config:
+                recovery_config[key] = gate_config[key]
+        self._runtime_baseline_recovery = RuntimeBaselineRecoveryGuard(
+            recovery_config
+        )
+
         self.baseline_wavelength_nm: np.ndarray | None = None
         self.baseline_intensity: np.ndarray | None = None
         self.frame_features: deque[np.ndarray] = deque()
         self.frame_times_sec: deque[float] = deque()
+        self._contact_latched = False
+        self._ambiguous_quiet_frames = 0
+        self._ambiguous_quiet_started_at_sec: float | None = None
+        self._quiet_no_contact_hint = False
+        self._near_baseline_quiet_frames = 0
+        self._last_activity_timestamp_sec: float | None = None
+        self._position_probability_ema: dict[str, float] = {}
+        self._stable_position_id: str | None = None
+        self._stable_position_timestamp_sec: float | None = None
+        self._pending_position_id: str | None = None
+        self._pending_position_frames = 0
+        self._provisional_visual_position_id: str | None = None
+        self._pending_runtime_baseline_update: dict[str, Any] | None = None
 
     @classmethod
     def from_paths(
@@ -143,6 +260,8 @@ class AllSourceOpticalForceAdapter:
         peak_config_path: Path,
         *,
         window_seconds: float = 2.0,
+        runtime_recovery_config: dict[str, Any] | None = None,
+        runtime_gate_config: dict[str, Any] | None = None,
     ) -> "AllSourceOpticalForceAdapter":
         bundle = joblib.load(Path(model_path))
         if not isinstance(bundle, dict):
@@ -151,6 +270,8 @@ class AllSourceOpticalForceAdapter:
             bundle,
             load_peak_windows(Path(peak_config_path)),
             window_seconds=window_seconds,
+            runtime_recovery_config=runtime_recovery_config,
+            runtime_gate_config=runtime_gate_config,
         )
 
     def _validate_contract(self) -> None:
@@ -180,12 +301,54 @@ class AllSourceOpticalForceAdapter:
     def clear(self) -> None:
         self.baseline_wavelength_nm = None
         self.baseline_intensity = None
+        self._pending_runtime_baseline_update = None
+        self._runtime_baseline_recovery.reset()
+        self._reset_decision_state()
+        self._clear_temporal_history()
+
+    def _clear_temporal_history(self) -> None:
         self.frame_features.clear()
         self.frame_times_sec.clear()
 
     def clear_history(self) -> None:
-        self.frame_features.clear()
-        self.frame_times_sec.clear()
+        self._clear_temporal_history()
+        self._pending_runtime_baseline_update = None
+        self._runtime_baseline_recovery.reset()
+        if self.baseline_intensity is not None:
+            self._runtime_baseline_recovery.prime_physical_spectrum(
+                self.baseline_intensity
+            )
+        self._reset_decision_state()
+
+    def consume_pending_runtime_baseline_update(self) -> dict[str, Any] | None:
+        """Return a one-shot baseline candidate for transactional bridge commit."""
+
+        pending = self._pending_runtime_baseline_update
+        self._pending_runtime_baseline_update = None
+        if pending is None:
+            return None
+        copied = dict(pending)
+        copied["wavelength_nm"] = np.asarray(
+            pending["wavelength_nm"], dtype=float
+        ).copy()
+        copied["intensity"] = np.asarray(
+            pending["intensity"], dtype=float
+        ).copy()
+        return copied
+
+    def _reset_decision_state(self) -> None:
+        self._contact_latched = False
+        self._ambiguous_quiet_frames = 0
+        self._ambiguous_quiet_started_at_sec = None
+        self._quiet_no_contact_hint = False
+        self._near_baseline_quiet_frames = 0
+        self._last_activity_timestamp_sec = None
+        self._position_probability_ema.clear()
+        self._stable_position_id = None
+        self._stable_position_timestamp_sec = None
+        self._pending_position_id = None
+        self._pending_position_frames = 0
+        self._provisional_visual_position_id = None
 
     def set_baseline(
         self,
@@ -201,6 +364,28 @@ class AllSourceOpticalForceAdapter:
         self.baseline_wavelength_nm = wavelength
         self.baseline_intensity = baseline
         self.clear_history()
+
+    def _smoothed_position_probabilities(
+        self,
+        probabilities: dict[str, float],
+    ) -> dict[str, float]:
+        if not probabilities:
+            return {}
+        alpha = self.position_ema_alpha
+        if not self._position_probability_ema:
+            smoothed = dict(probabilities)
+        else:
+            smoothed = {
+                label: alpha * float(probability)
+                + (1.0 - alpha)
+                * float(self._position_probability_ema.get(label, 0.0))
+                for label, probability in probabilities.items()
+            }
+        total = max(sum(smoothed.values()), 1.0e-12)
+        self._position_probability_ema = {
+            label: float(value / total) for label, value in smoothed.items()
+        }
+        return dict(self._position_probability_ema)
 
     def _spectrum_on_baseline_grid(
         self,
@@ -358,7 +543,7 @@ class AllSourceOpticalForceAdapter:
             current = self._spectrum_on_baseline_grid(
                 wavelength_nm, intensity
             )
-            frame_matrix, frame_names, _, _ = (
+            frame_matrix, frame_names, frame_components, component_names = (
                 extract_baseline_relative_frame_features(
                     self.baseline_wavelength_nm,
                     current,
@@ -406,30 +591,344 @@ class AllSourceOpticalForceAdapter:
             contact_probability = float(
                 contact_probabilities.get("contact", 0.0)
             )
-            contact_active = contact_probability >= self.contact_threshold
-            contact_label = "contact" if contact_active else "no_contact"
+            raw_contact_active = contact_probability >= self.contact_threshold
+            raw_contact_label = (
+                "contact" if raw_contact_active else "no_contact"
+            )
 
-            position_probabilities = _class_probabilities(
+            raw_position_probabilities = _class_probabilities(
                 self.position_model, row[:, self.position_indices]
             )
-            if position_probabilities:
-                position_id = max(
-                    position_probabilities,
-                    key=position_probabilities.get,
-                )
-                position_confidence = float(
-                    position_probabilities[position_id]
-                )
+            if raw_position_probabilities:
+                (
+                    raw_position_id,
+                    raw_position_confidence,
+                    raw_position_margin,
+                ) = _top_probability(raw_position_probabilities)
             else:
-                position_id = str(
+                raw_position_id = str(
                     self.position_model.predict(
                         row[:, self.position_indices]
                     )[0]
                 )
-                position_confidence = 1.0
+                raw_position_confidence = 1.0
+                raw_position_margin = 1.0
+
+            spatially_credible = bool(
+                raw_position_id in POSITION_COORDINATES
+                and raw_position_confidence >= self.position_confidence_min
+                and raw_position_margin >= self.position_margin_min
+            )
+            # The position model is trained only on contact samples, so its
+            # confidence cannot provide an independent no-contact hint. A
+            # timed optical-rest decision from the gate may, however, seed the
+            # existing quiet-baseline recovery state machine on later frames.
+            external_no_contact_hint = (
+                True if self._quiet_no_contact_hint else None
+            )
+            recovery, recovered_baseline = (
+                self._runtime_baseline_recovery.observe(
+                    current,
+                    physical_frame=True,
+                    external_no_contact_hint=external_no_contact_hint,
+                    release_event_probability=None,
+                    position_confidence=raw_position_confidence,
+                    contact_probability=contact_probability,
+                    contact_label=raw_contact_label,
+                    baseline_spectrum=self.baseline_intensity,
+                    timestamp_sec=timestamp,
+                )
+            )
+            shape_motion_rms = float(
+                recovery.get("shape_motion_rms") or 0.0
+            )
+            common_gain_motion = float(
+                recovery.get("common_gain_motion") or 0.0
+            )
+            fresh_activity = bool(
+                shape_motion_rms >= self.activity_shape_motion_rms
+                or common_gain_motion >= self.activity_common_gain_motion
+            )
+            if fresh_activity:
+                self._last_activity_timestamp_sec = timestamp
+            activity_recent = bool(
+                self._last_activity_timestamp_sec is not None
+                and timestamp - self._last_activity_timestamp_sec
+                <= self.activity_memory_sec
+            )
+
+            if recovered_baseline is not None:
+                self.baseline_intensity = np.asarray(
+                    recovered_baseline, dtype=float
+                )
+                self._pending_runtime_baseline_update = {
+                    "wavelength_nm": self.baseline_wavelength_nm.copy(),
+                    "intensity": self.baseline_intensity.copy(),
+                    "sample_count": recovery.get(
+                        "stable_release_physical_frames"
+                    ),
+                    "span_sec": recovery.get("quiet_elapsed_sec"),
+                    "shape_motion_rms": recovery.get("shape_motion_rms"),
+                    "common_gain_motion": recovery.get("common_gain_motion"),
+                    "policy": recovery.get("policy"),
+                }
+                self._clear_temporal_history()
+                self._reset_decision_state()
+
+            quiet_ambiguous = bool(
+                not fresh_activity
+                and not spatially_credible
+                and shape_motion_rms
+                <= self._runtime_baseline_recovery.max_shape_motion_rms
+                and common_gain_motion
+                <= self._runtime_baseline_recovery.max_common_gain_motion
+            )
+            if self._contact_latched and quiet_ambiguous:
+                self._ambiguous_quiet_frames += 1
+                if self._ambiguous_quiet_started_at_sec is None:
+                    self._ambiguous_quiet_started_at_sec = timestamp
+            else:
+                self._ambiguous_quiet_frames = 0
+                self._ambiguous_quiet_started_at_sec = None
+
+            ambiguous_quiet_elapsed_sec = (
+                max(0.0, timestamp - self._ambiguous_quiet_started_at_sec)
+                if self._ambiguous_quiet_started_at_sec is not None
+                else 0.0
+            )
+            ambiguous_quiet_release = bool(
+                self._contact_latched
+                and quiet_ambiguous
+                and not activity_recent
+                and ambiguous_quiet_elapsed_sec
+                >= self.ambiguous_quiet_release_sec
+            )
+
+            baseline_distance = recovery.get("baseline_distance")
+            baseline_distance_growth = recovery.get("baseline_distance_growth")
+            slow_baseline_departure = bool(
+                recovery.get("slow_baseline_departure")
+            )
+            baseline_separated = bool(
+                baseline_distance is not None
+                and float(baseline_distance)
+                >= self._runtime_baseline_recovery.minimum_contact_baseline_distance
+            )
+            near_runtime_baseline = bool(
+                baseline_distance is not None
+                and float(baseline_distance) <= self.baseline_release_distance
+            )
+            if self._contact_latched and near_runtime_baseline and not fresh_activity:
+                self._near_baseline_quiet_frames += 1
+            else:
+                self._near_baseline_quiet_frames = 0
+
+            contact_on_evidence = bool(
+                raw_contact_active
+                and (
+                    baseline_separated
+                    or not self.require_baseline_separation
+                )
+                and (
+                    fresh_activity
+                    or activity_recent
+                    or (
+                        slow_baseline_departure
+                        and spatially_credible
+                    )
+                )
+            )
+            if not self.runtime_gate_enabled:
+                self._contact_latched = raw_contact_active
+            elif recovered_baseline is not None:
+                self._contact_latched = False
+            elif contact_on_evidence and not (
+                recovery.get("suppress_contact")
+                and not (
+                    fresh_activity
+                    or activity_recent
+                    or slow_baseline_departure
+                )
+            ):
+                self._contact_latched = True
+                if fresh_activity:
+                    self._quiet_no_contact_hint = False
+            elif (
+                contact_probability < self.contact_off_threshold
+                or bool(recovery.get("suppress_contact"))
+                or self._near_baseline_quiet_frames
+                >= self.release_near_baseline_frames
+                or ambiguous_quiet_release
+            ):
+                self._contact_latched = False
+                if ambiguous_quiet_release:
+                    self._quiet_no_contact_hint = True
+            contact_active = bool(self._contact_latched)
+            contact_label = "contact" if contact_active else "no_contact"
+
+            position_probabilities: dict[str, float] = {}
+            position_id: str | None = None
+            position_confidence = 0.0
+            position_margin = 0.0
+            position_held = False
+            if contact_active and raw_position_probabilities:
+                position_probabilities = self._smoothed_position_probabilities(
+                    raw_position_probabilities
+                )
+                (
+                    candidate_position_id,
+                    candidate_position_confidence,
+                    candidate_position_margin,
+                ) = _top_probability(position_probabilities)
+                candidate_credible = bool(
+                    candidate_position_id in POSITION_COORDINATES
+                    and candidate_position_confidence
+                    >= self.position_confidence_min
+                    and candidate_position_margin >= self.position_margin_min
+                )
+                if candidate_credible:
+                    switching_position = bool(
+                        self._stable_position_id in POSITION_COORDINATES
+                        and candidate_position_id != self._stable_position_id
+                    )
+                    if switching_position:
+                        if self._pending_position_id == candidate_position_id:
+                            self._pending_position_frames += 1
+                        else:
+                            self._pending_position_id = candidate_position_id
+                            self._pending_position_frames = 1
+                        if (
+                            self._pending_position_frames
+                            >= self.position_switch_frames
+                        ):
+                            self._stable_position_id = candidate_position_id
+                            self._stable_position_timestamp_sec = timestamp
+                            self._pending_position_id = None
+                            self._pending_position_frames = 0
+                        else:
+                            position_held = True
+                    else:
+                        self._stable_position_id = candidate_position_id
+                        self._stable_position_timestamp_sec = timestamp
+                        self._pending_position_id = None
+                        self._pending_position_frames = 0
+                    if (
+                        self._stable_position_id in POSITION_COORDINATES
+                        and (
+                            not position_held
+                            or (
+                                self._stable_position_timestamp_sec is not None
+                                and timestamp
+                                - self._stable_position_timestamp_sec
+                                <= self.position_hold_sec
+                            )
+                        )
+                    ):
+                        position_id = self._stable_position_id
+                        position_confidence = float(
+                            position_probabilities.get(position_id, 0.0)
+                        )
+                        competing = max(
+                            (
+                                value
+                                for label, value in position_probabilities.items()
+                                if label != position_id
+                            ),
+                            default=0.0,
+                        )
+                        position_margin = float(position_confidence - competing)
+                elif (
+                    self._stable_position_id in POSITION_COORDINATES
+                    and self._stable_position_timestamp_sec is not None
+                    and timestamp - self._stable_position_timestamp_sec
+                    <= self.position_hold_sec
+                ):
+                    position_id = self._stable_position_id
+                    position_confidence = float(
+                        position_probabilities.get(position_id, 0.0)
+                    )
+                    competing = max(
+                        (
+                            value
+                            for label, value in position_probabilities.items()
+                            if label != position_id
+                        ),
+                        default=0.0,
+                    )
+                    position_margin = float(position_confidence - competing)
+                    position_held = True
+                    self._pending_position_id = None
+                    self._pending_position_frames = 0
             if not contact_active:
-                position_id = None
-                position_confidence = 0.0
+                self._position_probability_ema.clear()
+                self._stable_position_id = None
+                self._stable_position_timestamp_sec = None
+                self._pending_position_id = None
+                self._pending_position_frames = 0
+                self._provisional_visual_position_id = None
+
+            visual_position_id = position_id
+            visual_position_confidence = position_confidence
+            visual_position_margin = position_margin
+            visual_position_provisional = False
+            if (
+                contact_active
+                and visual_position_id is None
+                and self.visual_position_fallback_enabled
+                and position_probabilities
+            ):
+                (
+                    visual_candidate_id,
+                    visual_candidate_confidence,
+                    visual_candidate_margin,
+                ) = _top_probability(position_probabilities)
+                if (
+                    visual_candidate_id in POSITION_COORDINATES
+                    and visual_candidate_confidence
+                    >= self.visual_position_confidence_min
+                    and visual_candidate_margin
+                    >= self.visual_position_margin_min
+                ):
+                    # Establish a provisional location only around a real
+                    # spectral change. During a quiet ambiguous hold, keep the
+                    # last location instead of following classifier jitter.
+                    if self._provisional_visual_position_id is None:
+                        if fresh_activity or activity_recent:
+                            self._provisional_visual_position_id = (
+                                visual_candidate_id
+                            )
+                    elif (
+                        fresh_activity
+                        and visual_candidate_id
+                        != self._provisional_visual_position_id
+                    ):
+                        self._provisional_visual_position_id = (
+                            visual_candidate_id
+                        )
+                # Once established from a real spectral change, keep the
+                # provisional location through quiet low-confidence frames.
+                # Current-frame jitter may lower the stored location's score,
+                # but it must not erase or move the visible contact patch.
+                if (
+                    self._provisional_visual_position_id
+                    in POSITION_COORDINATES
+                ):
+                    visual_position_id = self._provisional_visual_position_id
+                    visual_position_confidence = float(
+                        position_probabilities.get(visual_position_id, 0.0)
+                    )
+                    competing = max(
+                        (
+                            value
+                            for label, value in position_probabilities.items()
+                            if label != visual_position_id
+                        ),
+                        default=0.0,
+                    )
+                    visual_position_margin = float(
+                        visual_position_confidence - competing
+                    )
+                    visual_position_provisional = True
 
             raw_force_n = float(
                 self.force_model.predict(row[:, self.force_indices])[0]
@@ -441,7 +940,16 @@ class AllSourceOpticalForceAdapter:
                 raw_force_n if contact_active else self.no_contact_force_n
             )
             twin = self._surface_proxy(
-                position_id, estimated_force_n, contact_active
+                visual_position_id, estimated_force_n, contact_active
+            )
+            twin["position_source"] = (
+                "formal_position"
+                if position_id is not None
+                else (
+                    "provisional_low_confidence_position"
+                    if visual_position_provisional
+                    else "none"
+                )
             )
             contact_margin = abs(
                 contact_probability - self.contact_threshold
@@ -449,7 +957,11 @@ class AllSourceOpticalForceAdapter:
             uncertainty_reasons: list[str] = []
             if contact_margin < 0.10:
                 uncertainty_reasons.append("contact_probability_near_gate")
-            if contact_active and position_confidence < 0.60:
+            if raw_contact_active and not contact_active:
+                uncertainty_reasons.append("contact_suppressed_by_runtime_gate")
+            if contact_active and position_id is None:
+                uncertainty_reasons.append("position_not_stable_enough")
+            elif contact_active and position_confidence < 0.60:
                 uncertainty_reasons.append("position_confidence_low")
 
             latency_ms = (time.perf_counter() - started) * 1000.0
@@ -470,11 +982,29 @@ class AllSourceOpticalForceAdapter:
                     "contact_probability": contact_probability,
                     "probability_threshold": self.contact_threshold,
                     "probabilities": contact_probabilities,
+                    "raw_model_label": raw_contact_label,
                 },
                 "position": {
                     "label": position_id,
                     "confidence": position_confidence,
+                    "margin": position_margin,
                     "probabilities": position_probabilities,
+                    "raw_label": raw_position_id,
+                    "raw_confidence": raw_position_confidence,
+                    "raw_margin": raw_position_margin,
+                    "raw_probabilities": raw_position_probabilities,
+                    "accepted": bool(position_id),
+                    "held_from_previous_frame": position_held,
+                    "confidence_threshold": self.position_confidence_min,
+                    "margin_threshold": self.position_margin_min,
+                    "visual_label": visual_position_id,
+                    "visual_confidence": visual_position_confidence,
+                    "visual_margin": visual_position_margin,
+                    "visual_fallback_used": visual_position_provisional,
+                    "visual_confidence_threshold": (
+                        self.visual_position_confidence_min
+                    ),
+                    "visual_margin_threshold": self.visual_position_margin_min,
                 },
                 "estimated_force_fz_n": float(estimated_force_n),
                 "force_fz": {
@@ -493,6 +1023,60 @@ class AllSourceOpticalForceAdapter:
                 "uncertainty": {
                     "review_needed": bool(uncertainty_reasons),
                     "reasons": uncertainty_reasons,
+                },
+                "runtime_contact_gate": {
+                    "enabled": self.runtime_gate_enabled,
+                    "raw_contact_active": raw_contact_active,
+                    "contact_latched": contact_active,
+                    "spatially_credible": spatially_credible,
+                    "fresh_spectral_activity": fresh_activity,
+                    "spectral_activity_recent": activity_recent,
+                    "quiet_spatially_ambiguous": quiet_ambiguous,
+                    "ambiguous_quiet_frames": self._ambiguous_quiet_frames,
+                    "ambiguous_quiet_elapsed_sec": (
+                        ambiguous_quiet_elapsed_sec
+                    ),
+                    "ambiguous_quiet_release_sec": (
+                        self.ambiguous_quiet_release_sec
+                    ),
+                    "ambiguous_quiet_is_release_evidence": (
+                        ambiguous_quiet_release
+                    ),
+                    "quiet_no_contact_hint": self._quiet_no_contact_hint,
+                    "baseline_separated": baseline_separated,
+                    "baseline_distance": baseline_distance,
+                    "baseline_distance_growth": baseline_distance_growth,
+                    "slow_baseline_departure": slow_baseline_departure,
+                    "minimum_contact_baseline_distance": (
+                        self._runtime_baseline_recovery.minimum_contact_baseline_distance
+                    ),
+                    "near_runtime_baseline": near_runtime_baseline,
+                    "near_baseline_quiet_frames": (
+                        self._near_baseline_quiet_frames
+                    ),
+                    "baseline_release_distance": self.baseline_release_distance,
+                    "position_switch_frames": self.position_switch_frames,
+                    "pending_position_id": self._pending_position_id,
+                    "pending_position_frames": self._pending_position_frames,
+                    "shape_motion_rms": shape_motion_rms,
+                    "common_gain_motion": common_gain_motion,
+                    "runtime_reference_reanchored": bool(
+                        recovered_baseline is not None
+                    ),
+                    "baseline_recovery": recovery,
+                    "policy": (
+                        "model_probability_plus_baseline_separation_plus_"
+                        "spectral_change_or_high_confidence_spatial_fingerprint_"
+                        "plus_timed_quiet_ambiguous_release"
+                    ),
+                },
+                "frame_response_components": {
+                    name: float(value)
+                    for name, value in zip(
+                        component_names,
+                        frame_components[0],
+                        strict=True,
+                    )
                 },
                 "history_frames": history_frames,
                 "history_duration_sec": history_duration_sec,

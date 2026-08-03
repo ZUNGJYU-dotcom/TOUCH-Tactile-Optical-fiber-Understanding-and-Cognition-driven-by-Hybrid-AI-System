@@ -75,6 +75,12 @@ class DiagnosticsResizableLayoutContractTests(unittest.TestCase):
         self.assertNotIn('id="px6dCaptureAction"', self.html)
         self.assertIn('<span>Force Sensor</span>', self.html)
         self.assertIn('id="px6dCaptureForceValue"', self.html)
+        self.assertIn('id="px6dCaptureTareButton"', self.html)
+        self.assertIn('px6dCaptureTareButton?.addEventListener("click", performPx6dSoftwareZero)', self.js)
+        self.assertIn("function px6dCaptureIsBusy()", self.js)
+        self.assertIn("function updatePx6dZeroButtonState()", self.js)
+        self.assertIn('Stop recording before zeroing the force sensor.', self.js)
+        self.assertIn('Wait for force zero to finish.', self.js)
         self.assertIn('action_label: "continuous_px6d_fz_reference"', self.js)
         self.assertIn('setText(\n    "px6dCaptureForceValue"', self.js)
 
@@ -98,6 +104,11 @@ class DiagnosticsResizableLayoutContractTests(unittest.TestCase):
         offsets = [self.html.index(f'data-capture-position="{channel}"') for channel in expected_order]
         self.assertEqual(offsets, sorted(offsets))
         self.assertIn("function updateCaptureReadiness()", self.js)
+        self.assertIn('px6dCaptureStartButton.dataset.readiness = ready ? "ready" : "setup-required"', self.js)
+        self.assertNotIn(
+            "px6dCaptureStartButton.disabled = running || state.px6dCaptureRequestInFlight || !ready",
+            self.js,
+        )
         self.assertIn("function nextCaptureTrialId()", self.js)
         self.assertIn("Check ${readiness.missing.join", self.js)
         self.assertIn('.diagnostic-capture-position-grid button:disabled', self.css)

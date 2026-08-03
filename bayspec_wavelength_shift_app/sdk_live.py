@@ -21,6 +21,7 @@ from spectrum_processing import SpectrumDisplayProcessor
 
 
 DEFAULT_INTEGRATION_US = 5000
+DEFAULT_INTERVAL_MS = 20
 
 
 class BaySpecSdkLiveReader:
@@ -46,7 +47,7 @@ class BaySpecSdkLiveReader:
         self.thread: threading.Thread | None = None
         self.stderr_thread: threading.Thread | None = None
         self.channel_id = "P22"
-        self.interval_ms = 100
+        self.interval_ms = DEFAULT_INTERVAL_MS
         self.integration = DEFAULT_INTEGRATION_US
         self.started_at: float | None = None
         self.last_frame_time: float | None = None
@@ -172,7 +173,7 @@ class BaySpecSdkLiveReader:
     def start(
         self,
         channel_id: str = "P22",
-        interval_ms: int = 100,
+        interval_ms: int = DEFAULT_INTERVAL_MS,
         integration: int = DEFAULT_INTEGRATION_US,
     ) -> dict[str, Any]:
         with self.lock:
@@ -833,7 +834,12 @@ class BaySpecSdkLiveReader:
                     if acquisition_failed:
                         delay_sec = max(0.02, self.retry_backoff_sec)
                     else:
-                        delay_sec = max(0.02, interval_ms / 1000.0 - elapsed_sec)
+                        # The helper is process-isolated for vendor SDK
+                        # stability. If starting, acquiring, and reaping that
+                        # process already consumed the requested interval,
+                        # begin the next isolated acquisition immediately
+                        # instead of adding another fixed 20 ms idle period.
+                        delay_sec = max(0.0, interval_ms / 1000.0 - elapsed_sec)
                     self.last_cycle_delay_ms = delay_sec * 1000.0
                 if self._stop_event.wait(delay_sec):
                     return

@@ -1,6 +1,6 @@
 # TOUCH
 
-Research software for optical-fiber tactile sensing. The current Beta Operator
+Research software for optical-fiber tactile sensing. The current Stable Operator
 runtime uses a trained ordinary-FBG 512-point BaySpec/Sense all-data model to
 estimate:
 
@@ -29,12 +29,40 @@ optical-response proxy rather than calibrated force or pressure. See
 [docs/mfbg_intensity_profile.md](docs/mfbg_intensity_profile.md) for the
 demodulation, frame, recording, and activation contracts.
 
-## Latest Update - v0.18.5 Beta
+## Latest Update - v0.18.9 Stable
 
-The Beta runtime deploys the latest all-data optical bundle: temporal optical
+The validated v0.18.9 Beta model and low-latency runtime are now the Stable
+release. Stable and Beta use the same latest all-data optical model; the Stable
+package adds a formal release manifest and remains latest-model-only, without
+legacy inference fallback.
+
+Data recording now exposes a local `Zero` command beside the Force Sensor
+value. It uses the same PX6D software zero as the Force and Diagnostics views,
+then immediately refreshes recording readiness. Start remains clickable while
+setup is incomplete and reports the exact missing requirement; it still
+refuses to record until the selected position, requested streams, live optical
+frame, force zero, and destination folder are valid.
+
+The Stable runtime deploys the latest all-data optical bundle: temporal optical
 context supports contact and nine-position inference, while the current-frame
 optical head estimates `Fz`. Grouped evaluation is by `session_id`; force-sensor
 measurements are never model inputs.
+
+The live runtime now requires fresh full-spectrum activity or credible spatial
+evidence before accepting a learned contact prediction. Stable residual drift
+is therefore returned to `no_contact`, with optical force reset to zero and no
+position emitted. Position probabilities are smoothed and checked for
+confidence and margin before the digital twin moves to another array location.
+After a stationary release, the runtime reference can be re-anchored without
+changing the trained model.
+
+Low position confidence is no longer an immediate release signal. Brief
+uncertainty preserves a real contact, while a stationary residual with no new
+spectral activity and no credible spatial fingerprint returns to `no_contact`
+after about one second. Slow baseline drift alone cannot re-arm contact. A
+provisional visual location is established only around real spectral activity
+and held through quiet classifier jitter; the formal position result remains
+unaccepted and no unknown contact is forced to P22.
 
 The built-in demonstration now replays synchronized real 512-point BaySpec
 spectra. Its nine spectral peaks are discovered automatically from the robust
@@ -47,7 +75,7 @@ P11, P12, P13, P21, P22, P23, P31, P32, P33
 
 This wavelength-order assignment is separate from the 3x3 screen layout and is
 not a final measured physical channel map. The complete automated suite passes
-with 467 tests and 172 subtests.
+with 490 tests and 172 subtests.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete release summary.
 
@@ -98,7 +126,7 @@ release contact, wait for a stable spectrum, and set a multi-frame baseline.
 Evaluation uses leave-one-repeat-index-out groups over independent static CSV
 files. Random snapshot splitting is not used.
 
-| Output | Selected Beta model | Grouped result |
+| Output | Selected Stable model | Grouped result |
 | --- | --- | ---: |
 | contact | temporal Extra Trees | 94.13% macro-F1 |
 | position | temporal Extra Trees | 98.85% macro-F1 |
@@ -148,7 +176,7 @@ diagnostic-only and cannot drive the UI or deformation.
 
 ## Scientific Boundary
 
-- The Beta optical model outputs an experimental `Fz` estimate learned from
+- The Stable optical model outputs an experimental `Fz` estimate learned from
   synchronized PX6D supervision; it is not a certified force measurement.
 - The optical model does not output calibrated pressure or displacement.
 - `PX6D Reference Fz` is an independently measured ground-truth label in N;
@@ -181,9 +209,11 @@ run_desktop.bat
 ```
 
 For the packaged Windows build, download
-`TOUCH-v0.18.5-beta-windows-x64.zip` from the release, extract the complete
+`TOUCH-v0.18.9-stable-windows-x64.zip` from the release, extract the complete
 `TOUCH` folder, and run `TOUCH\TOUCH.exe`. Do not move only the executable out
 of the extracted folder because its bundled runtime and assets are required.
+The promoted model is bundled in that release package; the 118 MB joblib is
+not stored as an ordinary Git blob because it exceeds GitHub's per-file limit.
 
 Generate the full guided validation plan without touching hardware:
 

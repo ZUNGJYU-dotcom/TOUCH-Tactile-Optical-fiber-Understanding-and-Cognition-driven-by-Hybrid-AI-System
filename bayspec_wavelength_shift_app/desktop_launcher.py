@@ -34,6 +34,7 @@ EXPECTED_BACKEND_CONTRACT_VERSION = "trained_static_spectrum_api_v2"
 EXPECTED_OPERATOR_RECOGNITION = "dynamic_temporal_v3_validation"
 EXPECTED_BETA_OPERATOR_RECOGNITION = "ordinary_fbg_all_data_beta_v1"
 BETA_RUNTIME_FLAG_FILENAME = "beta_all_data_runtime.flag"
+LATEST_RUNTIME_FLAG_FILENAME = "latest_all_data_runtime.flag"
 
 GWL_STYLE = -16
 WS_SYSMENU = 0x00080000
@@ -449,15 +450,25 @@ def is_frozen() -> bool:
 
 
 def beta_all_data_runtime_requested() -> bool:
-    explicit = str(os.environ.get("TOUCH_BETA_ALL_DATA_MODEL", "")).strip().lower()
-    if explicit in {"1", "true", "yes", "on"}:
+    explicit_values = (
+        os.environ.get("TOUCH_LATEST_ALL_DATA_MODEL", ""),
+        os.environ.get("TOUCH_BETA_ALL_DATA_MODEL", ""),
+    )
+    if any(
+        str(value).strip().lower() in {"1", "true", "yes", "on"}
+        for value in explicit_values
+    ):
         return True
     if not is_frozen():
         return False
+    marker_roots = (
+        Path(sys.executable).resolve().parent,
+        Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)).resolve(),
+    )
     marker_locations = [
-        Path(sys.executable).resolve().parent / BETA_RUNTIME_FLAG_FILENAME,
-        Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)).resolve()
-        / BETA_RUNTIME_FLAG_FILENAME,
+        root / filename
+        for root in marker_roots
+        for filename in (LATEST_RUNTIME_FLAG_FILENAME, BETA_RUNTIME_FLAG_FILENAME)
     ]
     return any(marker.is_file() for marker in marker_locations)
 
@@ -567,6 +578,9 @@ def show_error(title: str, message: str) -> None:
 def configure_runtime_paths() -> Path:
     app_root = bundle_root()
     if beta_all_data_runtime_requested():
+        os.environ["TOUCH_LATEST_ALL_DATA_MODEL"] = "true"
+        # Legacy environment name remains available to the current backend
+        # contract and previously built Beta packages.
         os.environ["TOUCH_BETA_ALL_DATA_MODEL"] = "true"
     os.environ["BAYSPEC_WAVELENGTH_APP_ROOT"] = str(app_root)
     if is_frozen():

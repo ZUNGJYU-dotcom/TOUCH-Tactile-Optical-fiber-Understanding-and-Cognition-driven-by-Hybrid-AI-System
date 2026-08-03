@@ -6107,17 +6107,52 @@ button.active-watch,
   background: #f8fbfd;
 }
 
-.diagnostics-mode .diagnostic-capture-force-readout span {
+.diagnostics-mode .diagnostic-capture-force-readout > span {
   color: #60798b;
   font-size: 9.5px;
   font-weight: 750;
 }
 
-.diagnostics-mode .diagnostic-capture-force-readout strong {
+.diagnostics-mode .diagnostic-capture-force-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  min-width: 0;
+}
+
+.diagnostics-mode .diagnostic-capture-force-controls strong {
   color: #087fa7;
   font-size: 15px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.diagnostics-mode .diagnostic-capture-force-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 56px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid #9bcadd;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #087fa7;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.diagnostics-mode .diagnostic-capture-force-controls button:hover:not(:disabled) {
+  background: #eaf7fb;
+  border-color: #39a9c9;
+}
+
+.diagnostics-mode .diagnostic-capture-force-controls button svg {
+  width: 14px;
+  height: 14px;
 }
 
 .diagnostics-mode .diagnostic-capture-form select,
@@ -6911,6 +6946,10 @@ button.active-watch,
   color: #73889a;
   text-align: center;
   pointer-events: none;
+}
+
+.diagnostics-mode .diagnostic-runtime-buttons[hidden] {
+  display: none !important;
 }
 
 .operator-mode .optical-preview-empty-state strong {

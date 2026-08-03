@@ -10,10 +10,10 @@ runtime_baseline_recovery:
   prime_temporal_history_with_baseline: true
   baseline_preroll_frames: 20
 
-  # Real direct-SDK no-contact observations on 2026-07-15 were roughly
-  # 0.0013-0.0018 shape RMS per physical frame. These limits leave margin
-  # without treating normal no-contact jitter as contact activity.
-  max_shape_motion_rms: 0.0035
+  # Direct-SDK no-contact observations remain near 0.003 shape RMS, while the
+  # measured release tail remains below about 0.0041. These limits leave margin
+  # without treating ordinary stationary jitter as fresh contact activity.
+  max_shape_motion_rms: 0.0045
   max_common_gain_motion: 0.0030
   activity_shape_motion_rms: 0.0060
   activity_common_gain_motion: 0.0060
@@ -28,17 +28,26 @@ runtime_baseline_recovery:
   contact_probability_arm: 0.65
   contact_arm_physical_frames: 2
   minimum_contact_baseline_distance: 0.0060
+  # A slow press may stay below the per-frame activity threshold. Allow it to
+  # re-arm only when distance from the runtime baseline is still increasing;
+  # position confidence alone is never contact evidence.
+  minimum_contact_distance_growth: 0.0005
   release_probability_threshold: 0.40
   no_contact_probability_support: 0.55
   minimum_recovery_fraction: 0.20
   minimum_contact_probability_drop: 0.15
+  minimum_spatial_contact_confidence: 0.60
+  minimum_slow_release_recovery_fraction: 0.45
   release_activity_memory_sec: 2.0
 
   # Recovery fallback for an already released sensor when the release edge was
-  # missed (for example after app restart). It still requires raw no-contact,
-  # low spatial confidence, and full-spectrum stationarity together.
+  # missed. Stationarity and a no-contact label are not enough because a held
+  # press can satisfy both after a classifier dip. The spectrum must already
+  # be close to the accepted runtime baseline; larger residuals need a measured
+  # release/recovery trajectory or an explicit operator baseline.
   stationary_rest_fallback_enabled: true
   stationary_rest_candidate_delay_sec: 1.0
+  stationary_rest_max_baseline_distance: 0.0050
   fallback_requires_new_contact_after_reanchor: true
 
   # Cancel a pending release if a new active change moves away from the quiet
@@ -61,3 +70,42 @@ response_level_postprocess:
     maximum_normal_minus_light_margin: 0.10
     require_hard_not_dominant: true
   semantics: grouped_oof_validated_borderline_light_preference_not_force_N
+
+# Primary Beta all-source runtime guard. The grouped model remains the learned
+# decision source, while the live guard prevents stable common-mode drift and
+# spatially ambiguous residuals from driving the digital twin.
+all_source_runtime_gate:
+  enabled: true
+  contact_probability_off: 0.55
+
+  # Grouped OOF position predictions retain 96.2% coverage and about 99.8%
+  # accuracy at confidence >= 0.45. A margin check rejects tied corner guesses.
+  position_confidence_min: 0.45
+  position_margin_min: 0.08
+  # A verified contact may still animate at the best low-confidence location.
+  # Formal position output remains unaccepted until the stricter thresholds pass.
+  visual_position_fallback_enabled: true
+  visual_position_confidence_min: 0.18
+  visual_position_margin_min: 0.015
+  position_probability_ema_alpha: 0.55
+  position_hold_sec: 0.75
+  position_switch_frames: 2
+
+  # A learned contact must also differ physically from the accepted no-contact
+  # baseline. Returning near the baseline for two quiet frames clears a stale
+  # model latch even when the position classifier remains overconfident.
+  require_baseline_separation: true
+  baseline_release_distance: 0.0050
+  release_near_baseline_frames: 2
+
+  # A new press can wake the display on one physical spectrum change. Stable,
+  # spatially ambiguous output is preserved across brief classifier dips, but
+  # is released after one second without fresh spectral activity. This clears
+  # residual drift without using position confidence as an immediate release.
+  contact_arm_physical_frames: 1
+  ambiguous_quiet_release_sec: 1.0
+  # Retained for backward-compatible diagnostics; release timing is in seconds.
+  release_ambiguous_frames: 2
+  activity_memory_sec: 1.25
+  activity_shape_motion_rms: 0.0060
+  activity_common_gain_motion: 0.0060

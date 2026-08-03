@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TOUCH</title>
     <link rel="icon" href="data:," />
-    <link rel="stylesheet" href="/static/styles.css?v=ios-clarity-pass20-v41" />
+    <link rel="stylesheet" href="/static/styles.css?v=recognition-runtime-v1" />
     <script type="importmap">
       {
         "imports": {
@@ -690,10 +690,10 @@
               <summary>Recognition runtime</summary>
               <div class="diagnostic-runtime-content">
                 <div class="diagnostic-runtime-status">
-                  <span>Active mode</span>
-                  <strong id="recognitionModeStatus">Temporal validation</strong>
+                  <span>Active model</span>
+                  <strong id="recognitionModeStatus">Loading...</strong>
                 </div>
-                <div class="settings-button-grid diagnostic-runtime-buttons">
+                <div id="legacyRecognitionRuntimeControls" class="settings-button-grid diagnostic-runtime-buttons" hidden>
                   <button id="settingsTemporalValidationButton" type="button">Temporal validation</button>
                   <button id="settingsStaticFallbackButton" type="button">Static fallback</button>
                 </div>
@@ -746,7 +746,12 @@
                 </fieldset>
                 <div class="diagnostic-capture-force-readout" role="status" aria-live="polite">
                   <span>Force Sensor</span>
-                  <strong id="px6dCaptureForceValue">--</strong>
+                  <div class="diagnostic-capture-force-controls">
+                    <strong id="px6dCaptureForceValue">--</strong>
+                    <button id="px6dCaptureTareButton" type="button" title="Zero force sensor">
+                      <i data-lucide="crosshair" aria-hidden="true"></i><span>Zero</span>
+                    </button>
+                  </div>
                 </div>
                 <label>Trial ID
                   <span class="diagnostic-capture-trial-row">
@@ -966,6 +971,6 @@
 
     </div>
     <script src="/static/vendor/lucide/lucide.min.js"></script>
-    <script type="module" src="/static/app.js?v=acceptance-remediation-v16-1"></script>
+    <script type="module" src="/static/app.js?v=recognition-runtime-v1"></script>
   </body>
 </html>

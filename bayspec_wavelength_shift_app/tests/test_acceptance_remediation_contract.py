@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import re
 import unittest
 
 
@@ -33,6 +35,7 @@ class AcceptanceRemediationContractTests(unittest.TestCase):
         cls.version = (
             PROJECT_ROOT / "VERSION.json"
         ).read_text(encoding="utf-8")
+        cls.version_payload = json.loads(cls.version)
 
     def test_invalid_measurement_is_atomically_neutralized(self) -> None:
         self.assertIn("function atomicNeutralFrame(frame)", self.frontend)
@@ -155,11 +158,16 @@ class AcceptanceRemediationContractTests(unittest.TestCase):
         self.assertIn('"temporal_candidate_role": version_payload.get(', self.backend)
         self.assertIn('"capture_schema": version_payload.get("capture_schema")', self.backend)
         self.assertIn('app_dir.parent / "VERSION.json"', self.launcher_spec)
-        self.assertIn('"version": "0.18.5-beta"', self.version)
-        self.assertIn(
-            '"build_id": "beta-all-data-v18-5-recorded-auto-peak-map"',
-            self.version,
+        release_channel = str(self.version_payload.get("release_channel") or "")
+        version = str(self.version_payload.get("version") or "")
+        expected_version = (
+            re.compile(r"^\d+\.\d+\.\d+$")
+            if release_channel == "stable"
+            else re.compile(r"^\d+\.\d+\.\d+-beta$")
         )
+        self.assertRegex(version, expected_version)
+        self.assertTrue(str(self.version_payload.get("build_id") or "").strip())
+        self.assertIn(release_channel, {"stable", "beta_research"})
 
     def test_frozen_build_excludes_unused_research_frameworks(self) -> None:
         self.assertIn("deployment_excludes = [", self.launcher_spec)

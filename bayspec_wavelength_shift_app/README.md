@@ -16,19 +16,35 @@ Real mFBG 3x3 mode is disabled until measured wavelengths, a real baseline,
 and new mFBG calibration data are available. The profile does not output
 calibrated force or pressure.
 
-## v0.18.5 Beta
+## v0.18.9 Stable
 
-The Beta package contains only the latest optical all-data model. Temporal
+The validated v0.18.9 Beta model and low-latency runtime have been promoted to
+Stable. The Stable package keeps the same latest all-data optical model and
+does not include the legacy static or dynamic inference fallbacks.
+
+Data recording includes a compact Force Sensor `Zero` command. It shares the
+PX6D software-zero state with the Force and Diagnostics views and refreshes the
+recording readiness cells when zeroing completes. Start is now actionable
+before setup is complete so it can identify the missing requirement, while the
+backend still blocks incomplete capture setup.
+
+The Stable package contains only the latest optical all-data model. Temporal
 optical context drives contact and nine-position recognition; a current-frame
 optical model estimates `Fz` in the current 0-5 N research range. PX6D force is
 training and validation supervision, never a runtime model feature.
+
+Brief spatial uncertainty now holds the current contact instead of releasing
+it. A quiet residual is cleared only after about one second without fresh
+spectral activity or a credible spatial fingerprint, and slow baseline drift
+alone cannot reactivate the surface. Provisional visual positions are locked
+through quiet classifier jitter until a new spectral event is observed.
 
 The demonstration replays synchronized real 512-point BaySpec frames. Its nine
 peaks are automatically discovered from the no-contact median spectrum and
 tracked locally. P11-P33 labels follow provisional ascending wavelength order,
 not the 3x3 spatial rendering order and not a final physical channel map.
 
-The automated suite passes with 467 tests and 172 subtests.
+The automated suite passes with 490 tests and 172 subtests.
 
 ## Full-Spectrum Normalization
 
@@ -103,7 +119,7 @@ run_desktop.bat
 
 ## Windows Portable Package
 
-Download `TOUCH-v0.18.5-beta-windows-x64.zip`, extract the complete `TOUCH` folder,
+Download `TOUCH-v0.18.9-stable-windows-x64.zip`, extract the complete `TOUCH` folder,
 and run:
 
 ```powershell
@@ -112,6 +128,8 @@ and run:
 
 Keep the executable inside the extracted folder because the adjacent runtime,
 models, geometry, and frontend assets are required.
+The promoted 118 MB model is included inside the portable release. It is not
+stored as an ordinary Git blob because it exceeds GitHub's per-file limit.
 
 Source server:
 
@@ -216,7 +234,7 @@ no custom path is chosen, a frozen build stores captures under
 entered absolute path.
 
 The PX6D stream is an independent ground-truth measurement used to synchronize
-and label BaySpec optical fingerprints. The Beta Operator force value is a
+and label BaySpec optical fingerprints. The Stable Operator force value is a
 separate optical estimate and does not use PX6D as a runtime feature.
 
 ## Limitations

@@ -359,6 +359,9 @@ class RuntimeBaselineRecoveryGuard:
         self.minimum_contact_baseline_distance = float(
             values.get("minimum_contact_baseline_distance", 0.0060)
         )
+        self.minimum_contact_distance_growth = float(
+            values.get("minimum_contact_distance_growth", 0.0005)
+        )
         self.no_contact_probability_support = float(
             values.get("no_contact_probability_support", 0.55)
         )
@@ -368,6 +371,12 @@ class RuntimeBaselineRecoveryGuard:
         self.minimum_contact_probability_drop = float(
             values.get("minimum_contact_probability_drop", 0.15)
         )
+        self.minimum_spatial_contact_confidence = float(
+            values.get("minimum_spatial_contact_confidence", 0.60)
+        )
+        self.minimum_slow_release_recovery_fraction = float(
+            values.get("minimum_slow_release_recovery_fraction", 0.45)
+        )
         self.release_activity_memory_sec = float(
             values.get("release_activity_memory_sec", 2.0)
         )
@@ -376,6 +385,9 @@ class RuntimeBaselineRecoveryGuard:
         )
         self.stationary_rest_candidate_delay_sec = float(
             values.get("stationary_rest_candidate_delay_sec", 1.0)
+        )
+        self.stationary_rest_max_baseline_distance = float(
+            values.get("stationary_rest_max_baseline_distance", 0.0050)
         )
         self.fallback_requires_new_contact_after_reanchor = bool(
             values.get("fallback_requires_new_contact_after_reanchor", True)
@@ -415,6 +427,8 @@ class RuntimeBaselineRecoveryGuard:
             or self.contact_arm_physical_frames < 1
             or self.quiet_hold_sec < 0.0
             or self.release_candidate_timeout_sec <= 0.0
+            or self.minimum_contact_distance_growth < 0.0
+            or self.stationary_rest_max_baseline_distance < 0.0
         ):
             raise ValueError("runtime baseline recovery configuration is invalid")
 
@@ -452,6 +466,16 @@ class RuntimeBaselineRecoveryGuard:
         self._locked_recontact_evidence: tuple[str, ...] = ()
         if not keep_reanchor_count:
             self._reanchor_count = 0
+
+    def prime_physical_spectrum(self, spectrum: np.ndarray) -> None:
+        """Use a confirmed rest spectrum as the next motion reference."""
+
+        reference = np.asarray(spectrum, dtype=float)
+        if reference.ndim != 1 or reference.size < 5:
+            raise ValueError("runtime motion reference must be one-dimensional")
+        if not np.all(np.isfinite(reference)):
+            raise ValueError("runtime motion reference contains non-finite values")
+        self._last_physical_spectrum = reference.copy()
 
     @staticmethod
     def _motion(
@@ -499,7 +523,12 @@ class RuntimeBaselineRecoveryGuard:
         shape_motion_rms: float | None = None,
         common_gain_motion: float | None = None,
         baseline_distance: float | None = None,
+        baseline_distance_growth: float | None = None,
+        slow_baseline_departure: bool = False,
         recovery_fraction: float | None = None,
+        spatial_contact_support: bool = False,
+        slow_release_transition: bool = False,
+        stationary_rest_baseline_safe: bool = False,
         suppress_contact: bool = False,
         reanchored: bool = False,
     ) -> dict[str, Any]:
@@ -522,8 +551,18 @@ class RuntimeBaselineRecoveryGuard:
             "shape_motion_rms": shape_motion_rms,
             "common_gain_motion": common_gain_motion,
             "baseline_distance": baseline_distance,
+            "baseline_distance_growth": baseline_distance_growth,
+            "slow_baseline_departure": bool(slow_baseline_departure),
             "contact_peak_baseline_distance": self._contact_peak_baseline_distance,
             "recovery_fraction": recovery_fraction,
+            "spatial_contact_support": bool(spatial_contact_support),
+            "slow_release_transition": bool(slow_release_transition),
+            "stationary_rest_baseline_safe": bool(
+                stationary_rest_baseline_safe
+            ),
+            "stationary_rest_max_baseline_distance": (
+                self.stationary_rest_max_baseline_distance
+            ),
             "contact_armed": self._contact_armed,
             "active_contact_physical_frames": self._active_contact_frames,
             "release_transition_detected": bool(
@@ -596,6 +635,12 @@ class RuntimeBaselineRecoveryGuard:
             else None,
             current,
         )
+        baseline_distance_growth = (
+            float(baseline_distance - self._previous_baseline_distance)
+            if baseline_distance is not None
+            and self._previous_baseline_distance is not None
+            else None
+        )
         stable = bool(
             shape_motion <= self.max_shape_motion_rms
             and common_gain_motion <= self.max_common_gain_motion
@@ -618,9 +663,19 @@ class RuntimeBaselineRecoveryGuard:
             and probability is not None
             and probability >= self.contact_probability_arm
         )
+        spatial_contact_support = bool(
+            position_confidence is not None
+            and float(position_confidence)
+            >= self.minimum_spatial_contact_confidence
+        )
         separated_from_baseline = bool(
             baseline_distance is None
             or baseline_distance >= self.minimum_contact_baseline_distance
+        )
+        slow_baseline_departure = bool(
+            separated_from_baseline
+            and baseline_distance_growth is not None
+            and baseline_distance_growth >= self.minimum_contact_distance_growth
         )
         activity_recent_for_recontact = bool(
             self._last_activity_timestamp_sec is not None
@@ -632,6 +687,8 @@ class RuntimeBaselineRecoveryGuard:
             locked_recontact_evidence.append("recent_full_spectrum_activity")
         if separated_from_baseline:
             locked_recontact_evidence.append("separated_from_runtime_baseline")
+        if slow_baseline_departure:
+            locked_recontact_evidence.append("slow_baseline_departure")
         if model_contact:
             locked_recontact_evidence.append("contact_model_support")
         self._locked_recontact_evidence = tuple(locked_recontact_evidence)
@@ -641,12 +698,16 @@ class RuntimeBaselineRecoveryGuard:
         # offsets can remain stationary and look contact-like to the temporal
         # model. Require a fresh physical change relative to the new baseline,
         # baseline separation, and model support before leaving no-contact.
+        # Position confidence is intentionally excluded here: the position
+        # classifier is trained on contact samples and always has to choose a
+        # location, even for a no-contact spectrum.
         credible_contact = bool(
             model_contact
             and separated_from_baseline
             and (
                 not self._fallback_locked_until_contact
                 or activity_recent_for_recontact
+                or slow_baseline_departure
             )
         )
         if not self._release_candidate:
@@ -712,6 +773,13 @@ class RuntimeBaselineRecoveryGuard:
         contact_probability_dropped = bool(
             probability_drop >= self.minimum_contact_probability_drop
         )
+        slow_release_transition = bool(
+            self._contact_armed
+            and recovery_fraction is not None
+            and recovery_fraction
+            >= self.minimum_slow_release_recovery_fraction
+            and model_no_contact
+        )
         activity_recent = bool(
             self._last_activity_timestamp_sec is not None
             and now_sec - self._last_activity_timestamp_sec
@@ -731,6 +799,8 @@ class RuntimeBaselineRecoveryGuard:
             evidence.append("spatial_confidence_low")
         if recovered_toward_baseline:
             evidence.append("spectrum_recovered_toward_baseline")
+        if slow_release_transition:
+            evidence.append("slow_release_after_contact_peak")
 
         stationary_rest_fallback = False
         if self._legacy_frame_mode:
@@ -740,26 +810,41 @@ class RuntimeBaselineRecoveryGuard:
                 and spatially_ambiguous
             )
         else:
+            # Correlated classifier outputs are not physical release evidence.
+            # A temporary contact-model dip can happen during a stationary
+            # press, so probability drop + no-contact label must never arm a
+            # baseline update unless the spectrum also recovers or the learned
+            # release detector observes a release event.
             primary_release_evidence = bool(
-                release_like or recovered_toward_baseline or model_no_contact
+                release_like or recovered_toward_baseline
             )
             release_transition = bool(
                 self._contact_armed
-                and activity_recent
-                and primary_release_evidence
-                and len(evidence) >= 2
+                and (
+                    (
+                        activity_recent
+                        and primary_release_evidence
+                        and len(evidence) >= 2
+                    )
+                    or slow_release_transition
+                )
             )
             quiet_since_activity = bool(
                 self._last_activity_timestamp_sec is None
                 or now_sec - self._last_activity_timestamp_sec
                 >= self.stationary_rest_candidate_delay_sec
             )
+            stationary_rest_baseline_safe = bool(
+                baseline_distance is not None
+                and baseline_distance
+                <= self.stationary_rest_max_baseline_distance
+            )
             stationary_rest_fallback = bool(
                 self.stationary_rest_fallback_enabled
                 and not self._fallback_locked_until_contact
                 and stable
-                and external_no_contact_hint is True
-                and spatially_ambiguous
+                and stationary_rest_baseline_safe
+                and (external_no_contact_hint is True or model_no_contact)
                 and quiet_since_activity
             )
             if stationary_rest_fallback and not release_transition:
@@ -768,6 +853,7 @@ class RuntimeBaselineRecoveryGuard:
                     [
                         "stationary_rest_fallback",
                         "full_spectrum_stationary",
+                        "near_existing_runtime_baseline",
                     ]
                 )
         if release_transition and not self._release_candidate:
@@ -873,7 +959,16 @@ class RuntimeBaselineRecoveryGuard:
             shape_motion_rms=shape_motion,
             common_gain_motion=common_gain_motion,
             baseline_distance=baseline_distance,
+            baseline_distance_growth=baseline_distance_growth,
+            slow_baseline_departure=slow_baseline_departure,
             recovery_fraction=recovery_fraction,
+            spatial_contact_support=spatial_contact_support,
+            slow_release_transition=slow_release_transition,
+            stationary_rest_baseline_safe=(
+                baseline_distance is not None
+                and baseline_distance
+                <= self.stationary_rest_max_baseline_distance
+            ),
             suppress_contact=suppress_contact,
             reanchored=reanchored,
         )
