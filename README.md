@@ -6,7 +6,8 @@ estimate:
 
 - contact or no contact;
 - approximate manual contact position `P11`-`P33`;
-- continuous optical `Fz` in the current 0-5 N research range.
+- continuous optical `Fz` with no fixed software display/output ceiling; the
+  current model has only been validated on 0-5 N supervision.
 
 The model consumes optical features only at runtime. PX6D `Fz` was used as
 synchronized training and validation supervision and is not required for
@@ -29,12 +30,22 @@ optical-response proxy rather than calibrated force or pressure. See
 [docs/mfbg_intensity_profile.md](docs/mfbg_intensity_profile.md) for the
 demodulation, frame, recording, and activation contracts.
 
-## Latest Update - v0.18.9 Stable
+## Latest Update - v0.19.7 Stable
 
-The validated v0.18.9 Beta model and low-latency runtime are now the Stable
-release. Stable and Beta use the same latest all-data optical model; the Stable
-package adds a formal release manifest and remains latest-model-only, without
-legacy inference fallback.
+The v0.19.7 Stable and Beta packages remove a corrupted source-status separator
+that could render as a Chinese character in labels such as `SDK idle`. Source
+states now use ASCII text such as `SDK | idle`; models, acquisition, and
+recognition behavior are unchanged. Stable uses the
+same three-date optical model, continuous optical `Fz` estimator, interface,
+and device contracts as Beta. Its portable package contains only the current
+deployed model and has no legacy inference fallback.
+
+Every new live or watched acquisition now clears cross-session optical
+references and establishes its baseline from five stable spectra in the
+current session. Two consecutive physical spectra are required before a
+low-force visual response or a new position can drive the digital twin. In the
+nine-position replay audit this removed idle visual activation and eliminated
+non-P23 inputs being displayed as P23 without changing model weights.
 
 Data recording now exposes a local `Zero` command beside the Force Sensor
 value. It uses the same PX6D software zero as the Force and Diagnostics views,
@@ -79,6 +90,27 @@ with 490 tests and 172 subtests.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete release summary.
 
+## Retained Beta - v0.19.7-beta
+
+The validated Beta package is retained locally as a rollback build. Stable and
+Beta use the same model and runtime logic; their release manifests and desktop
+shortcuts remain separate.
+
+## Diagnostics Measurement Analysis
+
+Diagnostics includes a separate `Measure` workspace for completed synchronized
+recordings. It compares the optical-only `Fz` estimate against timestamp-aligned
+PX6D `Fz`, plots both traces, and reports paired samples, detected loading
+cycles, MAE, RMSE, estimated lag, acquisition rate, model inference latency,
+and release recovery. Recordings without a force stream remain usable for
+optical inspection, but force-consistency metrics are explicitly skipped.
+
+The workspace is manual and offline: `Refresh` scans the selected recording
+folder and `Analyze` processes the chosen saved session. It does not poll in the
+background, start hardware, modify the Operator view, or use PX6D as a runtime
+model input. The same analysis is available from
+`scripts/analyze_measurement_session.py` for reproducible report generation.
+
 ## Spectrum Normalization
 
 TOUCH can display and record a wavelength-aligned no-contact ratio:
@@ -107,7 +139,7 @@ current 512-point full spectrum
   + stable current-session post-release recovery baseline
   -> optical contact detector
   -> optical 9-position classifier
-  -> optical Fz estimator (0-5 N research range)
+  -> optical Fz estimator (unbounded display; 0-5 N validated range)
   -> continuous digital-twin response
 ```
 
@@ -178,6 +210,9 @@ diagnostic-only and cannot drive the UI or deformation.
 
 - The Stable optical model outputs an experimental `Fz` estimate learned from
   synchronized PX6D supervision; it is not a certified force measurement.
+- Runtime output and the force legend have no fixed 5 N ceiling. Values above
+  5 N are explicitly outside the current validated range and require higher
+  force PX6D data before they can be treated as quantitatively reliable.
 - The optical model does not output calibrated pressure or displacement.
 - `PX6D Reference Fz` is an independently measured ground-truth label in N;
   it is not an optical-model force prediction.
@@ -209,7 +244,7 @@ run_desktop.bat
 ```
 
 For the packaged Windows build, download
-`TOUCH-v0.18.9-stable-windows-x64.zip` from the release, extract the complete
+`TOUCH-v0.19.7-stable-windows-x64.zip` from the release, extract the complete
 `TOUCH` folder, and run `TOUCH\TOUCH.exe`. Do not move only the executable out
 of the extracted folder because its bundled runtime and assets are required.
 The promoted model is bundled in that release package; the 118 MB joblib is

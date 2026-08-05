@@ -18,6 +18,10 @@ from hybrid_spectrum.all_source_training import (
     feature_indices,
     source_group_weights,
 )
+from hybrid_spectrum.all_source_fusion import (  # noqa: E402
+    _latest_baseline,
+    derive_unreferenced_optical_labels,
+)
 
 
 def _small_arrays() -> FusionArrays:
@@ -95,4 +99,128 @@ def test_optical_contact_gate_outputs_zero_without_contact_evidence() -> None:
         probability_threshold=0.75,
         no_contact_output_n=0.0,
     )
-    assert np.allclose(gated, [0.0, 1.2, 5.0])
+    assert np.allclose(gated, [0.0, 1.2, 6.0])
+
+
+def test_unreferenced_labels_keep_transitions_out_of_training() -> None:
+    baseline = np.zeros((5, 4), dtype=float)
+    transition = np.full((2, 4), 2.0, dtype=float)
+    stable_contact = np.full((5, 4), 8.0, dtype=float)
+    components = np.vstack((baseline, transition, stable_contact, baseline))
+    contact, position, _, _ = derive_unreferenced_optical_labels(
+        components,
+        np.arange(5),
+        "P22",
+        {
+            "minimum_component_scale": 1.0,
+            "inactive_max_robust_z": 1.0,
+            "active_min_robust_z": 4.0,
+            "active_session_percentile": 60.0,
+            "minimum_active_run_frames": 3,
+            "minimum_active_frames": 3,
+            "minimum_session_contrast_z": 1.0,
+            "smoothing_frames": 1,
+        },
+    )
+    assert np.all(contact[:5] == 0)
+    assert np.all(contact[5:7] == -1)
+    assert np.all(contact[7:12] == 1)
+    assert np.all(position[7:12] == "P22")
+
+
+def test_runtime_baseline_is_independent_of_force_reference() -> None:
+    recorded = np.asarray([100.0, 200.0, 150.0])
+    intensity = np.vstack(
+        (
+            recorded * 1.01,
+            recorded * 1.02,
+            recorded * 1.01,
+            recorded * 0.80,
+            recorded * 0.70,
+        )
+    )
+    config = {
+        "strategy": "fixed_recorded_runtime_preferred",
+        "minimum_frames": 3,
+        "search_fraction": 0.60,
+        "maximum_recorded_vs_initial_nrms": 0.05,
+        "minimum_recorded_vs_initial_correlation": 0.98,
+    }
+
+    low_force, low_indices, low_mode = _latest_baseline(
+        np.asarray([0.0, 0.0, 0.1, 2.0, 3.0]),
+        intensity,
+        config,
+        0.03,
+        recorded_baseline=recorded,
+    )
+    preloaded, preloaded_indices, preloaded_mode = _latest_baseline(
+        np.asarray([2.4, 2.5, 2.6, 3.0, 4.0]),
+        intensity,
+        config,
+        0.03,
+        recorded_baseline=recorded,
+    )
+
+    assert np.array_equal(low_force, recorded)
+    assert np.array_equal(preloaded, recorded)
+    assert np.array_equal(low_indices, preloaded_indices)
+    assert low_mode == "fixed_recorded_runtime_baseline"
+    assert preloaded_mode == low_mode
+
+
+def test_runtime_baseline_falls_back_when_recorded_shape_is_incompatible() -> None:
+    initial = np.asarray([100.0, 200.0, 150.0])
+    intensity = np.vstack((initial, initial * 1.01, initial * 0.99))
+    incompatible = np.asarray([200.0, 100.0, 300.0])
+
+    baseline, indices, mode = _latest_baseline(
+        np.asarray([0.0, 0.0, 0.0]),
+        intensity,
+        {
+            "strategy": "fixed_recorded_runtime_preferred",
+            "minimum_frames": 3,
+            "search_fraction": 1.0,
+            "maximum_recorded_vs_initial_nrms": 0.05,
+            "minimum_recorded_vs_initial_correlation": 0.98,
+        },
+        0.03,
+        recorded_baseline=incompatible,
+    )
+
+    assert np.allclose(baseline, initial)
+    assert np.array_equal(indices, [0, 1, 2])
+    assert mode == "initial_optical_stable_fallback"
+
+
+def test_initial_fixed_frame_baseline_uses_only_precontact_frames() -> None:
+    initial = np.asarray([100.0, 200.0, 150.0])
+    intensity = np.vstack(
+        (
+            initial,
+            initial * 1.01,
+            initial * 0.99,
+            initial * 0.80,
+            initial * 0.70,
+        )
+    )
+
+    baseline_a, indices_a, mode_a = _latest_baseline(
+        np.asarray([0.0, 0.0, 0.0, 2.0, 3.0]),
+        intensity,
+        {"strategy": "initial_fixed_frames", "fixed_initial_frames": 3},
+        0.03,
+    )
+    baseline_b, indices_b, mode_b = _latest_baseline(
+        np.asarray([2.0, 3.0, 4.0, 0.0, 0.0]),
+        intensity,
+        {"strategy": "initial_fixed_frames", "fixed_initial_frames": 3},
+        0.03,
+    )
+
+    assert np.allclose(baseline_a, initial)
+    assert np.array_equal(baseline_a, baseline_b)
+    assert np.array_equal(indices_a, [0, 1, 2])
+    assert np.array_equal(indices_a, indices_b)
+    assert mode_a == "initial_fixed_frames"
+    assert mode_b == mode_a

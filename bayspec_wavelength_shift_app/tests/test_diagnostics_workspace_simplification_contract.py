@@ -13,8 +13,8 @@ class DiagnosticsWorkspaceSimplificationContractTests(unittest.TestCase):
         cls.css = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
         cls.js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
 
-    def test_seven_workspaces_use_a_scrollable_navigation_row(self) -> None:
-        self.assertEqual(self.html.count("data-diagnostic-tab="), 7)
+    def test_eight_workspaces_use_a_scrollable_navigation_row(self) -> None:
+        self.assertEqual(self.html.count("data-diagnostic-tab="), 8)
         self.assertRegex(
             self.css,
             re.compile(
@@ -84,11 +84,21 @@ class DiagnosticsWorkspaceSimplificationContractTests(unittest.TestCase):
         )
 
     def test_workspace_tabs_use_compact_labels_with_accessible_full_names(self) -> None:
-        for visible_label in ("Signal", "Record", "Surface", "Demo", "Input", "Force", "3D"):
+        for visible_label in (
+            "Signal",
+            "Record",
+            "Measure",
+            "Surface",
+            "Demo",
+            "Input",
+            "Force",
+            "3D",
+        ):
             self.assertIn(f"<span>{visible_label}</span>", self.html)
         for accessible_name in (
             "Signal diagnostics",
             "Data recording",
+            "Measurement analysis",
             "Surface diagnostics",
             "Demo controls",
             "Input diagnostics",
@@ -96,7 +106,16 @@ class DiagnosticsWorkspaceSimplificationContractTests(unittest.TestCase):
             "Geometry diagnostics",
         ):
             self.assertIn(f'aria-label="{accessible_name}"', self.html)
-        for icon_name in ("activity", "circle-dot", "grid-3x3", "play", "radio", "gauge", "boxes"):
+        for icon_name in (
+            "activity",
+            "circle-dot",
+            "chart-no-axes-combined",
+            "grid-3x3",
+            "play",
+            "radio",
+            "gauge",
+            "boxes",
+        ):
             self.assertIn(f'data-lucide="{icon_name}"', self.html)
 
     def test_recording_is_not_nested_inside_input(self) -> None:

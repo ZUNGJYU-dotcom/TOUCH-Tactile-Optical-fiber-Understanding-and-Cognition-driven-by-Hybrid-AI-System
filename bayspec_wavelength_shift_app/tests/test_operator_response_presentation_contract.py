@@ -8,6 +8,31 @@ APP_ROOT = Path(__file__).resolve().parents[1]
 
 
 class OperatorResponsePresentationContractTests(unittest.TestCase):
+    def test_operator_visuals_use_one_current_runtime_contract(self) -> None:
+        app_js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+        canonical = app_js.split(
+            "function normalizeCanonicalVisualizationFrame", 1
+        )[1].split("function normalizeGlobalSpectrumFrame", 1)[0]
+        active_prediction = app_js.split("function activeModelPrediction", 1)[1].split(
+            "function opticalForcePresentation", 1
+        )[0]
+
+        self.assertIn(
+            'OPERATOR_VISUALIZATION_CONTRACT_VERSION = "touch_operator_visualization_v1"',
+            app_js,
+        )
+        self.assertIn("appendCurrentRuntimeTrace(rawRecord, contract)", canonical)
+        self.assertIn("operator_visualization_frame: contract", canonical)
+        self.assertIn("contract?.force?.display_n", canonical)
+        self.assertIn("contract?.surface?.surface_grid", canonical)
+        self.assertIn("force_frame_id: sync.force_frame_id ?? frameId", canonical)
+        self.assertNotIn("trained_static_spectral_prediction", canonical)
+        self.assertNotIn("dynamic_temporal_shadow", canonical)
+        self.assertIn("operatorVisualizationContract(record, arrayFrame)", active_prediction)
+        self.assertIn("return contract?.prediction || null", active_prediction)
+        self.assertNotIn("all_source_beta_model", app_js)
+        self.assertNotIn("trainedStaticModelSurface", app_js)
+
     def test_operator_response_state_is_contact_not_force_band(self) -> None:
         app_js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
         presentation = app_js.split("function surfaceContactPresentation", 1)[1].split(
@@ -58,7 +83,7 @@ class OperatorResponsePresentationContractTests(unittest.TestCase):
         self.assertIn("responseBandValue.setAttribute(", app_js)
         self.assertIn('"aria-label"', app_js)
 
-    def test_beta_force_gauge_uses_optical_estimate_and_numeric_cursor(self) -> None:
+    def test_current_runtime_force_gauge_uses_canonical_optical_estimate(self) -> None:
         html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
         app_js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
         styles = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
@@ -70,19 +95,40 @@ class OperatorResponsePresentationContractTests(unittest.TestCase):
             'let note = "raw coupled response";', 1
         )[0]
 
-        self.assertIn("runtimeFrame?.all_source_beta_model", helper)
-        self.assertIn("state.betaForceDisplayEnabled === true", helper)
+        self.assertIn("operatorVisualizationContract(record, arrayFrame, runtimeFrame)", helper)
+        self.assertIn("contract.force || {}", helper)
         self.assertIn('"/api/health"', app_js)
         self.assertIn("loadRuntimeCapabilities()", app_js)
-        self.assertIn("prediction?.estimated_force_fz_n", helper)
-        self.assertIn("OPTICAL_FORCE_DISPLAY_MAX_N = 5", app_js)
+        self.assertIn("force.display_n", helper)
+        self.assertIn("OPTICAL_FORCE_CALIBRATED_MAX_N = 5", app_js)
+        self.assertIn("OPTICAL_FORCE_MIN_DISPLAY_MAX_N = 5", app_js)
+        self.assertIn("updateOpticalForceDisplayMaximum", gauge)
+        self.assertIn("above_calibrated_range", gauge)
+        self.assertNotIn("OPTICAL_FORCE_DISPLAY_MAX_N", app_js)
         self.assertIn('"Estimated Force"', gauge)
-        self.assertIn("marker.textContent = allSourceBeta", gauge)
         self.assertIn("estimatedForceN.toFixed(2)", gauge)
         self.assertIn('marker.setAttribute("role", "meter")', gauge)
         self.assertIn('marker.setAttribute("aria-valuenow"', gauge)
         self.assertIn("Estimated Force", html)
         self.assertIn(".operator-band-card.force-estimate-mode", styles)
+
+    def test_low_force_visual_drive_is_not_reblocked_by_operator_ui(self) -> None:
+        app_js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+        canonical = app_js.split("function normalizeCanonicalVisualizationFrame", 1)[1].split(
+            "function normalizeGlobalSpectrumFrame", 1
+        )[0]
+        presentation = app_js.split("function surfaceContactPresentation", 1)[1].split(
+            "function clampArrayCoord", 1
+        )[0]
+        force = app_js.split("function opticalForcePresentation", 1)[1].split(
+            "function activeModelDisplayName", 1
+        )[0]
+
+        self.assertIn("const responseAllowed = contract.response_allowed === true", canonical)
+        self.assertIn("contract?.surface?.surface_grid", canonical)
+        self.assertIn("(twin.visual_active ?? twin.active) === true", presentation)
+        self.assertIn("force.display_n", force)
+        self.assertIn("valueN,", force)
 
     def test_px6d_reference_is_hidden_from_operator_but_kept_in_diagnostics(self) -> None:
         html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")

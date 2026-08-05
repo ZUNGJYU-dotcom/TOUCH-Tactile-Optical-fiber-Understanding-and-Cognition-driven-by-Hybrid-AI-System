@@ -1,9 +1,8 @@
-"""BaySpec FBG Bragg-wavelength-shift demodulation bridge.
+"""BaySpec full-spectrum transport for the current TOUCH runtime.
 
-This edition is independent from both the BaySpec optical-intensity edition and
-the TiePie PD-voltage edition. The formal recognition input is the complete
-FBG01-FBG09 spectrum fingerprint: wavelength, intensity, area, and shape are
-retained jointly. P22 remains only a legacy full-spectrum transport record.
+The deployed runtime consumes the complete optical spectrum time series and
+produces contact position plus a continuous optical Fz estimate. P22 is only
+the transport channel identifier; it is not a separate recognition model.
 """
 
 from __future__ import annotations
@@ -40,16 +39,19 @@ from src.hybrid_spectrum.sense_fast_dat import read_sense_fast_dat
 ARRAY_MODE = "global_spectrum_unmapped"
 DEFAULT_CHANNEL_ORDER = ["P11", "P21", "P31", "P12", "P22", "P32", "P13", "P23", "P33"]
 EPSILON = 1e-12
+CURRENT_RECOGNITION_SCOPE = "optical_contact_position_and_continuous_fz"
+CURRENT_CARRIER_ROLE = "full_spectrum_transport_for_current_runtime"
+CURRENT_GLOBAL_BASELINE_SCOPE = "current_runtime_global_spectrum_baseline"
 DEFAULT_CHANNEL_CONFIG = {
     "app": {
-        "mode": "bayspec_global_9fbg_hybrid_spectral_fingerprint",
-        "edition": "wavelength_shift_demodulation",
-        "recognition_scope": "global_3x3_hybrid_spectral_fingerprint",
+        "mode": "standalone_touch_all_data_spectral_runtime",
+        "edition": "current_all_data_spectral_runtime",
+        "recognition_scope": CURRENT_RECOGNITION_SCOPE,
         "array_mode": ARRAY_MODE,
         "default_channel": None,
         "carrier_channel": "P22",
-        "carrier_channel_role": "legacy_full_spectrum_transport_only",
-        "primary_signal": "full_spectrum_9fbg_mixed_wavelength_intensity_shape",
+        "carrier_channel_role": CURRENT_CARRIER_ROLE,
+        "primary_signal": "512_point_bayspec_full_spectrum_time_series",
         "physical_output": "disabled",
         "calibrated_force_output": False,
         "calibrated_pressure_output": False,
@@ -397,6 +399,7 @@ def _safe_float_list(
 
 ACCEPTED_SPECTRUM_NORMALIZATION_BASELINES = frozenset(
     {
+        "stable_current_session_startup_baseline",
         "stable_post_release_recovery_baseline",
         "stable_post_release_recovery_baseline_with_warning",
     }
@@ -816,19 +819,19 @@ class BaySpecWavelengthShiftBridge:
         with self.lock:
             return {
                 "ok": True,
-                "app": "TOUCH System Trained Static Spectrum Twin",
-                "demodulation_mode": "trained_static_full_spectrum_classifier",
-                "recognition_scope": "manual_fingertip_static_spectrum_position_and_level",
-                "primary_signal": "512_point_bayspec_full_spectrum_plus_stable_recovery_baseline",
+                "app": "TOUCH",
+                "demodulation_mode": "current_optical_force_runtime",
+                "recognition_scope": "optical_contact_position_and_continuous_fz",
+                "primary_signal": "512_point_bayspec_full_spectrum_time_series",
                 "diagnostic_spectrum_scope": "global_9fbg_wavelength_intensity_area_shape",
                 "derived_signals": [
                     "delta_wavelength_pm = (tracked_wavelength_nm - baseline_wavelength_nm) * 1000",
                     "absolute_shift_pm = abs(delta_wavelength_pm)",
                     "shift_response_ratio = absolute_shift_pm / visualization_full_scale_pm",
                 ],
-                "press_response_rule": (
-                    "trained approximate manual light/normal/hard response level; "
-                    "not calibrated force_N"
+                "response_output": (
+                    "continuous optical Fz estimate from the deployed all-data runtime; "
+                    "PX6D is training supervision and diagnostics only"
                 ),
                 "wavelength_shift_config": dict(WAVELENGTH_SHIFT_CONFIG),
                 "channel_config_path": _format_path(CHANNEL_CONFIG_PATH),
@@ -842,7 +845,7 @@ class BaySpecWavelengthShiftBridge:
                 "p22_spectral_feature_mode": dict(BAYSPEC_CHANNEL_CONFIG.get("p22_spectral_feature_mode", {})),
                 "default_channel": None,
                 "carrier_channel_id": DEFAULT_CHANNEL,
-                "carrier_channel_role": "legacy_full_spectrum_transport_only",
+                "carrier_channel_role": "full_spectrum_transport_for_current_runtime",
                 "global_candidate_ids": [
                     f"FBG{index:02d}" for index in range(1, 10)
                 ],
@@ -2760,7 +2763,7 @@ class BaySpecWavelengthShiftBridge:
                     "reason": "insufficient_unique_global_candidate_frames",
                     "required_frames": required_frames,
                     "available_frames": len(recent),
-                    "scope": "global_3x3_hybrid_spectral_fingerprint",
+                    "scope": CURRENT_GLOBAL_BASELINE_SCOPE,
                 }
 
             frame_ids = [record.get("frame_id") for record in recent]
@@ -2773,7 +2776,7 @@ class BaySpecWavelengthShiftBridge:
                     "ok": False,
                     "reason": "global_baseline_frames_not_unique_monotonic",
                     "required_frames": required_frames,
-                    "scope": "global_3x3_hybrid_spectral_fingerprint",
+                    "scope": CURRENT_GLOBAL_BASELINE_SCOPE,
                 }
 
             integration_values = {
@@ -2792,7 +2795,7 @@ class BaySpecWavelengthShiftBridge:
                     "reason": "global_baseline_acquisition_context_changed",
                     "integration_values_ms": sorted(integration_values),
                     "device_ids": sorted(device_ids),
-                    "scope": "global_3x3_hybrid_spectral_fingerprint",
+                    "scope": CURRENT_GLOBAL_BASELINE_SCOPE,
                 }
 
             ingest_times = [
@@ -2825,7 +2828,7 @@ class BaySpecWavelengthShiftBridge:
                     "reason": "global_baseline_source_frames_stale",
                     "latest_ingest_age_sec": latest_ingest_age_sec,
                     "maximum_latest_ingest_age_sec": maximum_latest_ingest_age_sec,
-                    "scope": "global_3x3_hybrid_spectral_fingerprint",
+                    "scope": CURRENT_GLOBAL_BASELINE_SCOPE,
                 }
             if ingest_span_sec < minimum_ingest_span_sec:
                 return {
@@ -2833,14 +2836,14 @@ class BaySpecWavelengthShiftBridge:
                     "reason": "global_baseline_capture_span_too_short",
                     "ingest_span_sec": ingest_span_sec,
                     "minimum_ingest_span_sec": minimum_ingest_span_sec,
-                    "scope": "global_3x3_hybrid_spectral_fingerprint",
+                    "scope": CURRENT_GLOBAL_BASELINE_SCOPE,
                 }
             if bool(baseline_config.get("require_single_source", True)) and len(source_values) != 1:
                 return {
                     "ok": False,
                     "reason": "global_baseline_acquisition_source_changed",
                     "sources": sorted(source_values),
-                    "scope": "global_3x3_hybrid_spectral_fingerprint",
+                    "scope": CURRENT_GLOBAL_BASELINE_SCOPE,
                 }
 
             values_by_id: dict[str, list[float]] = {
@@ -2861,7 +2864,7 @@ class BaySpecWavelengthShiftBridge:
                         "reason": "incomplete_or_invalid_global_candidate_frame",
                         "frame_id": record.get("frame_id"),
                         "observed_candidate_ids": observed_ids,
-                        "scope": "global_3x3_hybrid_spectral_fingerprint",
+                        "scope": CURRENT_GLOBAL_BASELINE_SCOPE,
                     }
                 for peak in peaks:
                     tracked = _safe_float(peak.get("tracked_wavelength_nm"))
@@ -2871,7 +2874,7 @@ class BaySpecWavelengthShiftBridge:
                             "reason": "nonfinite_global_candidate_wavelength",
                             "frame_id": record.get("frame_id"),
                             "candidate_id": peak.get("candidate_id"),
-                            "scope": "global_3x3_hybrid_spectral_fingerprint",
+                            "scope": CURRENT_GLOBAL_BASELINE_SCOPE,
                         }
                     values_by_id[str(peak["candidate_id"])].append(tracked)
 
@@ -2930,7 +2933,7 @@ class BaySpecWavelengthShiftBridge:
                 return {
                     "ok": False,
                     "reason": "global_candidate_baseline_unstable",
-                    "scope": "global_3x3_hybrid_spectral_fingerprint",
+                    "scope": CURRENT_GLOBAL_BASELINE_SCOPE,
                     "required_frames": required_frames,
                     "limits": {
                         "noise_pm": noise_limit_pm,
@@ -2963,7 +2966,7 @@ class BaySpecWavelengthShiftBridge:
             return {
                 "ok": True,
                 "baseline_set": True,
-                "scope": "global_3x3_hybrid_spectral_fingerprint",
+                "scope": CURRENT_GLOBAL_BASELINE_SCOPE,
                 "baseline_role": "display_and_diagnostics_only",
                 "candidate_ids": expected_ids,
                 "candidate_wavelength_nm": dict(sorted(candidate_baseline.items())),
@@ -3087,22 +3090,21 @@ class BaySpecWavelengthShiftBridge:
         model_baseline_status = self.baseline_spectrum_status_by_channel.get(
             model_baseline_channel
         )
-        static_model_spectrum_baseline_ready = model_baseline_status in {
-            "stable_post_release_recovery_baseline",
-            "stable_post_release_recovery_baseline_with_warning",
-        }
+        current_runtime_spectrum_baseline_ready = (
+            model_baseline_status in ACCEPTED_SPECTRUM_NORMALIZATION_BASELINES
+        )
         return {
             "ok": bool(baseline_set),
             "baseline_set": bool(baseline_set),
             "reason": missing_reason,
             "baseline_source": "provided_or_latest_bragg_wavelength",
             "baseline_semantics": "post_press_release_recovery_no_contact",
-            "static_model_spectrum_baseline_ready": static_model_spectrum_baseline_ready,
-            "static_model_spectrum_baseline_channel": model_baseline_channel,
-            "static_model_spectrum_baseline_status": model_baseline_status,
-            "static_model_spectrum_baseline_rejected": bool(
+            "current_runtime_spectrum_baseline_ready": current_runtime_spectrum_baseline_ready,
+            "current_runtime_spectrum_baseline_channel": model_baseline_channel,
+            "current_runtime_spectrum_baseline_status": model_baseline_status,
+            "current_runtime_spectrum_baseline_rejected": bool(
                 model_baseline_channel in spectrum_attempted_channels
-                and not static_model_spectrum_baseline_ready
+                and not current_runtime_spectrum_baseline_ready
             ),
             "baseline_intensity_by_channel": dict(sorted(self.baseline_intensity_by_channel.items())),
             "baseline_wavelength_by_channel": dict(sorted(self.baseline_wavelength_by_channel.items())),
@@ -3241,6 +3243,67 @@ class BaySpecWavelengthShiftBridge:
             ),
         }
 
+    def set_runtime_startup_spectrum_baseline(
+        self,
+        channel_id: str,
+        wavelength_nm: list[float] | np.ndarray,
+        intensity: list[float] | np.ndarray,
+        *,
+        sample_count: int,
+        span_sec: float,
+        shape_motion_rms: float | None = None,
+        common_gain_motion: float | None = None,
+        policy: str = "current_session_stable_five_frame_median",
+    ) -> dict[str, Any]:
+        """Install the first trusted no-contact reference of a live session."""
+
+        result = self.set_runtime_recovery_spectrum_baseline(
+            channel_id,
+            wavelength_nm,
+            intensity,
+            sample_count=sample_count,
+            span_sec=span_sec,
+            shape_motion_rms=shape_motion_rms,
+            common_gain_motion=common_gain_motion,
+            policy=policy,
+        )
+        if not result.get("ok"):
+            return {
+                **result,
+                "status": "runtime_startup_baseline_invalid",
+            }
+
+        channel = str(channel_id)
+        wavelength = np.asarray(wavelength_nm, dtype=float)
+        spectrum = np.asarray(intensity, dtype=float)
+        with self.lock:
+            self.baseline_spectrum_status_by_channel[channel] = (
+                "stable_current_session_startup_baseline"
+            )
+            self.baseline_spectrum_semantic_role_by_channel[channel] = (
+                "automatic_current_session_startup_no_contact"
+            )
+            self.trusted_baseline_anchor_spectrum_by_channel[channel] = {
+                "wavelength_nm": wavelength.astype(float).tolist(),
+                "intensity": spectrum.astype(float).tolist(),
+            }
+            self.baseline_anchor_comparison_by_channel[channel] = {
+                "status": "trusted_anchor_initialized",
+                "common_gain_ratio": 1.0,
+                "normalized_shape_rms": 0.0,
+                "normalized_shape_peak": 0.0,
+                "shape_correlation": 1.0,
+            }
+
+        return {
+            **result,
+            "status": "runtime_startup_baseline_set",
+            "policy": policy,
+            "trusted_session_anchor_preserved": False,
+            "trusted_session_anchor_initialized": True,
+            "baseline_semantics": "automatic_current_session_startup_no_contact",
+        }
+
     def latest(self, channel_id: str | None = None, include_spectrum: bool = False) -> Any:
         with self.lock:
             if channel_id:
@@ -3275,10 +3338,6 @@ class BaySpecWavelengthShiftBridge:
                 and len(latest["wavelength_nm"]) == len(latest["intensity"])
             )
             spectrum_status = self.baseline_spectrum_status_by_channel.get(str(channel_id))
-            accepted_spectrum_statuses = {
-                "stable_post_release_recovery_baseline",
-                "stable_post_release_recovery_baseline_with_warning",
-            }
             baseline_payload_available = bool(
                 baseline
                 and baseline.get("wavelength_nm")
@@ -3286,7 +3345,8 @@ class BaySpecWavelengthShiftBridge:
                 and len(baseline["wavelength_nm"]) == len(baseline["intensity"])
             )
             baseline_ready = bool(
-                baseline_payload_available and spectrum_status in accepted_spectrum_statuses
+                baseline_payload_available
+                and spectrum_status in ACCEPTED_SPECTRUM_NORMALIZATION_BASELINES
             )
             return {
                 "ok": current_ready and baseline_ready,

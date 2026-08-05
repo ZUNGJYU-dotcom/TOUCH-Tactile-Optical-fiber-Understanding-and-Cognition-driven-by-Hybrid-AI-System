@@ -31,12 +31,6 @@ from desktop_launcher import (
     wait_until_ready,
 )
 from sdk_live import DEFAULT_INTERVAL_MS, BaySpecSdkLiveReader
-from src.hybrid_spectrum.session_level_calibration import (
-    CORE_FEATURE_NAMES,
-    PerPositionOrdinalCalibrator,
-)
-
-
 class _AliveThread:
     def is_alive(self) -> bool:
         return True
@@ -1030,731 +1024,6 @@ class ModelDisplaySourceGateTests(unittest.TestCase):
         self.assertTrue(gate["operator_display_valid"])
 
 
-class StaticCandidateShadowTests(unittest.TestCase):
-    def test_shadow_candidate_never_claims_operator_or_twin_control(self) -> None:
-        class CandidateStub:
-            def predict(self, *_args, **_kwargs):
-                return {
-                    "position": {"label": "P22"},
-                    "force_level": {"label": "normal"},
-                }
-
-        wavelength = np.linspace(1528.0, 1560.0, 64).tolist()
-        intensity = np.linspace(1000.0, 2000.0, 64).tolist()
-        with patch.object(
-            backend_main,
-            "STATIC_SPECTRAL_CANDIDATE_PREDICTOR",
-            CandidateStub(),
-        ):
-            result = backend_main._predict_static_spectral_shadow(
-                wavelength,
-                intensity,
-                wavelength,
-                intensity,
-            )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["status"], "shadow_ready")
-        self.assertFalse(result["drives_operator_ui"])
-        self.assertFalse(result["drives_digital_twin"])
-        self.assertEqual(result["prediction"]["position"]["label"], "P22")
-
-    def test_session_calibrated_force_is_baseline_bound_and_shadow_only(self) -> None:
-        samples = [
-            {
-                "position": "P22",
-                "level": level,
-                "features": {name: value for name in CORE_FEATURE_NAMES},
-            }
-            for level, value in (("light", 1.0), ("normal", 2.0), ("hard", 4.0))
-        ]
-        calibrator = PerPositionOrdinalCalibrator.fit(
-            samples,
-            baseline_token="baseline-a",
-            required_positions=("P22",),
-        )
-        prediction = {
-            "response_calibration_features": {
-                name: 2.2 for name in CORE_FEATURE_NAMES
-            }
-        }
-        temporal = {
-            "ready": True,
-            "contact_label": "contact",
-            "position_label": "P22",
-        }
-        with patch.object(
-            backend_main,
-            "STATIC_SPECTRAL_SESSION_CALIBRATOR",
-            calibrator,
-        ):
-            result = backend_main._apply_session_level_calibration(
-                prediction,
-                temporal,
-                baseline_token="baseline-a",
-            )
-            mismatch = backend_main._apply_session_level_calibration(
-                prediction,
-                temporal,
-                baseline_token="baseline-b",
-            )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["label"], "normal")
-        self.assertFalse(result["drives_operator_ui"])
-        self.assertFalse(result["drives_digital_twin"])
-        self.assertEqual(mismatch["status"], "baseline_mismatch_calibration_invalidated")
-
-    def test_exact_spectrum_token_changes_with_one_sample(self) -> None:
-        wavelength = [1.0, 2.0, 3.0]
-        first = backend_main._spectrum_token(wavelength, [10.0, 20.0, 30.0])
-        repeated = backend_main._spectrum_token(wavelength, [10.0, 20.0, 30.0])
-        changed = backend_main._spectrum_token(wavelength, [10.0, 20.0, 30.001])
-
-        self.assertEqual(first, repeated)
-        self.assertNotEqual(first, changed)
-
-
-class DynamicTemporalShadowEndpointTests(unittest.TestCase):
-    @staticmethod
-    def _spectrum_pair(*, frame_id: int, timestamp: float) -> dict:
-        wavelength = np.linspace(1528.0, 1560.0, 64).tolist()
-        baseline_intensity = np.linspace(1000.0, 2000.0, 64).tolist()
-        current_intensity = [
-            value + frame_id * 0.25 for value in baseline_intensity
-        ]
-        return {
-            "ok": True,
-            "latest": {
-                "frame_id": frame_id,
-                "timestamp": timestamp,
-                "source": "static_http_ingest",
-                "wavelength_nm": wavelength,
-                "intensity": current_intensity,
-            },
-            "baseline": {
-                "wavelength_nm": wavelength,
-                "intensity": baseline_intensity,
-            },
-        }
-
-    def test_unique_frames_advance_history_and_duplicate_poll_is_ignored(self) -> None:
-        class AdapterStub:
-            def __init__(self) -> None:
-                self.bundle = {
-                    "schema_version": "dynamic_temporal_shadow_candidate_v2",
-                    "status": "shadow_only_not_primary",
-                    "release_guard_grouped_cv": {
-                        "unsafe_early_release_trigger_count": 0,
-                    },
-                }
-                self.clear_count = 0
-                self.baseline_count = 0
-                self.run_inference_flags: list[bool] = []
-
-            def clear(self) -> None:
-                self.clear_count += 1
-
-            def set_baseline(self, _wavelength, _intensity) -> None:
-                self.baseline_count += 1
-
-            def consume_pending_runtime_baseline_update(self):
-                return None
-
-            def update(
-                self,
-                _wavelength,
-                _intensity,
-                *,
-                run_inference: bool,
-                physical_frame: bool = True,
-                external_no_contact_hint: bool | None = None,
-                source_timestamp_sec: float | None = None,
-            ):
-                self.run_inference_flags.append(run_inference)
-                return {
-                    "status": (
-                        "shadow_ready" if run_inference else "inference_stride_hold"
-                    ),
-                    "ready": run_inference,
-                }
-
-        adapter = AdapterStub()
-        first_pair = self._spectrum_pair(frame_id=1, timestamp=1.0)
-        second_pair = self._spectrum_pair(frame_id=2, timestamp=1.04)
-        with patch.object(
-            backend_main,
-            "DYNAMIC_TEMPORAL_SHADOW_ADAPTER",
-            adapter,
-        ), patch.object(
-            backend_main.bridge,
-            "spectral_model_input",
-            side_effect=[first_pair, first_pair, second_pair],
-        ):
-            backend_main._reset_dynamic_temporal_shadow("test_setup")
-            first = backend_main._predict_dynamic_temporal_shadow()
-            duplicate = backend_main._predict_dynamic_temporal_shadow()
-            second = backend_main._predict_dynamic_temporal_shadow()
-
-        self.assertEqual(adapter.baseline_count, 1)
-        self.assertEqual(adapter.run_inference_flags, [True, True])
-        self.assertEqual(first["unique_frame_count"], 1)
-        self.assertTrue(first["inference_executed_this_frame"])
-        self.assertTrue(duplicate["duplicate_frame_ignored"])
-        self.assertEqual(duplicate["unique_frame_count"], 1)
-        self.assertEqual(second["unique_frame_count"], 2)
-        self.assertTrue(second["inference_executed_this_frame"])
-        for result in (first, duplicate, second):
-            self.assertFalse(result["drives_operator_ui"])
-            self.assertFalse(result["drives_digital_twin"])
-            self.assertEqual(
-                result["runtime_role"],
-                "shadow_only_not_driving_digital_twin",
-            )
-
-    def test_slow_physical_frame_is_resampled_to_model_time_scale(self) -> None:
-        class AdapterStub:
-            bundle = {"frame_interval_sec_estimated": 0.04}
-
-            def __init__(self) -> None:
-                self.calls: list[dict] = []
-
-            def clear(self) -> None:
-                self.calls.clear()
-
-            def set_baseline(self, _wavelength, _intensity) -> None:
-                return None
-
-            def consume_pending_runtime_baseline_update(self):
-                return None
-
-            def update(
-                self,
-                _wavelength,
-                _intensity,
-                *,
-                run_inference: bool,
-                physical_frame: bool,
-                external_no_contact_hint: bool | None,
-                source_timestamp_sec: float | None = None,
-            ) -> dict:
-                self.calls.append(
-                    {
-                        "run_inference": run_inference,
-                        "physical_frame": physical_frame,
-                        "external_no_contact_hint": external_no_contact_hint,
-                    }
-                )
-                return {"status": "shadow_ready", "ready": True}
-
-        adapter = AdapterStub()
-        first_pair = self._spectrum_pair(frame_id=1, timestamp=1.0)
-        second_pair = self._spectrum_pair(frame_id=2, timestamp=1.4)
-        first_pair["latest"]["response_level"] = "no_contact"
-        first_pair["latest"]["qa_status"] = "ok"
-        second_pair["latest"]["response_level"] = "no_contact"
-        second_pair["latest"]["qa_status"] = "ok"
-        with patch.object(
-            backend_main,
-            "DYNAMIC_TEMPORAL_SHADOW_ADAPTER",
-            adapter,
-        ), patch.object(
-            backend_main.bridge,
-            "spectral_model_input",
-            side_effect=[first_pair, second_pair],
-        ):
-            backend_main._reset_dynamic_temporal_shadow("test_resample")
-            first = backend_main._predict_dynamic_temporal_shadow()
-            second = backend_main._predict_dynamic_temporal_shadow()
-
-        self.assertEqual(first["temporal_resample_steps"], 1)
-        self.assertEqual(second["temporal_resample_steps"], 10)
-        self.assertEqual(len(adapter.calls), 11)
-        self.assertEqual(sum(call["physical_frame"] for call in adapter.calls), 2)
-        self.assertTrue(adapter.calls[-1]["run_inference"])
-        self.assertTrue(adapter.calls[-1]["external_no_contact_hint"])
-
-    def test_rejected_runtime_baseline_is_rolled_back_in_adapter(self) -> None:
-        pair = self._spectrum_pair(frame_id=7, timestamp=7.0)
-        original_baseline = np.asarray(pair["baseline"]["intensity"], dtype=float)
-        recovered_baseline = original_baseline * 1.05
-
-        class AdapterStub:
-            bundle = {"frame_interval_sec_estimated": 0.04}
-
-            def __init__(self) -> None:
-                self.baselines: list[np.ndarray] = []
-                self.pending = {
-                    "wavelength_nm": np.asarray(
-                        pair["baseline"]["wavelength_nm"], dtype=float
-                    ),
-                    "intensity": recovered_baseline,
-                    "sample_count": 8,
-                    "span_sec": 1.0,
-                }
-
-            def clear(self) -> None:
-                return None
-
-            def set_baseline(self, _wavelength, intensity) -> None:
-                self.baselines.append(np.asarray(intensity, dtype=float).copy())
-
-            def consume_pending_runtime_baseline_update(self):
-                pending, self.pending = self.pending, None
-                return pending
-
-            def update(
-                self,
-                _wavelength,
-                _intensity,
-                *,
-                run_inference: bool,
-                physical_frame: bool,
-                external_no_contact_hint: bool | None,
-                source_timestamp_sec: float | None = None,
-            ) -> dict:
-                return {
-                    "status": "runtime_reference_reanchored",
-                    "ready": False,
-                }
-
-        adapter = AdapterStub()
-        with patch.object(
-            backend_main,
-            "DYNAMIC_TEMPORAL_SHADOW_ADAPTER",
-            adapter,
-        ), patch.object(
-            backend_main.bridge,
-            "spectral_model_input",
-            return_value=pair,
-        ), patch.object(
-            backend_main.bridge,
-            "set_runtime_recovery_spectrum_baseline",
-            return_value={
-                "ok": False,
-                "status": "runtime_recovery_baseline_invalid",
-            },
-        ):
-            backend_main._reset_dynamic_temporal_shadow("test_rollback")
-            result = backend_main._predict_dynamic_temporal_shadow()
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(len(adapter.baselines), 2)
-        np.testing.assert_allclose(adapter.baselines[0], original_baseline)
-        np.testing.assert_allclose(adapter.baselines[1], original_baseline)
-        update = result["runtime_baseline_update"]
-        self.assertFalse(update["ok"])
-        self.assertTrue(update["adapter_baseline_rollback_applied"])
-        self.assertEqual(
-            update["rollback_baseline_token"],
-            backend_main._spectrum_token(
-                pair["baseline"]["wavelength_nm"],
-                pair["baseline"]["intensity"],
-            ),
-        )
-        self.assertEqual(result["baseline_token"], update["rollback_baseline_token"])
-
-    def test_runtime_baseline_commit_exception_is_rolled_back_in_adapter(self) -> None:
-        pair = self._spectrum_pair(frame_id=8, timestamp=8.0)
-        original_baseline = np.asarray(pair["baseline"]["intensity"], dtype=float)
-
-        class AdapterStub:
-            bundle = {"frame_interval_sec_estimated": 0.04}
-
-            def __init__(self) -> None:
-                self.baselines: list[np.ndarray] = []
-                self.pending = {
-                    "wavelength_nm": np.asarray(
-                        pair["baseline"]["wavelength_nm"], dtype=float
-                    ),
-                    "intensity": original_baseline * 1.04,
-                    "sample_count": 6,
-                    "span_sec": 1.0,
-                }
-
-            def clear(self) -> None:
-                return None
-
-            def set_baseline(self, _wavelength, intensity) -> None:
-                self.baselines.append(np.asarray(intensity, dtype=float).copy())
-
-            def consume_pending_runtime_baseline_update(self):
-                pending, self.pending = self.pending, None
-                return pending
-
-            def update(self, *_args, **_kwargs) -> dict:
-                return {
-                    "status": "runtime_reference_reanchored",
-                    "ready": False,
-                }
-
-        adapter = AdapterStub()
-        with patch.object(
-            backend_main,
-            "DYNAMIC_TEMPORAL_SHADOW_ADAPTER",
-            adapter,
-        ), patch.object(
-            backend_main.bridge,
-            "spectral_model_input",
-            return_value=pair,
-        ), patch.object(
-            backend_main.bridge,
-            "set_runtime_recovery_spectrum_baseline",
-            side_effect=RuntimeError("commit failed"),
-        ):
-            backend_main._reset_dynamic_temporal_shadow("test_commit_exception")
-            result = backend_main._predict_dynamic_temporal_shadow()
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(len(adapter.baselines), 2)
-        np.testing.assert_allclose(adapter.baselines[-1], original_baseline)
-        update = result["runtime_baseline_update"]
-        self.assertEqual(
-            update["status"], "runtime_recovery_baseline_commit_error"
-        )
-        self.assertTrue(update["adapter_baseline_rollback_applied"])
-        self.assertIn("commit failed", update["reason"])
-
-    def test_global_frame_does_not_run_dynamic_shadow_by_default(self) -> None:
-        stopped = {"active": False, "freshness": "stopped"}
-        with patch.object(
-            backend_main.bridge,
-            "frame",
-            return_value={"ok": True, "latest": None},
-        ), patch.object(
-            backend_main.export_watcher,
-            "status",
-            return_value=stopped,
-        ), patch.object(
-            backend_main.sdk_live_reader,
-            "status",
-            return_value=stopped,
-        ), patch.object(
-            backend_main.sense_controller,
-            "status",
-            return_value={"ok": True},
-        ), patch.object(
-            backend_main,
-            "_predict_static_spectral_frame",
-            return_value={"ok": False, "status": "not_requested"},
-        ), patch.object(
-            backend_main,
-            "_predict_dynamic_temporal_shadow",
-        ) as predict_dynamic:
-            result = backend_main.global_spectrum_frame(
-                trace_limit=8,
-                include_spectrum=False,
-                include_shadow=False,
-                include_dynamic_shadow=False,
-            )
-
-        predict_dynamic.assert_not_called()
-        shadow = result["dynamic_temporal_shadow"]
-        self.assertEqual(shadow["status"], "dynamic_shadow_not_requested")
-        self.assertFalse(shadow["drives_operator_ui"])
-        self.assertFalse(shadow["drives_digital_twin"])
-
-    def test_temporal_display_adapter_maps_active_prediction_to_twin_contract(self) -> None:
-        payload = {
-            "ok": True,
-            "status": "shadow_ready",
-            "prediction": {
-                "ready": True,
-                "status": "shadow_ready",
-                "history_frames": 20,
-                "required_frames": 20,
-                "frame_counter": 31,
-                "contact": {"label": "contact", "confidence": 0.94},
-                "position": {"label": "P21", "confidence": 0.81},
-                "response_level": {"label": "normal", "confidence": 0.76},
-                "operational_state": "active_contact",
-                "release_guard": {"release_latched": False},
-                "digital_twin_proxy": {
-                    "active": True,
-                    "position_id": "P21",
-                    "response_level": "normal",
-                    "deformation_proxy": 0.58,
-                    "surface_grid": [
-                        [0.31, 0.58, 0.31],
-                        [0.16, 0.31, 0.16],
-                        [0.04, 0.08, 0.04],
-                    ],
-                    "surface_metrics": {
-                        "surface_peak": 0.58,
-                        "surface_centroid_x": 0.0,
-                        "surface_centroid_y": 1.0,
-                        "dominant_channel": "P21",
-                    },
-                    "visualization_semantics": "single_finger_contact_patch",
-                    "physical_output_semantics": "uncalibrated_manual_response_level",
-                },
-            },
-        }
-
-        result = backend_main._dynamic_temporal_display_prediction(payload)
-
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["drives_operator_ui"])
-        self.assertTrue(result["drives_digital_twin"])
-        self.assertFalse(result["deployment_ready"])
-        self.assertTrue(result["validation_only"])
-        self.assertEqual(result["runtime_role"], "operator_validation_candidate")
-        prediction = result["prediction"]
-        self.assertEqual(prediction["position"]["label"], "P21")
-        self.assertEqual(prediction["force_level"]["label"], "normal")
-        self.assertEqual(prediction["digital_twin"]["position_id"], "P21")
-        self.assertEqual(prediction["digital_twin"]["deformation_proxy"], 0.58)
-
-    def test_temporal_display_adapter_keeps_release_at_zero_deformation(self) -> None:
-        payload = {
-            "ok": True,
-            "status": "released_residual_latched",
-            "prediction": {
-                "ready": True,
-                "status": "released_residual_latched",
-                "contact": {"label": "no_contact", "confidence": None},
-                "position": None,
-                "response_level": None,
-                "operational_state": "no_contact_after_confirmed_release",
-                "release_guard": {"release_latched": True},
-                "digital_twin_proxy": {
-                    "active": False,
-                    "position_id": None,
-                    "response_level": "no_contact",
-                    "deformation_proxy": 0.0,
-                    "surface_grid": [[0.0, 0.0, 0.0] for _ in range(3)],
-                    "surface_metrics": {"surface_peak": 0.0},
-                },
-            },
-        }
-
-        result = backend_main._dynamic_temporal_display_prediction(payload)
-
-        self.assertTrue(result["ok"])
-        prediction = result["prediction"]
-        self.assertEqual(prediction["contact"]["label"], "no_contact")
-        self.assertFalse(prediction["digital_twin"]["active"])
-        self.assertEqual(prediction["digital_twin"]["deformation_proxy"], 0.0)
-
-    def test_temporal_display_adapter_blocks_warming_window(self) -> None:
-        result = backend_main._dynamic_temporal_display_prediction(
-            {
-                "ok": True,
-                "status": "window_warming_up",
-                "prediction": {
-                    "ready": False,
-                    "status": "window_warming_up",
-                    "history_frames": 7,
-                    "required_frames": 20,
-                },
-            }
-        )
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "temporal_window_not_ready")
-        self.assertEqual(result["history_frames"], 7)
-        self.assertFalse(result["drives_digital_twin"])
-
-    def test_global_frame_selects_temporal_prediction_in_validation_mode(self) -> None:
-        stopped = {"active": False, "freshness": "stopped"}
-        temporal_payload = {
-            "ok": True,
-            "status": "shadow_ready",
-            "prediction": {
-                "ready": True,
-                "status": "shadow_ready",
-                "contact": {"label": "contact", "confidence": 0.93},
-                "position": {"label": "P32", "confidence": 0.79},
-                "response_level": {"label": "light", "confidence": 0.71},
-                "digital_twin_proxy": {
-                    "active": True,
-                    "position_id": "P32",
-                    "response_level": "light",
-                    "deformation_proxy": 0.28,
-                    "surface_grid": [
-                        [0.01, 0.04, 0.08],
-                        [0.04, 0.12, 0.28],
-                        [0.01, 0.04, 0.08],
-                    ],
-                    "surface_metrics": {
-                        "surface_peak": 0.28,
-                        "dominant_channel": "P32",
-                    },
-                },
-            },
-        }
-        with patch.object(
-            backend_main.bridge,
-            "frame",
-            return_value={
-                "ok": True,
-                "latest": {
-                    "source": "static_http_ingest",
-                    "qa_status": "ok",
-                },
-            },
-        ), patch.object(
-            backend_main.export_watcher,
-            "status",
-            return_value=stopped,
-        ), patch.object(
-            backend_main.sdk_live_reader,
-            "status",
-            return_value=stopped,
-        ), patch.object(
-            backend_main.sense_controller,
-            "status",
-            return_value={"ok": True},
-        ), patch.object(
-            backend_main,
-            "_predict_static_spectral_frame",
-            return_value={"ok": True, "status": "ready", "prediction": {"source": "static"}},
-        ) as predict_static, patch.object(
-            backend_main,
-            "_predict_dynamic_temporal_shadow",
-            return_value=temporal_payload,
-        ):
-            result = backend_main.global_spectrum_frame(
-                trace_limit=8,
-                include_spectrum=False,
-                include_shadow=False,
-                include_dynamic_shadow=True,
-                temporal_validation_mode=True,
-            )
-
-        self.assertTrue(result["temporal_validation_mode"])
-        self.assertTrue(result["model_assisted_display_allowed"])
-        self.assertTrue(result["temporal_model_assisted_display_allowed"])
-        self.assertEqual(
-            result["active_spectral_model_source"],
-            "dynamic_temporal_v3_validation",
-        )
-        self.assertEqual(
-            result["active_spectral_prediction"]["position"]["label"],
-            "P32",
-        )
-        self.assertTrue(result["dynamic_temporal_display"]["drives_operator_ui"])
-        self.assertTrue(result["dynamic_temporal_display"]["drives_digital_twin"])
-        self.assertEqual(
-            result["active_spectral_prediction"]["digital_twin"]["deformation_proxy"],
-            0.28,
-        )
-        predict_static.assert_not_called()
-        self.assertEqual(
-            result["trained_static_spectral_frame"]["status"],
-            "skipped_temporal_validation_mode",
-        )
-
-    def test_beta_global_frame_skips_legacy_models_and_reuses_latest_frame(self) -> None:
-        stopped = {"active": False, "freshness": "stopped"}
-        latest = {
-            "source": "static_http_ingest",
-            "qa_status": "ok",
-            "wavelength_nm": [1540.0, 1545.0, 1550.0],
-            "intensity": [10.0, 20.0, 15.0],
-        }
-        beta_payload = {
-            "ok": True,
-            "status": "ready",
-            "contact": {"label": "no_contact", "confidence": 0.98},
-            "position": {"label": None, "confidence": 0.0},
-            "estimated_force_n": 0.0,
-            "digital_twin": {"active": False},
-        }
-        with patch.object(
-            backend_main,
-            "ALL_SOURCE_BETA_ENABLED",
-            True,
-        ), patch.object(
-            backend_main.bridge,
-            "frame",
-            return_value={"ok": True, "latest": latest},
-        ), patch.object(
-            backend_main.export_watcher,
-            "status",
-            return_value=stopped,
-        ), patch.object(
-            backend_main.sdk_live_reader,
-            "status",
-            return_value=stopped,
-        ), patch.object(
-            backend_main.sense_controller,
-            "status",
-            return_value={"ok": True},
-        ), patch.object(
-            backend_main,
-            "_predict_static_spectral_frame",
-        ) as predict_static, patch.object(
-            backend_main,
-            "_predict_dynamic_temporal_shadow",
-        ) as predict_dynamic, patch.object(
-            backend_main,
-            "_predict_all_source_beta",
-            return_value=beta_payload,
-        ) as predict_beta:
-            result = backend_main.global_spectrum_frame(
-                trace_limit=8,
-                include_spectrum=False,
-                include_shadow=True,
-                include_dynamic_shadow=True,
-                temporal_validation_mode=False,
-            )
-
-        predict_static.assert_not_called()
-        predict_dynamic.assert_not_called()
-        predict_beta.assert_called_once()
-        latest_override = predict_beta.call_args.kwargs["latest_override"]
-        self.assertIsInstance(latest_override, dict)
-        self.assertEqual(latest_override["source"], latest["source"])
-        self.assertEqual(latest_override["wavelength_nm"], latest["wavelength_nm"])
-        self.assertEqual(latest_override["intensity"], latest["intensity"])
-        self.assertEqual(
-            result["active_spectral_model_source"],
-            "ordinary_fbg_all_data_beta_v1",
-        )
-        self.assertEqual(
-            result["trained_static_spectral_frame"]["status"],
-            "skipped_beta_latest_model_only",
-        )
-        self.assertEqual(
-            result["dynamic_temporal_shadow"]["status"],
-            "skipped_beta_latest_model_only",
-        )
-
-    def test_reset_clears_cached_dynamic_trial_state(self) -> None:
-        class AdapterStub:
-            bundle = {}
-
-            def __init__(self) -> None:
-                self.clear_count = 0
-
-            def clear(self) -> None:
-                self.clear_count += 1
-
-        adapter = AdapterStub()
-        with patch.object(
-            backend_main,
-            "DYNAMIC_TEMPORAL_SHADOW_ADAPTER",
-            adapter,
-        ):
-            backend_main.DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN = "old-baseline"
-            backend_main.DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY = ("old",)
-            backend_main.DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT = 99
-            backend_main.DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD = {"old": True}
-            backend_main.DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC = 123.0
-            backend_main.DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM = np.ones(3)
-            result = backend_main._reset_dynamic_temporal_shadow("baseline_replaced")
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(adapter.clear_count, 1)
-        self.assertIsNone(backend_main.DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN)
-        self.assertIsNone(backend_main.DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY)
-        self.assertEqual(backend_main.DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT, 0)
-        self.assertIsNone(backend_main.DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD)
-        self.assertIsNone(backend_main.DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC)
-        self.assertIsNone(backend_main.DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM)
-
-
 class ExportWatcherSessionTests(unittest.TestCase):
     @staticmethod
     def _dat_record(record_index: int, record_words: int = 513) -> np.ndarray:
@@ -2205,7 +1474,8 @@ class FrontendRequestLifecycleContractTests(unittest.TestCase):
         self.assertIn("function startClientSchedulers()", self.source)
         self.assertIn("if (state.clientSchedulersStarted) return;", self.source)
         self.assertIn("if (state.bootStarted) return;", self.source)
-        self.assertIn("refresh: false", self.source)
+        self.assertIn("loadRuntimeCapabilities()", self.source)
+        self.assertIn('"/api/health"', self.source)
         self.assertIn('boot().catch((error) => {', self.source)
 
     def test_frontend_recovers_an_already_running_live_source(self) -> None:
@@ -2236,7 +1506,7 @@ class FrontendRequestLifecycleContractTests(unittest.TestCase):
                     "payload = health(); "
                     "assert payload['ok'] is True; "
                     "assert payload['backend_contract_version'] == "
-                    "'trained_static_spectrum_api_v2'"
+                    "'touch_current_runtime_api_v1'"
                 ),
             ],
             cwd=str(backend_main.APP_ROOT),
@@ -3026,7 +2296,7 @@ class BridgeResetTests(unittest.TestCase):
             {"channel_id": "P22", "minimum_recent_samples": 30}
         )
 
-        self.assertTrue(first["static_model_spectrum_baseline_ready"])
+        self.assertTrue(first["current_runtime_spectrum_baseline_ready"])
         self.assertEqual(
             first["baseline_anchor_comparison_by_channel"]["P22"]["status"],
             "trusted_anchor_initialized",
@@ -3045,10 +2315,10 @@ class BridgeResetTests(unittest.TestCase):
         )
 
         self.assertTrue(rejected["ok"])
-        self.assertTrue(rejected["static_model_spectrum_baseline_rejected"])
-        self.assertFalse(rejected["static_model_spectrum_baseline_ready"])
+        self.assertTrue(rejected["current_runtime_spectrum_baseline_rejected"])
+        self.assertFalse(rejected["current_runtime_spectrum_baseline_ready"])
         self.assertEqual(
-            rejected["static_model_spectrum_baseline_status"],
+            rejected["current_runtime_spectrum_baseline_status"],
             "recovery_residual_detected",
         )
         self.assertEqual(
@@ -3076,7 +2346,7 @@ class BridgeResetTests(unittest.TestCase):
             {"channel_id": "P22", "minimum_recent_samples": 30}
         )
 
-        self.assertTrue(result["static_model_spectrum_baseline_ready"])
+        self.assertTrue(result["current_runtime_spectrum_baseline_ready"])
         comparison = result["baseline_anchor_comparison_by_channel"]["P22"]
         self.assertNotEqual(comparison["status"], "recovery_residual_detected")
         self.assertAlmostEqual(comparison["common_gain_ratio"], 1.06, places=3)
@@ -3136,6 +2406,40 @@ class BridgeResetTests(unittest.TestCase):
             trusted,
         )
 
+    def test_runtime_startup_baseline_initializes_trusted_session_anchor(self) -> None:
+        test_bridge = BaySpecWavelengthShiftBridge(max_records_per_channel=100)
+        wavelength = np.linspace(1528.0, 1560.0, 128)
+        baseline = 8200.0 + 2700.0 * np.exp(
+            -0.5 * ((wavelength - 1546.9) / 0.25) ** 2
+        )
+
+        result = test_bridge.set_runtime_startup_spectrum_baseline(
+            "P22",
+            wavelength,
+            baseline,
+            sample_count=5,
+            span_sec=0.16,
+            shape_motion_rms=0.0004,
+            common_gain_motion=0.0002,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["trusted_session_anchor_initialized"])
+        self.assertEqual(
+            test_bridge.baseline_spectrum_status_by_channel["P22"],
+            "stable_current_session_startup_baseline",
+        )
+        self.assertEqual(
+            test_bridge.baseline_spectrum_semantic_role_by_channel["P22"],
+            "automatic_current_session_startup_no_contact",
+        )
+        np.testing.assert_allclose(
+            test_bridge.trusted_baseline_anchor_spectrum_by_channel["P22"][
+                "intensity"
+            ],
+            baseline,
+        )
+
 
 class UnifiedBaselineEndpointTests(unittest.TestCase):
     def test_global_baseline_requires_explicit_no_contact_attestation(self) -> None:
@@ -3162,8 +2466,8 @@ class UnifiedBaselineEndpointTests(unittest.TestCase):
         model_result = {
             "ok": True,
             "baseline_set": True,
-            "static_model_spectrum_baseline_ready": True,
-            "static_model_spectrum_baseline_status": "stable_post_release_recovery_baseline",
+            "current_runtime_spectrum_baseline_ready": True,
+            "current_runtime_spectrum_baseline_status": "stable_post_release_recovery_baseline",
         }
         with patch.object(
             backend_main.px6d_reader,
@@ -3207,8 +2511,8 @@ class UnifiedBaselineEndpointTests(unittest.TestCase):
         model_result = {
             "ok": True,
             "baseline_set": True,
-            "static_model_spectrum_baseline_ready": True,
-            "static_model_spectrum_baseline_status": "stable_post_release_recovery_baseline",
+            "current_runtime_spectrum_baseline_ready": True,
+            "current_runtime_spectrum_baseline_status": "stable_post_release_recovery_baseline",
             "baseline_spectrum_sample_count_by_channel": {"P22": 30},
             "baseline_spectrum_span_sec_by_channel": {"P22": 3.0},
             "baseline_spectrum_noise_ratio_by_channel": {"P22": 0.001},
@@ -3237,7 +2541,7 @@ class UnifiedBaselineEndpointTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertTrue(result["candidate_display_baseline_ok"])
-        self.assertTrue(result["static_model_spectrum_baseline"]["ok"])
+        self.assertTrue(result["current_runtime_spectrum_baseline"]["ok"])
 
     def test_global_baseline_rejects_partial_model_baseline(self) -> None:
         with patch.object(
@@ -3250,8 +2554,8 @@ class UnifiedBaselineEndpointTests(unittest.TestCase):
             return_value={
                 "ok": True,
                 "baseline_set": True,
-                "static_model_spectrum_baseline_ready": False,
-                "static_model_spectrum_baseline_status": "insufficient_recovery_baseline_frames",
+                "current_runtime_spectrum_baseline_ready": False,
+                "current_runtime_spectrum_baseline_status": "insufficient_recovery_baseline_frames",
                 "baseline_spectrum_sample_count_by_channel": {"P22": 6},
             },
         ):
@@ -3315,13 +2619,19 @@ class DesktopLauncherIdentityTests(unittest.TestCase):
             health_payload_is_expected(
                 {
                     "ok": True,
-                    "app": "TOUCH System Trained Static Spectrum Twin",
-                    "mode": "standalone_bayspec_trained_static_spectrum_twin",
-                    "backend_contract_version": "trained_static_spectrum_api_v2",
-                    "dynamic_temporal_validation_primary": True,
-                    "default_operator_recognition": (
-                        "dynamic_temporal_v3_validation"
-                    ),
+                    "app": "TOUCH",
+                    "mode": "standalone_touch_all_data_spectral_runtime",
+                    "backend_contract_version": "touch_current_runtime_api_v1",
+                    "default_operator_recognition": "ordinary_fbg_all_data_beta_v1",
+                    "runtime_model": {
+                        "loaded": True,
+                        "runtime_role": "deployed_current_model_only",
+                    },
+                    "recognition_runtime": {
+                        "active_model_id": "ordinary_fbg_all_data_beta_v1",
+                        "switchable": False,
+                        "model_count": 1,
+                    },
                 }
             )
         )
@@ -3331,12 +2641,9 @@ class DesktopLauncherIdentityTests(unittest.TestCase):
             health_payload_is_expected(
                 {
                     "ok": True,
-                    "app": "TOUCH System Trained Static Spectrum Twin",
-                    "mode": "standalone_bayspec_trained_static_spectrum_twin",
-                    "dynamic_temporal_validation_primary": True,
-                    "default_operator_recognition": (
-                        "dynamic_temporal_v3_validation"
-                    ),
+                    "app": "TOUCH",
+                    "mode": "standalone_touch_all_data_spectral_runtime",
+                    "default_operator_recognition": "ordinary_fbg_all_data_beta_v1",
                 }
             )
         )
@@ -3346,13 +2653,10 @@ class DesktopLauncherIdentityTests(unittest.TestCase):
             health_payload_is_expected(
                 {
                     "ok": True,
-                    "app": "TOUCH System Trained Static Spectrum Twin",
-                    "mode": "standalone_bayspec_trained_static_spectrum_twin",
-                    "backend_contract_version": "trained_static_spectrum_api_v1",
-                    "dynamic_temporal_validation_primary": True,
-                    "default_operator_recognition": (
-                        "dynamic_temporal_v3_validation"
-                    ),
+                    "app": "TOUCH",
+                    "mode": "standalone_touch_all_data_spectral_runtime",
+                    "backend_contract_version": "touch_current_runtime_api_v0",
+                    "default_operator_recognition": "ordinary_fbg_all_data_beta_v1",
                 }
             )
         )
@@ -3381,148 +2685,8 @@ class OperatorQaProjectionTests(unittest.TestCase):
             app_js,
         )
         self.assertIn("diagnostic_only_qa_flags: diagnosticOnlyRawQaFlags", app_js)
-        self.assertIn("carrier_qa_flags: rawQaFlags", app_js)
-
-
-class AllSourceBetaBaselineTransactionTests(unittest.TestCase):
-    class _Adapter:
-        def __init__(self, pending_baseline: dict[str, object]) -> None:
-            self.pending_baseline = pending_baseline
-            self.set_baseline_calls: list[tuple[list[float], list[float]]] = []
-
-        def set_baseline(self, wavelength, intensity) -> None:
-            self.set_baseline_calls.append((list(wavelength), list(intensity)))
-
-        def update(self, *_args, **_kwargs):
-            return {
-                "ok": True,
-                "status": "ready",
-                "contact": {"label": "no_contact"},
-            }
-
-        def consume_pending_runtime_baseline_update(self):
-            pending = self.pending_baseline
-            self.pending_baseline = None
-            return pending
-
-    class _Bridge:
-        def __init__(self, pair, commit_result=None, commit_error=None) -> None:
-            self.pair = pair
-            self.commit_result = commit_result
-            self.commit_error = commit_error
-            self.commit_calls = []
-
-        def spectral_model_input(self, channel_id="P22"):
-            return self.pair
-
-        def set_runtime_recovery_spectrum_baseline(self, *args, **kwargs):
-            self.commit_calls.append((args, kwargs))
-            if self.commit_error is not None:
-                raise self.commit_error
-            return dict(self.commit_result or {"ok": True})
-
-    @staticmethod
-    def _spectral_pair():
-        wavelength = np.linspace(1539.0, 1582.0, 64).tolist()
-        baseline = (3200.0 + 100.0 * np.sin(np.linspace(0, 4, 64))).tolist()
-        latest = (np.asarray(baseline) * 1.001).tolist()
-        return {
-            "ok": True,
-            "baseline": {
-                "wavelength_nm": wavelength,
-                "intensity": baseline,
-            },
-            "latest": {
-                "wavelength_nm": wavelength,
-                "intensity": latest,
-                "frame_id": 7,
-                "timestamp": 1.2,
-                "source": "test",
-            },
-        }
-
-    def _run_prediction(self, *, commit_result=None, commit_error=None):
-        pair = self._spectral_pair()
-        recovered = {
-            "wavelength_nm": np.asarray(pair["baseline"]["wavelength_nm"]),
-            "intensity": np.asarray(pair["baseline"]["intensity"]) * 1.002,
-            "sample_count": 5,
-            "span_sec": 1.1,
-            "shape_motion_rms": 0.0004,
-            "common_gain_motion": 0.0003,
-            "policy": "test_release_recovery",
-        }
-        adapter = self._Adapter(recovered)
-        bridge_stub = self._Bridge(
-            pair,
-            commit_result=commit_result,
-            commit_error=commit_error,
-        )
-        with patch.multiple(
-            backend_main,
-            ALL_SOURCE_BETA_ENABLED=True,
-            ALL_SOURCE_BETA_ADAPTER=adapter,
-            ALL_SOURCE_BETA_ERROR=None,
-            ALL_SOURCE_BETA_BASELINE_TOKEN=None,
-            ALL_SOURCE_BETA_LAST_FRAME_KEY=None,
-            ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT=0,
-            ALL_SOURCE_BETA_LAST_PAYLOAD=None,
-            bridge=bridge_stub,
-        ):
-            result = backend_main._predict_all_source_beta()
-            active_token = backend_main.ALL_SOURCE_BETA_BASELINE_TOKEN
-        return result, adapter, bridge_stub, pair, recovered, active_token
-
-    def test_runtime_recovery_baseline_is_committed_to_bridge(self) -> None:
-        result, adapter, bridge_stub, _pair, recovered, active_token = (
-            self._run_prediction(commit_result={"ok": True, "status": "set"})
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["runtime_baseline_update"]["status"], "set")
-        self.assertEqual(len(bridge_stub.commit_calls), 1)
-        self.assertEqual(len(adapter.set_baseline_calls), 1)
-        self.assertEqual(
-            active_token,
-            backend_main._spectrum_token(
-                recovered["wavelength_nm"].tolist(),
-                recovered["intensity"].tolist(),
-            ),
-        )
-
-    def test_rejected_runtime_baseline_rolls_adapter_back(self) -> None:
-        result, adapter, _bridge, pair, _recovered, active_token = (
-            self._run_prediction(
-                commit_result={"ok": False, "status": "candidate_rejected"}
-            )
-        )
-
-        update = result["runtime_baseline_update"]
-        self.assertTrue(update["adapter_baseline_rollback_applied"])
-        self.assertEqual(len(adapter.set_baseline_calls), 2)
-        self.assertEqual(
-            adapter.set_baseline_calls[-1][1],
-            pair["baseline"]["intensity"],
-        )
-        self.assertEqual(
-            active_token,
-            backend_main._spectrum_token(
-                pair["baseline"]["wavelength_nm"],
-                pair["baseline"]["intensity"],
-            ),
-        )
-
-    def test_runtime_baseline_commit_exception_also_rolls_back(self) -> None:
-        result, adapter, _bridge, _pair, _recovered, _active_token = (
-            self._run_prediction(commit_error=RuntimeError("commit failed"))
-        )
-
-        update = result["runtime_baseline_update"]
-        self.assertEqual(
-            update["status"], "runtime_recovery_baseline_commit_error"
-        )
-        self.assertTrue(update["adapter_baseline_rollback_applied"])
-        self.assertEqual(len(adapter.set_baseline_calls), 2)
+        self.assertIn("raw_qa_flags: rawQaFlags", app_js)
+        self.assertIn("...operatorRawQaFlags", app_js)
 
 
 class CaptureProvenanceContractTests(unittest.TestCase):
@@ -3538,7 +2702,7 @@ class CaptureProvenanceContractTests(unittest.TestCase):
             ),
             patch.object(
                 backend_main,
-                "_static_spectral_model_status",
+                "_current_runtime_status",
                 return_value={"loaded": True},
             ),
             patch.object(

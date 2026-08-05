@@ -24,6 +24,7 @@ DIRECT_SCENARIO_POSITION = {
     "off_center_fingertip_contact": "P23",
     "broad_fingertip_contact": "P22",
 }
+DEMO_VISUAL_FORCE_FULL_SCALE_N = 5.0
 
 
 class RecordedDemoLibrary:
@@ -147,7 +148,13 @@ class RecordedDemoLibrary:
                 self._arrays["elapsed_time_sec"][position_index, frame_index]
             ),
             "reference_force_fz_n": force_n,
-            "response_ratio": max(0.0, min(1.0, force_n / 5.0)),
+            # This ratio drives only the bounded demo deformation. It is not a
+            # limit on live optical force estimation or display.
+            "response_ratio": max(
+                0.0,
+                min(1.0, force_n / DEMO_VISUAL_FORCE_FULL_SCALE_N),
+            ),
+            "visual_force_full_scale_n": DEMO_VISUAL_FORCE_FULL_SCALE_N,
             "wavelength_nm": self._arrays["wavelength_nm"],
             "intensity": spectrum,
             "baseline_intensity": self._arrays["baseline_intensity"],

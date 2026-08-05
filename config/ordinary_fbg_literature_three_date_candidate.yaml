@@ -1,0 +1,38 @@
+schema_version: ordinary_fbg_literature_three_date_candidate_v1
+
+dataset_policy:
+  split_strategy: leave_one_date_out_grouped_by_session
+  random_frame_split_allowed: false
+  acquisition_dates: ["20260731", "20260803", "20260804"]
+  datasets:
+    "20260731": "outputs/ordinary_fbg_px6d_strict_20260731_latest_primary/primary/ordinary_fbg_px6d_dataset.npz"
+    "20260803": "outputs/ordinary_fbg_px6d_strict_20260803_new_data_only/ordinary_fbg_px6d_dataset.npz"
+    "20260804": "outputs/ordinary_fbg_px6d_strict_20260804_new_batch_only/ordinary_fbg_px6d_dataset.npz"
+  quarantine:
+    "20260731": "Use primary only; suspected early P11/P12/P21 sessions remain excluded."
+
+selected_candidates:
+  contact:
+    candidate_id: contact_response_raw136_extra_trees
+    feature_view: response_raw136
+  position:
+    candidate_id: position_response_raw136_extra_trees
+    feature_view: response_raw136
+  force_fz:
+    candidate_id: force_literature_train_only_osc_ridge
+    feature_view: literature_snv_sg328
+    ridge_alpha: 100.0
+    osc_components: 1
+    output_policy: nonnegative_without_upper_clip
+
+training:
+  tree_estimators: 128
+  minimum_leaf_samples: 2
+  equal_session_mass: true
+  maximum_force_rows_per_session: 160
+  random_seed: 42
+
+deployment:
+  status: candidate_not_deployed
+  require_explicit_promotion: true
+  current_desktop_model_must_not_be_overwritten: true

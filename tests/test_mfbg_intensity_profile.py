@@ -251,18 +251,18 @@ class MfbgIntensityProfileTests(unittest.TestCase):
     def test_beta_health_exposes_one_non_switchable_current_model(self) -> None:
         from backend import main as backend_main
 
-        with patch.object(backend_main, "ALL_SOURCE_BETA_ENABLED", True):
-            payload = backend_main.health()
+        payload = backend_main.health()
 
         runtime = payload["recognition_runtime"]
         self.assertEqual(
             runtime["active_model_id"],
             "ordinary_fbg_all_data_beta_v1",
         )
-        self.assertEqual(runtime["display_name"], "All-data spectral model")
+        self.assertEqual(runtime["display_name"], "Current all-data spectral model")
         self.assertFalse(runtime["switchable"])
-        self.assertFalse(runtime["legacy_models_enabled"])
-        self.assertFalse(payload["old_model_fallback_enabled"])
+        self.assertEqual(runtime["model_count"], 1)
+        self.assertNotIn("legacy_models_enabled", runtime)
+        self.assertNotIn("old_model_fallback_enabled", payload)
 
 
 if __name__ == "__main__":

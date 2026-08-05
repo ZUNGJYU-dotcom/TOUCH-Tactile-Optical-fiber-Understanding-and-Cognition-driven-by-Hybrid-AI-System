@@ -503,6 +503,9 @@
             <button data-diagnostic-tab="recording" data-tooltip="Data recording" type="button" role="tab" aria-label="Data recording" aria-selected="false">
               <i data-lucide="circle-dot" aria-hidden="true"></i><span>Record</span>
             </button>
+            <button data-diagnostic-tab="measurement" data-tooltip="Measurement analysis" type="button" role="tab" aria-label="Measurement analysis" aria-selected="false">
+              <i data-lucide="chart-no-axes-combined" aria-hidden="true"></i><span>Measure</span>
+            </button>
             <button data-diagnostic-tab="surface" data-tooltip="Surface diagnostics" type="button" role="tab" aria-label="Surface diagnostics" aria-selected="false">
               <i data-lucide="grid-3x3" aria-hidden="true"></i><span>Surface</span>
             </button>
@@ -693,10 +696,6 @@
                   <span>Active model</span>
                   <strong id="recognitionModeStatus">Loading...</strong>
                 </div>
-                <div id="legacyRecognitionRuntimeControls" class="settings-button-grid diagnostic-runtime-buttons" hidden>
-                  <button id="settingsTemporalValidationButton" type="button">Temporal validation</button>
-                  <button id="settingsStaticFallbackButton" type="button">Static fallback</button>
-                </div>
               </div>
             </details>
             <details class="diagnostic-subsection diagnostic-source-adapter">
@@ -787,6 +786,57 @@
               </div>
               <p id="px6dCaptureOutput" class="diagnostic-capture-output" title="">Ready.</p>
             </details>
+
+          <details class="prediction-card diagnostics-only diagnostic-card diagnostic-measurement-card" data-diagnostic-group="measurement" open>
+            <summary><span>Measurement analysis</span><strong id="measurementStatus" class="measurement-summary-status">Ready</strong></summary>
+            <div class="diagnostic-measurement-controls">
+              <label class="diagnostic-measurement-root-field">Folder
+                <span class="diagnostic-measurement-path-row">
+                  <input id="measurementRootInput" type="text" placeholder="Recording folder" />
+                  <button id="measurementRefreshButton" type="button"><i data-lucide="refresh-cw" aria-hidden="true"></i><span>Refresh</span></button>
+                </span>
+              </label>
+              <label>Session
+                <select id="measurementSessionSelect">
+                  <option value="">Select a completed recording</option>
+                </select>
+              </label>
+              <label>Estimate curve
+                <select id="measurementEstimateSource">
+                  <option value="best_available">Best evidence (formal first)</option>
+                  <option value="grouped_oof">Grouped OOF (held-out)</option>
+                  <option value="current_model_replay">Current model replay (session baseline)</option>
+                  <option value="recorded_runtime">Recorded runtime (historical)</option>
+                </select>
+              </label>
+              <button id="measurementAnalyzeButton" class="diagnostic-measurement-analyze" type="button" disabled>
+                <i data-lucide="chart-no-axes-combined" aria-hidden="true"></i><span>Analyze</span>
+              </button>
+            </div>
+            <div class="diagnostic-measurement-chart-shell">
+              <canvas id="measurementComparisonCanvas" aria-label="PX6D and optical estimated force comparison"></canvas>
+              <div class="diagnostic-measurement-legend" aria-hidden="true">
+                <span><i class="measurement-reference-key"></i>PX6D Fz</span>
+                <span><i class="measurement-optical-key"></i><span id="measurementSelectedLegend">Selected optical estimate</span></span>
+              </div>
+            </div>
+            <div class="diagnostic-measurement-kpi-grid" aria-label="Measurement analysis metrics">
+              <div><span>Selected curve</span><strong id="measurementEvidence">--</strong></div>
+              <div><span>Evaluation</span><strong id="measurementValidity">--</strong></div>
+              <div><span>Replay baseline</span><strong id="measurementBaseline">--</strong></div>
+              <div><span>Paired samples</span><strong id="measurementPairedSamples">--</strong></div>
+              <div><span>Cycles</span><strong id="measurementCycleCount">--</strong></div>
+              <div><span>MAE</span><strong id="measurementMae">--</strong></div>
+              <div><span>RMSE</span><strong id="measurementRmse">--</strong></div>
+              <div><span>Curve correlation</span><strong id="measurementCorrelation">--</strong></div>
+              <div><span>Amplitude slope</span><strong id="measurementAmplitudeSlope">--</strong></div>
+              <div><span>Optical lag</span><strong id="measurementLag">--</strong></div>
+              <div><span>Acquisition</span><strong id="measurementAcquisitionRate">--</strong></div>
+              <div><span>Inference</span><strong id="measurementInferenceLatency">--</strong></div>
+              <div><span>Recovery</span><strong id="measurementRecovery">--</strong></div>
+            </div>
+            <p id="measurementOutput" class="diagnostic-measurement-output">Select a completed recording.</p>
+          </details>
 
           <details class="prediction-card diagnostics-only diagnostic-card diagnostic-reference-card" data-diagnostic-group="reference" open>
             <summary class="section-label">MECHANICAL REFERENCE</summary>

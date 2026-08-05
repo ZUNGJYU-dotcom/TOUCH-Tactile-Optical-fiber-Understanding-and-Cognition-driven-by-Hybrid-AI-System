@@ -129,6 +129,20 @@ def model_response(record: dict) -> dict:
         "operational_state": "active_contact",
         "release_guard": {"release_latched": False},
         "runtime_baseline_revision": 2,
+        "estimated_force_fz_n": 0.73,
+        "force_fz": {
+            "estimated_n": 0.73,
+            "raw_estimated_n": 0.77,
+            "unit": "N",
+            "gated": False,
+            "runtime_input": "optical_spectrum_time_series",
+            "calibration_supervision": "PX6D Fz",
+        },
+        "uncertainty": {
+            "review_needed": True,
+            "reasons": ["position_confidence_low"],
+        },
+        "inference_latency_ms": 3.4,
     }
 
 
@@ -553,19 +567,22 @@ class OpticalForceCaptureTests(unittest.TestCase):
             )
             started = manager.start(selected_outputs=["spectrum"])
             self.assertTrue(started["ok"], started)
-            output_dir = Path(started["output_directory"])
-            metadata_path = output_dir / "session_metadata.json"
-            journal_path = output_dir / "capture_journal.json"
+            try:
+                output_dir = Path(started["output_directory"])
+                metadata_path = output_dir / "session_metadata.json"
+                journal_path = output_dir / "capture_journal.json"
 
-            self.assertTrue(metadata_path.is_file())
-            self.assertTrue(journal_path.is_file())
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            journal = json.loads(journal_path.read_text(encoding="utf-8"))
-            self.assertEqual(metadata["session_id"], started["session_id"])
-            self.assertEqual(journal["session_id"], started["session_id"])
-            self.assertTrue(metadata["running"])
-            self.assertTrue(journal["running"])
-            manager.stop()
+                self.assertTrue(metadata_path.is_file())
+                self.assertTrue(journal_path.is_file())
+                with manager._lock:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+                self.assertEqual(metadata["session_id"], started["session_id"])
+                self.assertEqual(journal["session_id"], started["session_id"])
+                self.assertTrue(metadata["running"])
+                self.assertTrue(journal["running"])
+            finally:
+                manager.stop()
 
     def test_manager_recovers_session_left_running_by_previous_process(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -774,6 +791,20 @@ class OpticalForceCaptureTests(unittest.TestCase):
             self.assertEqual(float(row["filtered_force_resultant_n"]), 0.795)
             self.assertEqual(row["predicted_position_label"], "P22")
             self.assertEqual(row["predicted_response_level"], "normal")
+            self.assertAlmostEqual(float(row["optical_estimated_fz_n"]), 0.73)
+            self.assertAlmostEqual(float(row["optical_raw_estimated_fz_n"]), 0.77)
+            self.assertEqual(row["optical_force_estimate_gated"], "False")
+            self.assertEqual(row["optical_force_estimate_available"], "True")
+            self.assertEqual(
+                row["optical_force_estimate_source"],
+                "optical_spectrum_time_series",
+            )
+            self.assertEqual(row["optical_force_estimate_unit"], "N")
+            self.assertEqual(row["optical_force_review_needed"], "True")
+            self.assertEqual(
+                row["optical_force_review_reasons"], "position_confidence_low"
+            )
+            self.assertAlmostEqual(float(row["model_inference_latency_ms"]), 3.4)
 
             spectrum_path = output_dir / "spectrum_timeseries.csv"
             response_path = output_dir / "tactile_response_timeseries.csv"
@@ -791,6 +822,12 @@ class OpticalForceCaptureTests(unittest.TestCase):
                 response_row = next(csv.DictReader(handle))
             self.assertEqual(response_row["response_level"], "normal")
             self.assertAlmostEqual(float(response_row["normal_probability"]), 0.75)
+            self.assertAlmostEqual(
+                float(response_row["optical_estimated_fz_n"]), 0.73
+            )
+            self.assertAlmostEqual(
+                float(response_row["optical_raw_estimated_fz_n"]), 0.77
+            )
 
             with force_path.open(encoding="utf-8-sig", newline="") as handle:
                 force_row = next(csv.DictReader(handle))
@@ -812,6 +849,15 @@ class OpticalForceCaptureTests(unittest.TestCase):
             self.assertEqual(metadata["force_target"]["field"], "force_fz_n")
             self.assertEqual(metadata["force_target"]["unit"], "N")
             self.assertFalse(metadata["force_target"]["categorical_bins_enabled"])
+            self.assertEqual(
+                metadata["paired_measurement_contract"]["estimate_field"],
+                "optical_estimated_fz_n",
+            )
+            self.assertFalse(
+                metadata["paired_measurement_contract"][
+                    "force_sensor_is_model_input"
+                ]
+            )
             self.assertEqual(metadata["capture_status"], "complete")
             self.assertTrue(metadata["alignment_audit"]["all_selected_streams_aligned"])
             self.assertEqual(

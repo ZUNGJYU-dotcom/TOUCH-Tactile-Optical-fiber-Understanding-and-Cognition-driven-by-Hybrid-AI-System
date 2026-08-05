@@ -15,14 +15,65 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.hybrid_spectrum.px6d_session_dataset import (  # noqa: E402
     SessionDescriptor,
     _load_session_frame_matrix,
+    _load_session_recorded_baseline,
     assign_session_folds,
     extract_baseline_relative_features,
+    filter_session_descriptors,
+    session_has_force_reference,
     split_primary_and_challenge_sessions,
     validate_strict_source_contract,
 )
 
 
 class Px6dSessionDatasetTests(unittest.TestCase):
+    def test_force_reference_detection_does_not_treat_blank_as_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            session_dir = Path(temporary_root)
+            descriptor = SessionDescriptor(
+                session_dir=session_dir,
+                session_id="20260803_test",
+                trial_id="1",
+                position_label="P11",
+                qa_status="pass",
+                finding_codes=(),
+            )
+            (session_dir / "frame_summary.csv").write_text(
+                "capture_index,force_fz_n\n1,\n2,\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(session_has_force_reference(descriptor))
+            (session_dir / "frame_summary.csv").write_text(
+                "capture_index,force_fz_n\n1,\n2,0.25\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(session_has_force_reference(descriptor))
+
+    def test_session_prefix_filter_isolates_collection_batch(self) -> None:
+        descriptors = tuple(
+            SessionDescriptor(
+                session_dir=Path(session_id),
+                session_id=session_id,
+                trial_id="1",
+                position_label="P11",
+                qa_status="pass",
+                finding_codes=(),
+            )
+            for session_id in (
+                "20260731_P11_old",
+                "20260803_P11_current",
+            )
+        )
+
+        selected = filter_session_descriptors(
+            descriptors,
+            {"include_session_id_prefixes": ["20260803_"]},
+        )
+
+        self.assertEqual(
+            [descriptor.session_id for descriptor in selected],
+            ["20260803_P11_current"],
+        )
+
     def test_session_loader_sorts_capture_and_point_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_root:
             session_dir = Path(temporary_root)
@@ -58,6 +109,54 @@ class Px6dSessionDatasetTests(unittest.TestCase):
             self.assertTrue(np.array_equal(wavelength, [1540.0, 1541.0]))
             self.assertTrue(
                 np.array_equal(intensity, [[11.0, 12.0], [21.0, 22.0]])
+            )
+
+    def test_recorded_baseline_loader_uses_first_complete_frame_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            session_dir = Path(temporary_root)
+            (session_dir / "spectrum_timeseries.csv").write_text(
+                "capture_index,point_index,baseline_intensity_counts\n"
+                "2,2,902\n"
+                "1,2,102\n"
+                "2,1,901\n"
+                "1,1,101\n",
+                encoding="utf-8",
+            )
+            descriptor = SessionDescriptor(
+                session_dir=session_dir,
+                session_id="20260803_test",
+                trial_id="1",
+                position_label="P11",
+                qa_status="pass",
+                finding_codes=(),
+            )
+
+            baseline = _load_session_recorded_baseline(
+                descriptor, expected_points=2
+            )
+
+            self.assertTrue(np.array_equal(baseline, [101.0, 102.0]))
+
+    def test_recorded_baseline_loader_rejects_zero_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            session_dir = Path(temporary_root)
+            (session_dir / "spectrum_timeseries.csv").write_text(
+                "capture_index,point_index,baseline_intensity_counts\n"
+                "1,1,0\n"
+                "1,2,0\n",
+                encoding="utf-8",
+            )
+            descriptor = SessionDescriptor(
+                session_dir=session_dir,
+                session_id="20260803_test",
+                trial_id="1",
+                position_label="P11",
+                qa_status="pass",
+                finding_codes=(),
+            )
+
+            self.assertIsNone(
+                _load_session_recorded_baseline(descriptor, expected_points=2)
             )
 
     def test_feature_sets_have_expected_shapes(self) -> None:

@@ -1,19 +1,25 @@
-"""Beta runtime adapter for the all-source optical-only ordinary-FBG model."""
+"""Runtime adapter for the deployed optical-only ordinary-FBG model."""
 
 from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import joblib
 import numpy as np
 
-from .dynamic_sequence_dataset import extract_baseline_relative_frame_features
-from .dynamic_shadow_adapter import RuntimeBaselineRecoveryGuard
-from .dynamic_temporal_features import temporal_summary_features
+from .baseline_relative_features import extract_baseline_relative_features
 from .features import PeakWindow, load_peak_windows
+from .runtime_literature_features import (
+    literature_runtime_contact_features,
+    literature_snv_sg_features,
+    response_raw_features,
+)
+from .runtime_baseline_guard import RuntimeBaselineRecoveryGuard
+from .runtime_spectral_features import extract_baseline_relative_frame_features
+from .runtime_temporal_features import temporal_summary_features
 
 
 MODEL_SCHEMA = "ordinary_fbg_optical_only_force_candidate_v2"
@@ -73,6 +79,24 @@ def _set_single_thread(model: Any) -> None:
             model.n_jobs = 1
         except Exception:
             pass
+    for child_name in ("response_model", "normalized_model"):
+        child = getattr(model, child_name, None)
+        if child is not None and child is not model:
+            _set_single_thread(child)
+
+
+def _model_input_feature_count(model: Any) -> int:
+    direct = getattr(model, "n_features_in_", None)
+    if direct is not None:
+        return int(direct)
+    # A Pipeline may begin with a custom transformer that intentionally does
+    # not expose n_features_in_. A fitted downstream sklearn step still carries
+    # the exact input contract for the complete pipeline.
+    for _, step in getattr(model, "steps", ()):
+        count = getattr(step, "n_features_in_", None)
+        if count is not None:
+            return int(count)
+    return -1
 
 
 def _top_probability(
@@ -139,13 +163,30 @@ class AllSourceOpticalForceAdapter:
         )
         self._validate_contract()
 
+        self.classification_model_source = "legacy_all_source_temporal_v1"
+        self.force_model_source = "legacy_all_source_current_frame_v1"
+        self.literature_classification_enabled = False
+        self.literature_force_enabled = False
+        self.literature_static_feature_names: tuple[str, ...] = ()
+        self.literature_bin_count = 64
+        self.literature_temporal_window_frames = 5
+        self.literature_contact_feature_view = "legacy_temporal483"
+        self.literature_position_feature_view = "legacy_temporal483"
+        self.literature_force_feature_view = "legacy_current40"
+        self._configure_literature_guided_classification(
+            bundle.get("literature_guided_classification")
+        )
+
         force_contract = bundle.get("force_calibration_contract", {})
         gate = force_contract.get("optical_contact_gate", {})
-        force_range = force_contract.get("prediction_clip_range_n", (0.0, 5.0))
+        force_range = force_contract.get(
+            "training_range_n",
+            force_contract.get("prediction_clip_range_n", (0.0, 5.0)),
+        )
         self.contact_threshold = float(gate.get("probability_threshold", 0.75))
         self.no_contact_force_n = float(gate.get("no_contact_output_n", 0.0))
         self.force_min_n = float(force_range[0])
-        self.force_max_n = float(force_range[1])
+        self.force_calibrated_max_n = float(force_range[1])
 
         gate_config = dict(runtime_gate_config or {})
         self.runtime_gate_enabled = bool(gate_config.get("enabled", True))
@@ -166,6 +207,33 @@ class AllSourceOpticalForceAdapter:
         )
         self.visual_position_margin_min = float(
             gate_config.get("visual_position_margin_min", 0.015)
+        )
+        self.visual_position_confirm_frames = int(
+            gate_config.get("visual_position_confirm_frames", 2)
+        )
+        self.visual_contact_probability_on = float(
+            gate_config.get("visual_contact_probability_on", 0.35)
+        )
+        self.visual_contact_probability_off = float(
+            gate_config.get("visual_contact_probability_off", 0.20)
+        )
+        self.visual_force_on_n = float(
+            gate_config.get("visual_force_on_n", 0.08)
+        )
+        self.visual_force_off_n = float(
+            gate_config.get("visual_force_off_n", 0.03)
+        )
+        self.visual_force_full_scale_n = float(
+            gate_config.get("visual_force_full_scale_n", 2.5)
+        )
+        self.visual_force_gamma = float(
+            gate_config.get("visual_force_gamma", 0.55)
+        )
+        self.visual_deformation_floor = float(
+            gate_config.get("visual_deformation_floor", 0.12)
+        )
+        self.visual_contact_arm_frames = int(
+            gate_config.get("visual_contact_arm_frames", 2)
         )
         self.position_ema_alpha = float(
             gate_config.get("position_probability_ema_alpha", 0.55)
@@ -210,6 +278,30 @@ class AllSourceOpticalForceAdapter:
             raise ValueError("visual position confidence threshold is invalid")
         if not 0.0 <= self.visual_position_margin_min <= 1.0:
             raise ValueError("visual position margin threshold is invalid")
+        if self.visual_position_confirm_frames < 1:
+            raise ValueError("visual position confirmation frame count is invalid")
+        if not (
+            0.0
+            <= self.visual_contact_probability_off
+            <= self.visual_contact_probability_on
+            <= self.contact_threshold
+        ):
+            raise ValueError("visual contact probability thresholds are invalid")
+        if not (
+            self.force_min_n
+            <= self.visual_force_off_n
+            <= self.visual_force_on_n
+            < self.visual_force_full_scale_n
+        ):
+            raise ValueError("visual force thresholds are invalid")
+        if self.force_calibrated_max_n <= self.force_min_n:
+            raise ValueError("calibrated force range is invalid")
+        if not 0.0 < self.visual_force_gamma <= 1.0:
+            raise ValueError("visual force gamma is invalid")
+        if not 0.0 <= self.visual_deformation_floor < 1.0:
+            raise ValueError("visual deformation floor is invalid")
+        if self.visual_contact_arm_frames < 1:
+            raise ValueError("visual contact arm frame count is invalid")
         if not 0.0 < self.position_ema_alpha <= 1.0:
             raise ValueError("runtime position EMA alpha is invalid")
         if self.position_switch_frames < 1:
@@ -239,18 +331,26 @@ class AllSourceOpticalForceAdapter:
         self.baseline_intensity: np.ndarray | None = None
         self.frame_features: deque[np.ndarray] = deque()
         self.frame_times_sec: deque[float] = deque()
+        self.spectrum_feature_history: deque[np.ndarray] = deque(
+            maxlen=self.literature_temporal_window_frames
+        )
         self._contact_latched = False
+        self._visual_contact_latched = False
+        self._visual_activation_frames = 0
         self._ambiguous_quiet_frames = 0
         self._ambiguous_quiet_started_at_sec: float | None = None
         self._quiet_no_contact_hint = False
         self._near_baseline_quiet_frames = 0
         self._last_activity_timestamp_sec: float | None = None
         self._position_probability_ema: dict[str, float] = {}
+        self._visual_position_probability_ema: dict[str, float] = {}
         self._stable_position_id: str | None = None
         self._stable_position_timestamp_sec: float | None = None
         self._pending_position_id: str | None = None
         self._pending_position_frames = 0
         self._provisional_visual_position_id: str | None = None
+        self._pending_visual_position_id: str | None = None
+        self._pending_visual_position_frames = 0
         self._pending_runtime_baseline_update: dict[str, Any] | None = None
 
     @classmethod
@@ -289,7 +389,7 @@ class AllSourceOpticalForceAdapter:
             selected_names = tuple(str(value) for value in all_names[indices])
             if expected_names != selected_names:
                 raise ValueError(f"{task_name} feature-name contract mismatch")
-            model_count = int(getattr(task["model"], "n_features_in_", -1))
+            model_count = _model_input_feature_count(task["model"])
             if model_count != expected_count:
                 raise ValueError(f"{task_name} model feature count mismatch")
         if not all(
@@ -297,6 +397,96 @@ class AllSourceOpticalForceAdapter:
             for index in self.force_indices
         ):
             raise ValueError("force model must use current-frame last__ features")
+
+    def _configure_literature_guided_classification(
+        self,
+        payload: Any,
+    ) -> None:
+        if payload is None:
+            return
+        if not isinstance(payload, Mapping):
+            raise TypeError("literature-guided classification payload must be a mapping")
+        schema_version = str(payload.get("schema_version") or "")
+        if schema_version not in {
+            "literature_guided_contact_position_v1",
+            "literature_guided_contact_position_force_v2",
+        }:
+            raise ValueError("unsupported literature-guided classification schema")
+
+        names = tuple(str(value) for value in payload["static_feature_names"])
+        if len(names) != 264:
+            raise ValueError("literature-guided static feature contract must contain 264 names")
+        bin_count = int(payload.get("bin_count", 64))
+        temporal_frames = int(payload.get("temporal_window_frames", 5))
+        if bin_count != 64 or temporal_frames < 2:
+            raise ValueError("invalid literature-guided runtime feature configuration")
+
+        contact_payload = payload["contact"]
+        position_payload = payload["position"]
+        contact_model = contact_payload["model"]
+        position_model = position_payload["model"]
+        contact_view = str(contact_payload.get("feature_view") or "")
+        position_view = str(position_payload.get("feature_view") or "")
+
+        if schema_version == "literature_guided_contact_position_v1":
+            expected_contact_view = "literature_snv_sg_temporal488"
+            expected_position_view = "reference_full264"
+            expected_contact_count = 488
+            expected_position_count = 264
+        else:
+            expected_contact_view = "response_raw136"
+            expected_position_view = "response_raw136"
+            expected_contact_count = 136
+            expected_position_count = 136
+        if contact_view not in {expected_contact_view, ""}:
+            raise ValueError("literature-guided contact feature view is invalid")
+        if position_view not in {
+            expected_position_view,
+            "response_raw136+literature_snv_sg328",
+            "",
+        }:
+            raise ValueError("literature-guided position feature view is invalid")
+        if _model_input_feature_count(contact_model) != expected_contact_count:
+            raise ValueError(
+                "literature-guided contact model feature count is invalid"
+            )
+        if _model_input_feature_count(position_model) != expected_position_count:
+            raise ValueError(
+                "literature-guided position model feature count is invalid"
+            )
+
+        self.contact_model = contact_model
+        self.position_model = position_model
+        _set_single_thread(self.contact_model)
+        _set_single_thread(self.position_model)
+        self.literature_static_feature_names = names
+        self.literature_bin_count = bin_count
+        self.literature_temporal_window_frames = temporal_frames
+        self.literature_contact_feature_view = expected_contact_view
+        self.literature_position_feature_view = expected_position_view
+        if schema_version == "literature_guided_contact_position_force_v2":
+            force_payload = payload.get("force_fz")
+            if not isinstance(force_payload, Mapping):
+                raise ValueError("three-date literature payload requires force_fz")
+            force_model = force_payload["model"]
+            force_view = str(force_payload.get("feature_view") or "")
+            if force_view != "literature_snv_sg328":
+                raise ValueError("literature-guided force feature view is invalid")
+            if _model_input_feature_count(force_model) != 328:
+                raise ValueError(
+                    "literature-guided force model must accept 328 features"
+                )
+            self.force_model = force_model
+            _set_single_thread(self.force_model)
+            self.literature_force_feature_view = force_view
+            self.literature_force_enabled = True
+            self.force_model_source = "literature_guided_three_date_osc_ridge_v1"
+            self.classification_model_source = (
+                "literature_guided_three_date_response_raw_v2"
+            )
+        else:
+            self.classification_model_source = "literature_guided_cross_date_v1"
+        self.literature_classification_enabled = True
 
     def clear(self) -> None:
         self.baseline_wavelength_nm = None
@@ -309,6 +499,7 @@ class AllSourceOpticalForceAdapter:
     def _clear_temporal_history(self) -> None:
         self.frame_features.clear()
         self.frame_times_sec.clear()
+        self.spectrum_feature_history.clear()
 
     def clear_history(self) -> None:
         self._clear_temporal_history()
@@ -338,17 +529,22 @@ class AllSourceOpticalForceAdapter:
 
     def _reset_decision_state(self) -> None:
         self._contact_latched = False
+        self._visual_contact_latched = False
+        self._visual_activation_frames = 0
         self._ambiguous_quiet_frames = 0
         self._ambiguous_quiet_started_at_sec = None
         self._quiet_no_contact_hint = False
         self._near_baseline_quiet_frames = 0
         self._last_activity_timestamp_sec = None
         self._position_probability_ema.clear()
+        self._visual_position_probability_ema.clear()
         self._stable_position_id = None
         self._stable_position_timestamp_sec = None
         self._pending_position_id = None
         self._pending_position_frames = 0
         self._provisional_visual_position_id = None
+        self._pending_visual_position_id = None
+        self._pending_visual_position_frames = 0
 
     def set_baseline(
         self,
@@ -386,6 +582,28 @@ class AllSourceOpticalForceAdapter:
             label: float(value / total) for label, value in smoothed.items()
         }
         return dict(self._position_probability_ema)
+
+    def _smoothed_visual_position_probabilities(
+        self,
+        probabilities: dict[str, float],
+    ) -> dict[str, float]:
+        if not probabilities:
+            return {}
+        alpha = self.position_ema_alpha
+        if not self._visual_position_probability_ema:
+            smoothed = dict(probabilities)
+        else:
+            smoothed = {
+                label: alpha * float(probability)
+                + (1.0 - alpha)
+                * float(self._visual_position_probability_ema.get(label, 0.0))
+                for label, probability in probabilities.items()
+            }
+        total = max(sum(smoothed.values()), 1.0e-12)
+        self._visual_position_probability_ema = {
+            label: float(value / total) for label, value in smoothed.items()
+        }
+        return dict(self._visual_position_probability_ema)
 
     def _spectrum_on_baseline_grid(
         self,
@@ -441,14 +659,22 @@ class AllSourceOpticalForceAdapter:
     def _surface_proxy(
         self,
         position_id: str | None,
-        estimated_force_n: float,
-        contact_active: bool,
+        drive_force_n: float,
+        visual_active: bool,
+        *,
+        semantic_contact_active: bool,
     ) -> dict[str, Any]:
-        if not contact_active or position_id not in POSITION_COORDINATES:
+        if not visual_active or position_id not in POSITION_COORDINATES:
             grid = [[0.0, 0.0, 0.0] for _ in range(3)]
             return {
                 "active": False,
+                "visual_active": False,
+                "semantic_contact_active": bool(semantic_contact_active),
                 "position_id": None,
+                "drive_force_n": 0.0,
+                "drive_ratio": 0.0,
+                "drive_full_scale_n": self.visual_force_full_scale_n,
+                "drive_source": "none",
                 "deformation_proxy": 0.0,
                 "surface_grid": grid,
                 "surface_metrics": {
@@ -465,16 +691,25 @@ class AllSourceOpticalForceAdapter:
 
         force_ratio = float(
             np.clip(
-                (estimated_force_n - self.force_min_n)
-                / max(self.force_max_n - self.force_min_n, 1.0e-9),
+                (drive_force_n - self.visual_force_off_n)
+                / max(
+                    self.visual_force_full_scale_n - self.visual_force_off_n,
+                    1.0e-9,
+                ),
                 0.0,
                 1.0,
             )
         )
         deformation = float(
-            np.clip(0.10 + 0.90 * force_ratio**0.65, 0.0, 1.0)
+            np.clip(
+                self.visual_deformation_floor
+                + (1.0 - self.visual_deformation_floor)
+                * force_ratio**self.visual_force_gamma,
+                0.0,
+                1.0,
+            )
         )
-        sigma = 0.68 + 0.18 * np.sqrt(force_ratio)
+        sigma = 0.68 + 0.20 * np.sqrt(force_ratio)
         center_x, center_y = POSITION_COORDINATES[position_id]
         values: dict[str, float] = {}
         for channel_id, (x_value, y_value) in POSITION_COORDINATES.items():
@@ -507,7 +742,17 @@ class AllSourceOpticalForceAdapter:
         )
         return {
             "active": True,
+            "visual_active": True,
+            "semantic_contact_active": bool(semantic_contact_active),
             "position_id": position_id,
+            "drive_force_n": float(drive_force_n),
+            "drive_ratio": force_ratio,
+            "drive_full_scale_n": self.visual_force_full_scale_n,
+            "drive_source": (
+                "semantic_contact_continuous_optical_force"
+                if semantic_contact_active
+                else "low_force_visual_gate"
+            ),
             "deformation_proxy": deformation,
             "surface_grid": grid,
             "surface_metrics": {
@@ -558,6 +803,20 @@ class AllSourceOpticalForceAdapter:
             if tuple(frame_names) != expected_last_names:
                 raise ValueError("single-frame feature-name contract mismatch")
 
+            strict_feature_row: np.ndarray | None = None
+            if self.literature_classification_enabled:
+                strict_matrix, strict_names, _ = extract_baseline_relative_features(
+                    current[None, :],
+                    self.baseline_intensity,
+                    self.baseline_wavelength_nm,
+                    bin_count=self.literature_bin_count,
+                )
+                if tuple(strict_names) != self.literature_static_feature_names:
+                    raise ValueError(
+                        "literature-guided static feature-name contract mismatch"
+                    )
+                strict_feature_row = strict_matrix[0].astype(np.float32)
+
             timestamp = (
                 float(source_timestamp_sec)
                 if source_timestamp_sec is not None
@@ -574,6 +833,8 @@ class AllSourceOpticalForceAdapter:
                 self.clear_history()
             self.frame_features.append(frame_matrix[0].astype(np.float32))
             self.frame_times_sec.append(timestamp)
+            if strict_feature_row is not None:
+                self.spectrum_feature_history.append(strict_feature_row)
             while (
                 len(self.frame_times_sec) > 1
                 and timestamp - self.frame_times_sec[0] > self.window_seconds
@@ -585,8 +846,43 @@ class AllSourceOpticalForceAdapter:
                 self._temporal_features()
             )
             row = temporal[None, :]
+            if self.literature_classification_enabled:
+                if strict_feature_row is None or not self.spectrum_feature_history:
+                    raise RuntimeError("literature-guided feature history is unavailable")
+                strict_input = strict_feature_row[None, :]
+                if (
+                    self.literature_contact_feature_view
+                    == "literature_snv_sg_temporal488"
+                ):
+                    contact_input = literature_runtime_contact_features(
+                        np.asarray(
+                            self.spectrum_feature_history,
+                            dtype=np.float32,
+                        ),
+                        temporal_window_frames=(
+                            self.literature_temporal_window_frames
+                        ),
+                    )
+                elif self.literature_contact_feature_view == "response_raw136":
+                    contact_input = response_raw_features(strict_input)
+                else:  # pragma: no cover - guarded at bundle load time
+                    raise RuntimeError(
+                        "unsupported literature-guided contact feature view"
+                    )
+
+                if self.literature_position_feature_view == "reference_full264":
+                    position_input = strict_input
+                elif self.literature_position_feature_view == "response_raw136":
+                    position_input = response_raw_features(strict_input)
+                else:  # pragma: no cover - guarded at bundle load time
+                    raise RuntimeError(
+                        "unsupported literature-guided position feature view"
+                    )
+            else:
+                contact_input = row[:, self.contact_indices]
+                position_input = row[:, self.position_indices]
             contact_probabilities = _class_probabilities(
-                self.contact_model, row[:, self.contact_indices]
+                self.contact_model, contact_input
             )
             contact_probability = float(
                 contact_probabilities.get("contact", 0.0)
@@ -597,7 +893,7 @@ class AllSourceOpticalForceAdapter:
             )
 
             raw_position_probabilities = _class_probabilities(
-                self.position_model, row[:, self.position_indices]
+                self.position_model, position_input
             )
             if raw_position_probabilities:
                 (
@@ -608,7 +904,7 @@ class AllSourceOpticalForceAdapter:
             else:
                 raw_position_id = str(
                     self.position_model.predict(
-                        row[:, self.position_indices]
+                        position_input
                     )[0]
                 )
                 raw_position_confidence = 1.0
@@ -766,6 +1062,113 @@ class AllSourceOpticalForceAdapter:
             contact_active = bool(self._contact_latched)
             contact_label = "contact" if contact_active else "no_contact"
 
+            if self.literature_force_enabled:
+                if strict_feature_row is None:
+                    raise RuntimeError(
+                        "literature-guided force feature row is unavailable"
+                    )
+                force_input = literature_snv_sg_features(
+                    strict_feature_row[None, :]
+                )
+            else:
+                force_input = row[:, self.force_indices]
+            raw_force_n = float(self.force_model.predict(force_input)[0])
+            if not np.isfinite(raw_force_n):
+                raise RuntimeError("force model returned a non-finite estimate")
+            # Compression force cannot be negative, but there is intentionally no
+            # software upper clip. The training range is reported separately so
+            # callers can distinguish measured-range estimates from extrapolation.
+            raw_force_n = float(max(self.force_min_n, raw_force_n))
+            force_range_status = (
+                "above_calibrated_range"
+                if raw_force_n > self.force_calibrated_max_n
+                else "within_calibrated_range"
+            )
+
+            visual_position_probabilities = (
+                self._smoothed_visual_position_probabilities(
+                    raw_position_probabilities
+                )
+                if raw_position_probabilities
+                else {}
+            )
+            (
+                visual_candidate_id,
+                visual_candidate_confidence,
+                visual_candidate_margin,
+            ) = _top_probability(visual_position_probabilities)
+            visual_candidate_credible = bool(
+                visual_candidate_id in POSITION_COORDINATES
+                and visual_candidate_confidence
+                >= self.visual_position_confidence_min
+                and visual_candidate_margin
+                >= self.visual_position_margin_min
+            )
+            visual_signal_evidence = bool(
+                fresh_activity
+                or activity_recent
+                or (
+                    slow_baseline_departure
+                    and visual_candidate_credible
+                )
+            )
+            visual_activation_evidence = bool(
+                visual_candidate_credible
+                and contact_probability
+                >= self.visual_contact_probability_on
+                and raw_force_n >= self.visual_force_on_n
+                and (
+                    baseline_separated
+                    or not self.require_baseline_separation
+                )
+                and visual_signal_evidence
+                and not bool(recovery.get("suppress_contact"))
+            )
+            if not self.runtime_gate_enabled:
+                self._visual_contact_latched = bool(
+                    contact_active or visual_activation_evidence
+                )
+                self._visual_activation_frames = int(
+                    self._visual_contact_latched
+                )
+            elif recovered_baseline is not None:
+                self._visual_contact_latched = False
+                self._visual_activation_frames = 0
+            elif contact_active:
+                self._visual_contact_latched = True
+                self._visual_activation_frames = self.visual_contact_arm_frames
+            elif visual_activation_evidence:
+                self._visual_activation_frames = min(
+                    self.visual_contact_arm_frames,
+                    self._visual_activation_frames + 1,
+                )
+                if (
+                    self._visual_activation_frames
+                    >= self.visual_contact_arm_frames
+                ):
+                    self._visual_contact_latched = True
+            else:
+                self._visual_activation_frames = 0
+                if (
+                    near_runtime_baseline
+                    or bool(recovery.get("suppress_contact"))
+                    or ambiguous_quiet_release
+                    or not baseline_separated
+                    or (
+                        not activity_recent
+                        and not slow_baseline_departure
+                    )
+                    or (
+                        contact_probability
+                        <= self.visual_contact_probability_off
+                        and raw_force_n <= self.visual_force_off_n
+                    )
+                ):
+                    self._visual_contact_latched = False
+            visual_contact_active = bool(
+                contact_active or self._visual_contact_latched
+            )
+
             position_probabilities: dict[str, float] = {}
             position_id: str | None = None
             position_confidence = 0.0
@@ -787,11 +1190,10 @@ class AllSourceOpticalForceAdapter:
                     and candidate_position_margin >= self.position_margin_min
                 )
                 if candidate_credible:
-                    switching_position = bool(
-                        self._stable_position_id in POSITION_COORDINATES
-                        and candidate_position_id != self._stable_position_id
+                    candidate_is_stable = bool(
+                        candidate_position_id == self._stable_position_id
                     )
-                    if switching_position:
+                    if not candidate_is_stable:
                         if self._pending_position_id == candidate_position_id:
                             self._pending_position_frames += 1
                         else:
@@ -806,9 +1208,10 @@ class AllSourceOpticalForceAdapter:
                             self._pending_position_id = None
                             self._pending_position_frames = 0
                         else:
-                            position_held = True
+                            position_held = bool(
+                                self._stable_position_id in POSITION_COORDINATES
+                            )
                     else:
-                        self._stable_position_id = candidate_position_id
                         self._stable_position_timestamp_sec = timestamp
                         self._pending_position_id = None
                         self._pending_position_frames = 0
@@ -865,62 +1268,64 @@ class AllSourceOpticalForceAdapter:
                 self._stable_position_timestamp_sec = None
                 self._pending_position_id = None
                 self._pending_position_frames = 0
+            if not visual_contact_active and not visual_activation_evidence:
                 self._provisional_visual_position_id = None
+                self._pending_visual_position_id = None
+                self._pending_visual_position_frames = 0
+                self._visual_position_probability_ema.clear()
+
+            if position_id in POSITION_COORDINATES:
+                self._provisional_visual_position_id = position_id
+                self._pending_visual_position_id = None
+                self._pending_visual_position_frames = 0
+            elif (
+                self.visual_position_fallback_enabled
+                and visual_candidate_credible
+                and (contact_active or visual_activation_evidence)
+            ):
+                if visual_candidate_id == self._provisional_visual_position_id:
+                    self._pending_visual_position_id = None
+                    self._pending_visual_position_frames = 0
+                else:
+                    if self._pending_visual_position_id == visual_candidate_id:
+                        self._pending_visual_position_frames += 1
+                    else:
+                        self._pending_visual_position_id = visual_candidate_id
+                        self._pending_visual_position_frames = 1
+                    if (
+                        self._pending_visual_position_frames
+                        >= self.visual_position_confirm_frames
+                    ):
+                        self._provisional_visual_position_id = visual_candidate_id
+                        self._pending_visual_position_id = None
+                        self._pending_visual_position_frames = 0
 
             visual_position_id = position_id
             visual_position_confidence = position_confidence
             visual_position_margin = position_margin
             visual_position_provisional = False
             if (
-                contact_active
+                visual_contact_active
                 and visual_position_id is None
                 and self.visual_position_fallback_enabled
-                and position_probabilities
+                and visual_position_probabilities
             ):
-                (
-                    visual_candidate_id,
-                    visual_candidate_confidence,
-                    visual_candidate_margin,
-                ) = _top_probability(position_probabilities)
-                if (
-                    visual_candidate_id in POSITION_COORDINATES
-                    and visual_candidate_confidence
-                    >= self.visual_position_confidence_min
-                    and visual_candidate_margin
-                    >= self.visual_position_margin_min
-                ):
-                    # Establish a provisional location only around a real
-                    # spectral change. During a quiet ambiguous hold, keep the
-                    # last location instead of following classifier jitter.
-                    if self._provisional_visual_position_id is None:
-                        if fresh_activity or activity_recent:
-                            self._provisional_visual_position_id = (
-                                visual_candidate_id
-                            )
-                    elif (
-                        fresh_activity
-                        and visual_candidate_id
-                        != self._provisional_visual_position_id
-                    ):
-                        self._provisional_visual_position_id = (
-                            visual_candidate_id
-                        )
-                # Once established from a real spectral change, keep the
-                # provisional location through quiet low-confidence frames.
-                # Current-frame jitter may lower the stored location's score,
-                # but it must not erase or move the visible contact patch.
                 if (
                     self._provisional_visual_position_id
                     in POSITION_COORDINATES
                 ):
                     visual_position_id = self._provisional_visual_position_id
                     visual_position_confidence = float(
-                        position_probabilities.get(visual_position_id, 0.0)
+                        visual_position_probabilities.get(
+                            visual_position_id, 0.0
+                        )
                     )
                     competing = max(
                         (
                             value
-                            for label, value in position_probabilities.items()
+                            for label, value in (
+                                visual_position_probabilities.items()
+                            )
                             if label != visual_position_id
                         ),
                         default=0.0,
@@ -930,23 +1335,29 @@ class AllSourceOpticalForceAdapter:
                     )
                     visual_position_provisional = True
 
-            raw_force_n = float(
-                self.force_model.predict(row[:, self.force_indices])[0]
-            )
-            raw_force_n = float(
-                np.clip(raw_force_n, self.force_min_n, self.force_max_n)
-            )
             estimated_force_n = (
                 raw_force_n if contact_active else self.no_contact_force_n
             )
+            visual_drive_force_n = (
+                raw_force_n
+                if visual_contact_active
+                else self.no_contact_force_n
+            )
             twin = self._surface_proxy(
-                visual_position_id, estimated_force_n, contact_active
+                visual_position_id,
+                visual_drive_force_n,
+                visual_contact_active,
+                semantic_contact_active=contact_active,
             )
             twin["position_source"] = (
                 "formal_position"
                 if position_id is not None
                 else (
-                    "provisional_low_confidence_position"
+                    (
+                        "provisional_low_force_visual_position"
+                        if not contact_active
+                        else "provisional_low_confidence_position"
+                    )
                     if visual_position_provisional
                     else "none"
                 )
@@ -970,6 +1381,8 @@ class AllSourceOpticalForceAdapter:
                 "status": "ready",
                 "schema_version": MODEL_SCHEMA,
                 "recognition_source": "ordinary_fbg_all_data_beta_v1",
+                "classification_model_source": self.classification_model_source,
+                "force_model_source": self.force_model_source,
                 "runtime_input": "optical_spectrum_time_series",
                 "force_sensor_is_runtime_input": False,
                 "contact": {
@@ -1005,19 +1418,35 @@ class AllSourceOpticalForceAdapter:
                         self.visual_position_confidence_min
                     ),
                     "visual_margin_threshold": self.visual_position_margin_min,
+                    "visual_confirm_frames": self.visual_position_confirm_frames,
+                    "visual_active": visual_contact_active,
                 },
                 "estimated_force_fz_n": float(estimated_force_n),
+                "continuous_force_fz_n": float(raw_force_n),
                 "force_fz": {
                     "estimated_n": float(estimated_force_n),
+                    "continuous_estimated_n": float(raw_force_n),
+                    "visual_drive_n": float(visual_drive_force_n),
                     "raw_estimated_n": raw_force_n,
                     "unit": "N",
                     "gated": not contact_active,
+                    "continuous_trace_before_contact_gate": True,
                     "clip_range_n": [
                         self.force_min_n,
-                        self.force_max_n,
+                        None,
                     ],
+                    "calibrated_range_n": [
+                        self.force_min_n,
+                        self.force_calibrated_max_n,
+                    ],
+                    "upper_limit_applied": False,
+                    "range_status": force_range_status,
+                    "outside_calibrated_range": (
+                        force_range_status == "above_calibrated_range"
+                    ),
                     "runtime_input": "optical_spectrum_time_series",
                     "calibration_supervision": "PX6D Fz",
+                    "model_source": self.force_model_source,
                 },
                 "digital_twin": twin,
                 "uncertainty": {
@@ -1028,6 +1457,26 @@ class AllSourceOpticalForceAdapter:
                     "enabled": self.runtime_gate_enabled,
                     "raw_contact_active": raw_contact_active,
                     "contact_latched": contact_active,
+                    "visual_contact_active": visual_contact_active,
+                    "visual_contact_latched": self._visual_contact_latched,
+                    "visual_contact_arm_frames": self.visual_contact_arm_frames,
+                    "visual_activation_frames": self._visual_activation_frames,
+                    "visual_activation_evidence": (
+                        visual_activation_evidence
+                    ),
+                    "visual_signal_evidence": visual_signal_evidence,
+                    "visual_position_credible": visual_candidate_credible,
+                    "visual_contact_probability_on": (
+                        self.visual_contact_probability_on
+                    ),
+                    "visual_contact_probability_off": (
+                        self.visual_contact_probability_off
+                    ),
+                    "visual_force_on_n": self.visual_force_on_n,
+                    "visual_force_off_n": self.visual_force_off_n,
+                    "visual_force_full_scale_n": (
+                        self.visual_force_full_scale_n
+                    ),
                     "spatially_credible": spatially_credible,
                     "fresh_spectral_activity": fresh_activity,
                     "spectral_activity_recent": activity_recent,
@@ -1058,6 +1507,18 @@ class AllSourceOpticalForceAdapter:
                     "position_switch_frames": self.position_switch_frames,
                     "pending_position_id": self._pending_position_id,
                     "pending_position_frames": self._pending_position_frames,
+                    "visual_position_confirm_frames": (
+                        self.visual_position_confirm_frames
+                    ),
+                    "provisional_visual_position_id": (
+                        self._provisional_visual_position_id
+                    ),
+                    "pending_visual_position_id": (
+                        self._pending_visual_position_id
+                    ),
+                    "pending_visual_position_frames": (
+                        self._pending_visual_position_frames
+                    ),
                     "shape_motion_rms": shape_motion_rms,
                     "common_gain_motion": common_gain_motion,
                     "runtime_reference_reanchored": bool(
@@ -1067,6 +1528,7 @@ class AllSourceOpticalForceAdapter:
                     "policy": (
                         "model_probability_plus_baseline_separation_plus_"
                         "spectral_change_or_high_confidence_spatial_fingerprint_"
+                        "plus_multiframe_contact_and_position_confirmation_"
                         "plus_timed_quiet_ambiguous_release"
                     ),
                 },

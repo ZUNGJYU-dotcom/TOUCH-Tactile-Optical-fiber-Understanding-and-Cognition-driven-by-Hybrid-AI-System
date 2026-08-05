@@ -46,34 +46,29 @@ def test_desktop_window_uses_light_frameless_chrome() -> None:
     assert "webview.start(finish_startup, debug=False)" in launcher
 
 
-def test_frozen_beta_marker_is_read_from_executable_or_bundle_root() -> None:
+def test_frozen_beta_bundle_carries_only_the_current_runtime_model() -> None:
     launcher = (APP_ROOT / "desktop_launcher.py").read_text(encoding="utf-8")
     beta_spec = (APP_ROOT / "desktop_launcher_beta_all_data.spec").read_text(
         encoding="utf-8"
     )
 
-    helper = launcher.split("def beta_all_data_runtime_requested", 1)[1].split(
-        "def bundle_root", 1
-    )[0]
-    assert "Path(sys.executable).resolve().parent" in helper
-    assert 'getattr(sys, "_MEIPASS"' in helper
-    assert "any(marker.is_file() for marker in marker_locations)" in helper
-    assert 'beta_all_data_runtime.flag"), "."' in beta_spec
+    assert "ordinary_fbg_current_runtime.joblib" in beta_spec
+    assert 'release_manifests" / "beta" / "VERSION.json"' in beta_spec
+    assert "ordinary_fbg_optical_only_force_candidate.joblib" not in beta_spec
+    assert "beta_all_data_runtime.flag" not in beta_spec
+    assert 'EXPECTED_BACKEND_APP = "TOUCH"' in launcher
+    assert 'EXPECTED_BACKEND_MODE = "standalone_touch_all_data_spectral_runtime"' in launcher
+    assert 'EXPECTED_BACKEND_CONTRACT_VERSION = "touch_current_runtime_api_v1"' in launcher
+    assert 'EXPECTED_RUNTIME_MODEL = "ordinary_fbg_all_data_beta_v1"' in launcher
 
 
-def test_stable_package_promotes_the_latest_model_runtime() -> None:
-    launcher = (APP_ROOT / "desktop_launcher.py").read_text(encoding="utf-8")
+def test_stable_package_remains_a_separate_release_channel() -> None:
     stable_spec = (APP_ROOT / "desktop_launcher_stable_latest.spec").read_text(
         encoding="utf-8"
     )
 
-    helper = launcher.split("def beta_all_data_runtime_requested", 1)[1].split(
-        "def bundle_root", 1
-    )[0]
-    assert "TOUCH_LATEST_ALL_DATA_MODEL" in helper
-    assert "LATEST_RUNTIME_FLAG_FILENAME" in helper
-    assert 'latest_all_data_runtime.flag"), "."' in stable_spec
     assert 'release_manifests" / "stable" / "VERSION.json"' in stable_spec
+    assert 'release_manifests" / "beta" / "VERSION.json"' not in stable_spec
 
 
 def test_borderless_window_restores_native_taskbar_toggle_contract() -> None:

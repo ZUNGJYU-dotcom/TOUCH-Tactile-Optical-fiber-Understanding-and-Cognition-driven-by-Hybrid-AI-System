@@ -1,4 +1,4 @@
-"""Desktop launcher for the TOUCH temporal spectral validation twin."""
+"""Desktop launcher for the deployed TOUCH optical runtime."""
 
 from __future__ import annotations
 
@@ -28,13 +28,10 @@ APP_EXPANDED_TITLE = (
 )
 DEFAULT_PORT = 8640
 FALLBACK_PORT_COUNT = 10
-EXPECTED_BACKEND_APP = "TOUCH System Trained Static Spectrum Twin"
-EXPECTED_BACKEND_MODE = "standalone_bayspec_trained_static_spectrum_twin"
-EXPECTED_BACKEND_CONTRACT_VERSION = "trained_static_spectrum_api_v2"
-EXPECTED_OPERATOR_RECOGNITION = "dynamic_temporal_v3_validation"
-EXPECTED_BETA_OPERATOR_RECOGNITION = "ordinary_fbg_all_data_beta_v1"
-BETA_RUNTIME_FLAG_FILENAME = "beta_all_data_runtime.flag"
-LATEST_RUNTIME_FLAG_FILENAME = "latest_all_data_runtime.flag"
+EXPECTED_BACKEND_APP = "TOUCH"
+EXPECTED_BACKEND_MODE = "standalone_touch_all_data_spectral_runtime"
+EXPECTED_BACKEND_CONTRACT_VERSION = "touch_current_runtime_api_v1"
+EXPECTED_RUNTIME_MODEL = "ordinary_fbg_all_data_beta_v1"
 
 GWL_STYLE = -16
 WS_SYSMENU = 0x00080000
@@ -449,30 +446,6 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
-def beta_all_data_runtime_requested() -> bool:
-    explicit_values = (
-        os.environ.get("TOUCH_LATEST_ALL_DATA_MODEL", ""),
-        os.environ.get("TOUCH_BETA_ALL_DATA_MODEL", ""),
-    )
-    if any(
-        str(value).strip().lower() in {"1", "true", "yes", "on"}
-        for value in explicit_values
-    ):
-        return True
-    if not is_frozen():
-        return False
-    marker_roots = (
-        Path(sys.executable).resolve().parent,
-        Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)).resolve(),
-    )
-    marker_locations = [
-        root / filename
-        for root in marker_roots
-        for filename in (LATEST_RUNTIME_FLAG_FILENAME, BETA_RUNTIME_FLAG_FILENAME)
-    ]
-    return any(marker.is_file() for marker in marker_locations)
-
-
 def bundle_root() -> Path:
     if is_frozen():
         return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)).resolve()
@@ -482,7 +455,7 @@ def bundle_root() -> Path:
 def log_path() -> Path:
     base = (
         Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
-        / "TouchSystemTrainedStaticSpectrumTwin"
+        / "TOUCH"
         / "logs"
     )
     base.mkdir(parents=True, exist_ok=True)
@@ -577,11 +550,6 @@ def show_error(title: str, message: str) -> None:
 
 def configure_runtime_paths() -> Path:
     app_root = bundle_root()
-    if beta_all_data_runtime_requested():
-        os.environ["TOUCH_LATEST_ALL_DATA_MODEL"] = "true"
-        # Legacy environment name remains available to the current backend
-        # contract and previously built Beta packages.
-        os.environ["TOUCH_BETA_ALL_DATA_MODEL"] = "true"
     os.environ["BAYSPEC_WAVELENGTH_APP_ROOT"] = str(app_root)
     if is_frozen():
         # Keep experiment evidence outside the replaceable application bundle.
@@ -673,23 +641,17 @@ def health_payload_is_expected(payload: object) -> bool:
     )
     if not common_contract:
         return False
-    if beta_all_data_runtime_requested():
-        beta_model = payload.get("all_source_beta_model", {})
-        return bool(
-            payload.get("all_source_beta_primary") is True
-            and payload.get("default_operator_recognition")
-            == EXPECTED_BETA_OPERATOR_RECOGNITION
-            and payload.get("dynamic_temporal_validation_primary") is False
-            and payload.get("static_spectral_fallback_available") is False
-            and payload.get("old_model_fallback_enabled") is False
-            and isinstance(beta_model, dict)
-            and beta_model.get("loaded") is True
-            and beta_model.get("old_model_fallback_enabled") is False
-        )
+    runtime_model = payload.get("runtime_model", {})
+    recognition_runtime = payload.get("recognition_runtime", {})
     return bool(
-        payload.get("dynamic_temporal_validation_primary") is True
-        and payload.get("default_operator_recognition")
-        == EXPECTED_OPERATOR_RECOGNITION
+        payload.get("default_operator_recognition") == EXPECTED_RUNTIME_MODEL
+        and isinstance(runtime_model, dict)
+        and runtime_model.get("loaded") is True
+        and runtime_model.get("runtime_role") == "deployed_current_model_only"
+        and isinstance(recognition_runtime, dict)
+        and recognition_runtime.get("active_model_id") == EXPECTED_RUNTIME_MODEL
+        and recognition_runtime.get("switchable") is False
+        and recognition_runtime.get("model_count") == 1
     )
 
 
@@ -702,7 +664,6 @@ def run_self_test() -> int:
     checks: dict[str, object] = {
         "app_root": str(app_root),
         "frozen": is_frozen(),
-        "beta_all_data_runtime": beta_all_data_runtime_requested(),
         "frontend_index": (app_root / "frontend" / "index.html").is_file(),
         "frontend_javascript": (app_root / "frontend" / "app.js").is_file(),
         "sdk_helper": (app_root / "sdk_probe" / "BaySpecSdkStream.exe").is_file(),
@@ -715,26 +676,17 @@ def run_self_test() -> int:
 
         payload = health()
         checks["backend_contract"] = health_payload_is_expected(payload)
-        if beta_all_data_runtime_requested():
-            beta_model = payload.get("all_source_beta_model", {})
-            checks["beta_latest_model_loaded"] = bool(beta_model.get("loaded"))
-            checks["old_model_fallback_disabled"] = bool(
-                payload.get("old_model_fallback_enabled") is False
-                and payload.get("static_spectral_fallback_available") is False
-                and payload.get("dynamic_temporal_validation_primary") is False
-            )
-        else:
-            checks["static_model_loaded"] = bool(
-                payload.get("trained_static_spectral_model", {}).get("loaded")
-            )
-            checks["dynamic_model_loaded"] = bool(
-                payload.get("dynamic_temporal_shadow", {}).get("loaded")
-            )
+        runtime_model = payload.get("runtime_model", {})
+        checks["current_runtime_model_loaded"] = bool(runtime_model.get("loaded"))
+        recognition_runtime = payload.get("recognition_runtime", {})
+        checks["single_runtime_model_contract"] = bool(
+            runtime_model.get("runtime_role") == "deployed_current_model_only"
+            and recognition_runtime.get("model_count") == 1
+            and recognition_runtime.get("switchable") is False
+        )
     except Exception as exc:
         checks["backend_import_error"] = f"{type(exc).__name__}: {exc}"
     ignored_check_keys = {"app_root", "frozen"}
-    if not beta_all_data_runtime_requested():
-        ignored_check_keys.add("beta_all_data_runtime")
     ok = all(
         value is True
         for key, value in checks.items()
@@ -993,7 +945,7 @@ def main() -> int:
                     f"starting isolated backend on fallback port {port}"
                 )
         else:
-            write_log(f"Reusing existing TOUCH temporal backend on port {port}")
+            write_log(f"Reusing existing TOUCH current backend on port {port}")
 
         desktop_api = DesktopApi(initially_maximized=False)
         window = webview.create_window(

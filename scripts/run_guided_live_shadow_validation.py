@@ -236,7 +236,7 @@ def main() -> int:
         timeout_sec=args.baseline_timeout_sec,
     )
     metadata["baseline_status"] = baseline_result.get(
-        "static_model_spectrum_baseline", {}
+        "current_runtime_spectrum_baseline", {}
     ).get("status")
     print(f"Baseline accepted: {metadata['baseline_status']}")
 

@@ -99,6 +99,11 @@ def main() -> int:
         for group, folds in formal_group_folds.items()
         if len(folds) != 1
     }
+    expected_formal_group_count = int(
+        config.get("evaluation", {}).get(
+            "expected_formal_group_count", len(formal_group_folds)
+        )
+    )
     inference_checks: dict[str, Any] = {}
     smoke_indices = np.arange(min(8, len(arrays.features)), dtype=int)
     for task, task_bundle in bundle["tasks"].items():
@@ -136,6 +141,7 @@ def main() -> int:
             )
         ),
         "formal_group_count": len(formal_group_folds),
+        "expected_formal_group_count": expected_formal_group_count,
         "formal_group_multi_fold_count": len(multi_fold_groups),
         "split_group_overlap_count": int(
             split_audit["group_overlap_count"].sum()
@@ -191,7 +197,8 @@ def main() -> int:
         checks["feature_matrix_finite"]
         and checks["forbidden_force_input_feature_count"] == 0
         and checks["force_mask_out_of_range_count"] == 0
-        and checks["formal_group_count"] == 50
+        and checks["formal_group_count"]
+        == checks["expected_formal_group_count"]
         and checks["formal_group_multi_fold_count"] == 0
         and checks["split_group_overlap_count"] == 0
         and checks["blind_source_training_sample_count"] == 0

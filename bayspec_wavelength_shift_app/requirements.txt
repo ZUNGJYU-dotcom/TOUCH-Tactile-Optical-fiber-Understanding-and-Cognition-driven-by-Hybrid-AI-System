@@ -10,3 +10,5 @@ numpy==2.3.1
 scipy==1.16.0
 scikit-learn==1.7.1
 joblib==1.5.1
+# The 2026-08-04 all-data Beta contact detector is serialized with LightGBM.
+lightgbm==4.6.0

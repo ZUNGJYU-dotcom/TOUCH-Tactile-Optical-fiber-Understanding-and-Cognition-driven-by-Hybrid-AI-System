@@ -28,21 +28,13 @@ class ResponseBandThresholdContractTests(unittest.TestCase):
         self.assertIn("noContactMax: 0.25", frontend)
         self.assertIn("smallMax: 0.80", frontend)
         self.assertIn("moderateMax: 0.90", frontend)
-        self.assertIn(
-            "0.5 * (RESPONSE_BAND_THRESHOLDS.noContactMax + RESPONSE_BAND_THRESHOLDS.smallMax)",
-            frontend,
-        )
-        self.assertIn(
-            "0.5 * (RESPONSE_BAND_THRESHOLDS.smallMax + RESPONSE_BAND_THRESHOLDS.moderateMax)",
-            frontend,
-        )
-
-        self.assertIn("Continuous normalized optical response from 0% to 100%", frontend)
-        self.assertIn("<span>0%</span>", html)
-        self.assertIn("<span>25%</span>", html)
-        self.assertIn("<span>50%</span>", html)
-        self.assertIn("<span>75%</span>", html)
-        self.assertIn("<span>100%</span>", html)
+        self.assertIn("function opticalForceAxisStep(maximumN)", frontend)
+        self.assertIn("function updateOpticalForceDisplayMaximum(valueN)", frontend)
+        self.assertIn('"Optical Fz estimate (N)"', frontend)
+        self.assertIn('"continuous_optical_force_n"', frontend)
+        self.assertIn('trace_response_semantics: "canonical_operator_display_force_n"', frontend)
+        self.assertIn("continuous_optical_fz_no_fixed_upper_limit", backend)
+        self.assertIn("upper_limit_applied", backend)
         self.assertIn("#dfeef4 0%", styles)
         self.assertIn("#c8665f 100%", styles)
         self.assertNotIn("var(--response-no-contact-end", styles)

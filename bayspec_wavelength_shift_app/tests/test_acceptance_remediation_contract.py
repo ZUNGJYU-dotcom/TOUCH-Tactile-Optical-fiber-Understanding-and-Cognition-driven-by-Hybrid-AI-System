@@ -20,6 +20,7 @@ class AcceptanceRemediationContractTests(unittest.TestCase):
         cls.backend = (APP_ROOT / "backend" / "main.py").read_text(
             encoding="utf-8"
         )
+        cls.bridge = (APP_ROOT / "bridge.py").read_text(encoding="utf-8")
         cls.force_capture = (
             APP_ROOT / "backend" / "optical_force_capture.py"
         ).read_text(encoding="utf-8")
@@ -104,23 +105,33 @@ class AcceptanceRemediationContractTests(unittest.TestCase):
         )
         self.assertIn("shared response proxy", self.frontend)
 
-    def test_pre_review_temporal_model_drives_operator_when_selected(self) -> None:
+    def test_current_all_data_model_is_the_only_operator_runtime(self) -> None:
         self.assertIn(
-            '"default_operator_recognition": "dynamic_temporal_v3_validation"',
+            '"active_model_id": "ordinary_fbg_all_data_beta_v1"',
             self.backend,
         )
         self.assertIn(
-            '"dynamic_temporal_validation_diagnostics_only": False',
+            '"model_count": 1',
             self.backend,
         )
         self.assertIn(
-            '"drives_operator_ui": True',
+            '"switchable": False',
             self.backend,
+        )
+        self.assertIn("OPERATOR_VISUALIZATION_CONTRACT_VERSION", self.backend)
+        self.assertIn("operator_visualization_frame", self.backend)
+        self.assertNotIn("dynamic_temporal_v3_validation", self.backend)
+        self.assertNotIn("trained_static_spectral_shadow", self.backend)
+        self.assertIn(
+            '"recognition_scope": "optical_contact_position_and_continuous_fz"',
+            self.bridge,
         )
         self.assertIn(
-            "recorder_is_cache_consumer_not_temporal_state_producer",
-            self.backend,
+            '"carrier_channel_role": "full_spectrum_transport_for_current_runtime"',
+            self.bridge,
         )
+        self.assertNotIn("trained_static_full_spectrum_classifier", self.bridge)
+        self.assertNotIn("manual light/normal/hard response level", self.bridge)
 
     def test_baseline_requires_operator_release_attestation(self) -> None:
         self.assertIn("no_contact_attested: bool = False", self.backend)

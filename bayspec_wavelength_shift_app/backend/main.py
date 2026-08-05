@@ -1,8 +1,9 @@
-"""FastAPI backend for the standalone BaySpec FBG wavelength-shift app."""
+"""FastAPI backend for the TOUCH current optical runtime."""
 
 from __future__ import annotations
 
 import asyncio
+import csv
 import ctypes
 import copy
 from contextlib import asynccontextmanager
@@ -53,13 +54,16 @@ from src.array_surface.surface_mapper import SurfaceConfig, map_surface, matrice
 from src.hybrid_spectrum.all_source_runtime_adapter import (
     AllSourceOpticalForceAdapter,
 )
-from src.hybrid_spectrum.dynamic_shadow_adapter import DynamicTemporalShadowAdapter
-from src.hybrid_spectrum.static_model_adapter import StaticSpectralPredictor
-from src.hybrid_spectrum.session_level_calibration import (
-    POSITION_ORDER as CALIBRATION_POSITION_ORDER,
-    PerPositionOrdinalCalibrator,
+from src.hybrid_spectrum.measurement_consistency import (
+    MeasurementAnalysisConfig,
+    analyze_measurement_session,
+    load_measurement_config,
+    load_measurement_trace,
 )
-from src.hybrid_spectrum.temporal_prediction import TemporalStaticPredictionStabilizer
+from src.hybrid_spectrum.measurement_estimate_sources import (
+    EVIDENCE_SOURCES,
+    resolve_measurement_estimate_evidence,
+)
 
 try:
     import yaml
@@ -96,68 +100,38 @@ async def _read_limited_ingest_body(request: Request) -> bytes:
             raise IngestRequestTooLarge("manual ingest request exceeds 8 MiB")
     return bytes(body)
 PROJECT_ROOT = APP_ROOT if getattr(sys, "frozen", False) else APP_ROOT.parent
-ALL_SOURCE_BETA_ENABLED = (
-    os.environ.get("TOUCH_LATEST_ALL_DATA_MODEL", "").strip().lower()
-    in {"1", "true", "yes", "on"}
-    or os.environ.get("TOUCH_BETA_ALL_DATA_MODEL", "").strip().lower()
-    in {"1", "true", "yes", "on"}
-)
+CURRENT_RUNTIME_ENABLED = True
 THUMB_SCENE_CONFIG_PATH = PROJECT_ROOT / "config" / "thumb_holder_scene.yaml"
-STATIC_SPECTRAL_MODEL_PATH = PROJECT_ROOT / "models" / "static_spectral_recognition_bundle.joblib"
-STATIC_SPECTRAL_CANDIDATE_MODEL_PATH = (
-    PROJECT_ROOT
-    / "models"
-    / "candidates"
-    / "static_spectral_recognition_bundle_v7_fused_shift.joblib"
-)
-DYNAMIC_TEMPORAL_SHADOW_MODEL_PATH = (
-    PROJECT_ROOT
-    / "models"
-    / "candidates"
-    / "dynamic_temporal_shadow_candidate_v3_compact_runtime_pos240.joblib"
-)
-DYNAMIC_TEMPORAL_SHADOW_INFERENCE_STRIDE = 1
-DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH = (
+HYBRID_SPECTRUM_CHANNEL_CONFIG_PATH = (
     PROJECT_ROOT / "config" / "hybrid_spectrum_channels.yaml"
 )
-ALL_SOURCE_BETA_MODEL_PATH = (
+CURRENT_RUNTIME_MODEL_PATH = (
     PROJECT_ROOT
     / "models"
-    / "candidates"
-    / "ordinary_fbg_optical_only_force_candidate.joblib"
+    / "deployed"
+    / "ordinary_fbg_current_runtime.joblib"
 )
 RUNTIME_CONTACT_STATE_CONFIG_PATH = (
     PROJECT_ROOT / "config" / "runtime_contact_state.yaml"
 )
 PX6D_REFERENCE_CONFIG_PATH = PROJECT_ROOT / "config" / "px6d_reference.yaml"
-VERSION_PATH = PROJECT_ROOT / "VERSION.json"
-STATIC_SPECTRAL_MODEL_LOCK = threading.Lock()
-STATIC_SPECTRAL_MODEL_CACHE_KEY: tuple | None = None
-STATIC_SPECTRAL_MODEL_CACHE_VALUE: dict | None = None
-STATIC_SPECTRAL_SHADOW_STABILIZER = TemporalStaticPredictionStabilizer(
-    window_size=5,
-    minimum_contact_frames=3,
-    release_frames=2,
-    minimum_position_support=0.60,
-    minimum_level_support=0.60,
+MEASUREMENT_ANALYSIS_CONFIG_PATH = (
+    PROJECT_ROOT / "config" / "measurement_analysis.yaml"
 )
-STATIC_SPECTRAL_SESSION_CALIBRATION_LOCK = threading.Lock()
-STATIC_SPECTRAL_SESSION_CALIBRATOR: PerPositionOrdinalCalibrator | None = None
-STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE: dict[str, Any] = {}
-DYNAMIC_TEMPORAL_SHADOW_LOCK = threading.Lock()
+VERSION_PATH = PROJECT_ROOT / "VERSION.json"
 LIVE_SOURCE_CONTROL_LOCK = threading.RLock()
-DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN: str | None = None
-DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY: tuple[Any, ...] | None = None
-DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT = 0
-DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD: dict[str, Any] | None = None
-DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC: float | None = None
-DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM: np.ndarray | None = None
-DYNAMIC_TEMPORAL_SHADOW_MAX_RESAMPLE_STEPS = 12
-ALL_SOURCE_BETA_LOCK = threading.Lock()
-ALL_SOURCE_BETA_BASELINE_TOKEN: str | None = None
-ALL_SOURCE_BETA_LAST_FRAME_KEY: tuple[Any, ...] | None = None
-ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT = 0
-ALL_SOURCE_BETA_LAST_PAYLOAD: dict[str, Any] | None = None
+CURRENT_RUNTIME_LOCK = threading.Lock()
+CURRENT_RUNTIME_BASELINE_TOKEN: str | None = None
+CURRENT_RUNTIME_LAST_FRAME_KEY: tuple[Any, ...] | None = None
+CURRENT_RUNTIME_UNIQUE_FRAME_COUNT = 0
+CURRENT_RUNTIME_LAST_PAYLOAD: dict[str, Any] | None = None
+CURRENT_RUNTIME_STARTUP_BASELINE_FRAMES: list[dict[str, Any]] = []
+CURRENT_RUNTIME_STARTUP_BASELINE_LAST_FRAME_KEY: tuple[Any, ...] | None = None
+CURRENT_RUNTIME_STARTUP_BASELINE_STATUS: dict[str, Any] = {
+    "status": "not_started",
+    "ready": False,
+    "frame_count": 0,
+}
 GLOBAL_BASELINE_ATTESTATION: dict[str, Any] = {
     "confirmed": False,
     "attested_at_epoch_sec": None,
@@ -540,91 +514,6 @@ def _spectrum_token(wavelength: list[float], intensity: list[float]) -> str:
     return digest.hexdigest()
 
 
-def _clear_session_level_calibration(reason: str) -> dict[str, Any]:
-    global STATIC_SPECTRAL_SESSION_CALIBRATOR
-    global STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE
-
-    with STATIC_SPECTRAL_SESSION_CALIBRATION_LOCK:
-        was_loaded = STATIC_SPECTRAL_SESSION_CALIBRATOR is not None
-        STATIC_SPECTRAL_SESSION_CALIBRATOR = None
-        STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE = {
-            "cleared_reason": reason,
-            "cleared_at": time.time(),
-        }
-    return {
-        "ok": True,
-        "was_loaded": was_loaded,
-        "status": "session_level_calibration_cleared",
-        "reason": reason,
-        "runtime_role": "shadow_diagnostic_only",
-    }
-
-
-def _session_level_calibration_status() -> dict[str, Any]:
-    with STATIC_SPECTRAL_SESSION_CALIBRATION_LOCK:
-        calibrator = STATIC_SPECTRAL_SESSION_CALIBRATOR
-        source = copy.deepcopy(STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE)
-    return {
-        "loaded": calibrator is not None,
-        "schema_version": calibrator.schema_version if calibrator is not None else None,
-        "baseline_token": calibrator.baseline_token if calibrator is not None else None,
-        "calibrated_position_count": len(calibrator.anchors) if calibrator is not None else 0,
-        "runtime_role": "shadow_diagnostic_only",
-        "drives_operator_ui": False,
-        "drives_digital_twin": False,
-        "force_semantics": "approximate_manual_response_level_not_force_N",
-        "source": source,
-    }
-
-
-def _apply_session_level_calibration(
-    prediction: dict[str, Any],
-    temporal: dict[str, Any],
-    *,
-    baseline_token: str,
-) -> dict[str, Any]:
-    with STATIC_SPECTRAL_SESSION_CALIBRATION_LOCK:
-        calibrator = STATIC_SPECTRAL_SESSION_CALIBRATOR
-    base = {
-        "runtime_role": "shadow_diagnostic_only",
-        "drives_operator_ui": False,
-        "drives_digital_twin": False,
-        "force_semantics": "approximate_manual_response_level_not_force_N",
-    }
-    if calibrator is None:
-        return {**base, "ok": False, "status": "session_calibration_not_loaded"}
-    if temporal.get("contact_label") != "contact":
-        return {
-            **base,
-            "ok": True,
-            "status": "stable_no_contact",
-            "label": None,
-        }
-    position = temporal.get("position_label")
-    if not temporal.get("ready") or not position:
-        return {
-            **base,
-            "ok": False,
-            "status": "waiting_for_stable_temporal_position",
-            "label": None,
-        }
-    features = prediction.get("response_calibration_features")
-    if not isinstance(features, dict):
-        return {
-            **base,
-            "ok": False,
-            "status": "response_calibration_features_missing",
-            "label": None,
-        }
-    calibrated = calibrator.predict(
-        str(position),
-        features,
-        baseline_token=baseline_token,
-    )
-    calibrated.update(base)
-    return calibrated
-
-
 def _current_runtime_baseline_token() -> tuple[str | None, dict[str, Any]]:
     pair = bridge.spectral_model_input(channel_id="P22")
     if not pair.get("ok"):
@@ -647,13 +536,13 @@ def _load_runtime_baseline_recovery_config() -> dict[str, Any]:
     return dict(section) if isinstance(section, dict) else {}
 
 
-def _load_response_level_postprocess_config() -> dict[str, Any]:
+def _load_runtime_startup_baseline_config() -> dict[str, Any]:
     if yaml is None or not RUNTIME_CONTACT_STATE_CONFIG_PATH.exists():
         return {}
     payload = yaml.safe_load(
         RUNTIME_CONTACT_STATE_CONFIG_PATH.read_text(encoding="utf-8")
     ) or {}
-    section = payload.get("response_level_postprocess", {})
+    section = payload.get("runtime_startup_baseline", {})
     return dict(section) if isinstance(section, dict) else {}
 
 
@@ -667,206 +556,681 @@ def _load_all_source_runtime_gate_config() -> dict[str, Any]:
     return dict(section) if isinstance(section, dict) else {}
 
 
-if ALL_SOURCE_BETA_ENABLED:
-    # The Beta package intentionally ships one model only. Keep old model
-    # branches out of memory and fail explicitly if the latest artifact cannot
-    # be loaded; silently falling back would make the displayed calibration
-    # semantics ambiguous.
-    STATIC_SPECTRAL_PREDICTOR = None
-    STATIC_SPECTRAL_MODEL_ERROR = "disabled_in_beta_latest_model_only"
-    STATIC_SPECTRAL_CANDIDATE_PREDICTOR = None
-    STATIC_SPECTRAL_CANDIDATE_ERROR = "disabled_in_beta_latest_model_only"
-    DYNAMIC_TEMPORAL_SHADOW_ADAPTER = None
-    DYNAMIC_TEMPORAL_SHADOW_ERROR = "disabled_in_beta_latest_model_only"
-else:
-    try:
-        STATIC_SPECTRAL_PREDICTOR = StaticSpectralPredictor(
-            STATIC_SPECTRAL_MODEL_PATH
-        )
-        STATIC_SPECTRAL_MODEL_ERROR = None
-    except Exception as exc:  # pragma: no cover - exposed through diagnostics
-        STATIC_SPECTRAL_PREDICTOR = None
-        STATIC_SPECTRAL_MODEL_ERROR = f"{type(exc).__name__}: {exc}"
-    try:
-        STATIC_SPECTRAL_CANDIDATE_PREDICTOR = StaticSpectralPredictor(
-            STATIC_SPECTRAL_CANDIDATE_MODEL_PATH
-        )
-        STATIC_SPECTRAL_CANDIDATE_ERROR = None
-    except Exception as exc:  # pragma: no cover - exposed through diagnostics
-        STATIC_SPECTRAL_CANDIDATE_PREDICTOR = None
-        STATIC_SPECTRAL_CANDIDATE_ERROR = f"{type(exc).__name__}: {exc}"
-    try:
-        DYNAMIC_TEMPORAL_SHADOW_ADAPTER = DynamicTemporalShadowAdapter.from_paths(
-            DYNAMIC_TEMPORAL_SHADOW_MODEL_PATH,
-            DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH,
-            runtime_recovery_config=_load_runtime_baseline_recovery_config(),
-            response_level_config=_load_response_level_postprocess_config(),
-        )
-        DYNAMIC_TEMPORAL_SHADOW_ERROR = None
-    except Exception as exc:  # pragma: no cover - exposed through diagnostics
-        DYNAMIC_TEMPORAL_SHADOW_ADAPTER = None
-        DYNAMIC_TEMPORAL_SHADOW_ERROR = f"{type(exc).__name__}: {exc}"
-
-if ALL_SOURCE_BETA_ENABLED:
-    try:
-        ALL_SOURCE_BETA_ADAPTER = AllSourceOpticalForceAdapter.from_paths(
-            ALL_SOURCE_BETA_MODEL_PATH,
-            DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH,
-            runtime_recovery_config=_load_runtime_baseline_recovery_config(),
-            runtime_gate_config=_load_all_source_runtime_gate_config(),
-        )
-        ALL_SOURCE_BETA_ERROR = None
-    except Exception as exc:  # pragma: no cover - exposed through diagnostics
-        ALL_SOURCE_BETA_ADAPTER = None
-        ALL_SOURCE_BETA_ERROR = f"{type(exc).__name__}: {exc}"
-else:
-    ALL_SOURCE_BETA_ADAPTER = None
-    ALL_SOURCE_BETA_ERROR = "beta_runtime_disabled"
+try:
+    CURRENT_RUNTIME_ADAPTER = AllSourceOpticalForceAdapter.from_paths(
+        CURRENT_RUNTIME_MODEL_PATH,
+        HYBRID_SPECTRUM_CHANNEL_CONFIG_PATH,
+        runtime_recovery_config=_load_runtime_baseline_recovery_config(),
+        runtime_gate_config=_load_all_source_runtime_gate_config(),
+    )
+    CURRENT_RUNTIME_ERROR = None
+except Exception as exc:  # pragma: no cover - exposed through diagnostics
+    CURRENT_RUNTIME_ADAPTER = None
+    CURRENT_RUNTIME_ERROR = f"{type(exc).__name__}: {exc}"
 
 
-def _reset_dynamic_temporal_shadow(reason: str) -> dict[str, Any]:
-    global DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN
-    global DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY
-    global DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT
-    global DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD
-    global DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC
-    global DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM
+def _reset_current_runtime(reason: str) -> dict[str, Any]:
+    global CURRENT_RUNTIME_BASELINE_TOKEN
+    global CURRENT_RUNTIME_LAST_FRAME_KEY
+    global CURRENT_RUNTIME_UNIQUE_FRAME_COUNT
+    global CURRENT_RUNTIME_LAST_PAYLOAD
+    global CURRENT_RUNTIME_STARTUP_BASELINE_LAST_FRAME_KEY
+    global CURRENT_RUNTIME_STARTUP_BASELINE_STATUS
 
-    with DYNAMIC_TEMPORAL_SHADOW_LOCK:
-        if DYNAMIC_TEMPORAL_SHADOW_ADAPTER is not None:
-            DYNAMIC_TEMPORAL_SHADOW_ADAPTER.clear()
-        DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN = None
-        DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY = None
-        DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT = 0
-        DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD = None
-        DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC = None
-        DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM = None
+    with CURRENT_RUNTIME_LOCK:
+        if CURRENT_RUNTIME_ADAPTER is not None:
+            CURRENT_RUNTIME_ADAPTER.clear()
+        CURRENT_RUNTIME_BASELINE_TOKEN = None
+        CURRENT_RUNTIME_LAST_FRAME_KEY = None
+        CURRENT_RUNTIME_UNIQUE_FRAME_COUNT = 0
+        CURRENT_RUNTIME_LAST_PAYLOAD = None
+        CURRENT_RUNTIME_STARTUP_BASELINE_FRAMES.clear()
+        CURRENT_RUNTIME_STARTUP_BASELINE_LAST_FRAME_KEY = None
+        CURRENT_RUNTIME_STARTUP_BASELINE_STATUS = {
+            "status": "not_started",
+            "ready": False,
+            "frame_count": 0,
+            "reason": reason,
+        }
     return {
         "ok": True,
-        "status": "dynamic_temporal_shadow_reset",
+        "status": "current_runtime_reset",
         "reason": reason,
-        "runtime_role": "shadow_only_not_driving_digital_twin",
+        "runtime_role": "deployed_current_model_only",
     }
 
 
-def _dynamic_temporal_shadow_status() -> dict[str, Any]:
-    adapter = DYNAMIC_TEMPORAL_SHADOW_ADAPTER
+def _current_runtime_status() -> dict[str, Any]:
+    adapter = CURRENT_RUNTIME_ADAPTER
     bundle = adapter.bundle if adapter is not None else {}
-    grouped = bundle.get("release_guard_grouped_cv", {})
+    observed_training_range_n = (
+        [float(adapter.force_min_n), float(adapter.force_calibrated_max_n)]
+        if adapter is not None
+        else [0.0, None]
+    )
     return {
+        "enabled": CURRENT_RUNTIME_ENABLED,
         "loaded": adapter is not None,
-        "model_path": str(DYNAMIC_TEMPORAL_SHADOW_MODEL_PATH),
-        "model_error": DYNAMIC_TEMPORAL_SHADOW_ERROR,
-        "schema_version": bundle.get("schema_version"),
-        "status": bundle.get("status"),
-        "deployment_ready": False,
-        "runtime_role": "shadow_only_not_driving_digital_twin",
-        "drives_operator_ui": False,
-        "drives_digital_twin": False,
-        "inference_stride_unique_frames": DYNAMIC_TEMPORAL_SHADOW_INFERENCE_STRIDE,
-        "temporal_window_frames": bundle.get("time_steps"),
-        "model_frame_interval_sec": bundle.get("frame_interval_sec_estimated"),
-        "physical_frame_resampling_enabled": True,
-        "maximum_resample_steps_per_physical_frame": (
-            DYNAMIC_TEMPORAL_SHADOW_MAX_RESAMPLE_STEPS
-        ),
-        "runtime_contact_state_config_path": str(
-            RUNTIME_CONTACT_STATE_CONFIG_PATH
-        ),
-        "runtime_baseline_recovery": _load_runtime_baseline_recovery_config(),
-        "release_guard_grouped_detection_rate": grouped.get(
-            "release_sequence_detection_rate"
-        ),
-        "release_guard_unsafe_early_triggers": grouped.get(
-            "unsafe_early_trigger_sequence_count"
-        ),
-        "response_level_semantics": "approximate_manual_level_not_force_N",
-    }
-
-
-def _reset_all_source_beta(reason: str) -> dict[str, Any]:
-    global ALL_SOURCE_BETA_BASELINE_TOKEN
-    global ALL_SOURCE_BETA_LAST_FRAME_KEY
-    global ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT
-    global ALL_SOURCE_BETA_LAST_PAYLOAD
-
-    with ALL_SOURCE_BETA_LOCK:
-        if ALL_SOURCE_BETA_ADAPTER is not None:
-            ALL_SOURCE_BETA_ADAPTER.clear()
-        ALL_SOURCE_BETA_BASELINE_TOKEN = None
-        ALL_SOURCE_BETA_LAST_FRAME_KEY = None
-        ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT = 0
-        ALL_SOURCE_BETA_LAST_PAYLOAD = None
-    return {
-        "ok": True,
-        "status": "all_source_beta_reset",
-        "reason": reason,
-        "runtime_role": "primary_beta_latest_model_only",
-    }
-
-
-def _all_source_beta_status() -> dict[str, Any]:
-    adapter = ALL_SOURCE_BETA_ADAPTER
-    bundle = adapter.bundle if adapter is not None else {}
-    return {
-        "enabled": ALL_SOURCE_BETA_ENABLED,
-        "loaded": adapter is not None,
-        "model_path": str(ALL_SOURCE_BETA_MODEL_PATH),
-        "model_error": ALL_SOURCE_BETA_ERROR,
+        "model_path": str(CURRENT_RUNTIME_MODEL_PATH),
+        "model_error": CURRENT_RUNTIME_ERROR,
         "schema_version": bundle.get("schema_version"),
         "feature_schema": bundle.get("feature_schema"),
-        "runtime_role": "primary_beta_latest_model_only",
-        "drives_operator_ui": ALL_SOURCE_BETA_ENABLED,
-        "drives_digital_twin": ALL_SOURCE_BETA_ENABLED,
+        "runtime_role": "deployed_current_model_only",
+        "drives_operator_ui": CURRENT_RUNTIME_ENABLED,
+        "drives_digital_twin": CURRENT_RUNTIME_ENABLED,
         "runtime_input": "optical_spectrum_time_series",
         "force_sensor_is_runtime_model_input": False,
-        "estimated_force_output": "continuous_optical_fz_0_to_5_n",
-        "old_model_fallback_enabled": False,
-        "unique_frame_count": ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT,
+        "estimated_force_output": "continuous_optical_fz_no_fixed_upper_limit",
+        "observed_training_force_range_n": observed_training_range_n,
+        # Retained for older UI consumers; this is the observed training range,
+        # not a runtime output clip.
+        "validated_force_range_n": observed_training_range_n,
+        "force_above_observed_training_range": (
+            "reported_as_unvalidated_extrapolation_without_upper_clip"
+        ),
+        "classification_model_source": (
+            adapter.classification_model_source if adapter is not None else None
+        ),
+        "force_model_source": (
+            adapter.force_model_source if adapter is not None else None
+        ),
+        "unique_frame_count": CURRENT_RUNTIME_UNIQUE_FRAME_COUNT,
         "runtime_contact_gate": _load_all_source_runtime_gate_config(),
+        "runtime_startup_baseline": {
+            "config": _load_runtime_startup_baseline_config(),
+            "state": copy.deepcopy(CURRENT_RUNTIME_STARTUP_BASELINE_STATUS),
+        },
         "runtime_baseline_recovery": _load_runtime_baseline_recovery_config(),
     }
 
 
-def _predict_all_source_beta(
+OPERATOR_VISUALIZATION_CONTRACT_VERSION = "touch_operator_visualization_v1"
+OPERATOR_VISUALIZATION_DISPLAY_ROWS = (
+    ("P11", "P21", "P31"),
+    ("P12", "P22", "P32"),
+    ("P13", "P23", "P33"),
+)
+
+
+def _operator_finite_float(value: Any, default: float | None = None) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _operator_surface_grid(value: Any) -> list[list[float]]:
+    if not isinstance(value, list) or len(value) != 3:
+        return [[0.0, 0.0, 0.0] for _ in range(3)]
+    grid: list[list[float]] = []
+    for row in value:
+        if not isinstance(row, list) or len(row) != 3:
+            return [[0.0, 0.0, 0.0] for _ in range(3)]
+        grid.append(
+            [
+                max(0.0, min(1.0, _operator_finite_float(item, 0.0) or 0.0))
+                for item in row
+            ]
+        )
+    return grid
+
+
+def _build_operator_visualization_frame(
+    latest: dict[str, Any] | None,
+    prediction: dict[str, Any] | None,
+    *,
+    ready: bool,
+    block_reason: str | None,
+) -> dict[str, Any]:
+    """Publish the only frame allowed to drive Operator visuals.
+
+    Operator charts, summary, footprint and 3-D geometry consume this contract
+    exclusively. A warming or blocked current model becomes a neutral frame
+    instead of silently falling back to a different data source.
+    """
+
+    record = latest if isinstance(latest, dict) else {}
+    payload = prediction if isinstance(prediction, dict) else {}
+    prediction_ready = bool(
+        ready
+        and payload.get("ok") is True
+        and payload.get("status") == "ready"
+    )
+    twin = payload.get("digital_twin") if prediction_ready else {}
+    twin = twin if isinstance(twin, dict) else {}
+    position = payload.get("position") if prediction_ready else {}
+    position = position if isinstance(position, dict) else {}
+    contact = payload.get("contact") if prediction_ready else {}
+    contact = contact if isinstance(contact, dict) else {}
+    force = payload.get("force_fz") if prediction_ready else {}
+    force = force if isinstance(force, dict) else {}
+    raw_metrics = twin.get("surface_metrics")
+    raw_metrics = raw_metrics if isinstance(raw_metrics, dict) else {}
+
+    visual_active = bool(
+        prediction_ready
+        and (twin.get("visual_active", twin.get("active")) is True)
+    )
+    grid = _operator_surface_grid(twin.get("surface_grid"))
+    if not visual_active:
+        grid = [[0.0, 0.0, 0.0] for _ in range(3)]
+
+    flat_grid = [item for row in grid for item in row]
+    display_position = (
+        str(
+            twin.get("position_id")
+            or position.get("visual_label")
+            or position.get("label")
+            or ""
+        )
+        or None
+    )
+    display_force_n = _operator_finite_float(force.get("visual_drive_n"))
+    if display_force_n is None:
+        display_force_n = _operator_finite_float(twin.get("drive_force_n"))
+    if display_force_n is None:
+        display_force_n = _operator_finite_float(force.get("estimated_n"))
+    if prediction_ready and not visual_active:
+        display_force_n = 0.0
+    if not prediction_ready:
+        display_force_n = None
+
+    estimated_force_n = (
+        _operator_finite_float(force.get("estimated_n"))
+        if prediction_ready
+        else None
+    )
+    continuous_force_n = (
+        _operator_finite_float(force.get("continuous_estimated_n"))
+        if prediction_ready
+        else None
+    )
+    source = str(record.get("source") or "unknown")
+    timestamp = _operator_finite_float(record.get("timestamp"))
+    raw_frame_id = record.get("frame_id", record.get("spectrum_frame_id"))
+    frame_id: Any = raw_frame_id
+    if frame_id is None:
+        frame_id = f"{source}|{timestamp if timestamp is not None else 'unknown'}"
+
+    response_allowed = prediction_ready
+    response_state = "contact" if visual_active else "no_contact"
+    peak = (
+        _operator_finite_float(raw_metrics.get("surface_peak"), max(flat_grid))
+        if prediction_ready
+        else 0.0
+    )
+    mean = (
+        _operator_finite_float(
+            raw_metrics.get("surface_mean"),
+            sum(flat_grid) / len(flat_grid),
+        )
+        if prediction_ready
+        else 0.0
+    )
+    active_area = (
+        _operator_finite_float(
+            raw_metrics.get("surface_area_active"),
+            sum(1 for value in flat_grid if value >= 0.055) / len(flat_grid),
+        )
+        if prediction_ready
+        else 0.0
+    )
+    responding_channel_ids = [
+        channel_id
+        for row_index, row in enumerate(OPERATOR_VISUALIZATION_DISPLAY_ROWS)
+        for column_index, channel_id in enumerate(row)
+        if grid[row_index][column_index] >= 0.055
+    ]
+    metrics = {
+        "surface_peak": peak or 0.0,
+        "surface_mean": mean or 0.0,
+        "surface_area_active": active_area or 0.0,
+        "surface_area_active_percent": (active_area or 0.0) * 100.0,
+        "surface_centroid_x": (
+            _operator_finite_float(raw_metrics.get("surface_centroid_x"), 0.0)
+            or 0.0
+        ),
+        "surface_centroid_y": (
+            _operator_finite_float(raw_metrics.get("surface_centroid_y"), 0.0)
+            or 0.0
+        ),
+        "surface_spread": (
+            _operator_finite_float(raw_metrics.get("surface_spread"), 0.24)
+            or 0.24
+        ),
+        "dominant_channel": display_position if visual_active else None,
+        "enabled_channel_count": 9,
+        "responding_channel_count": len(responding_channel_ids),
+        "responding_channel_ids": responding_channel_ids,
+        "coupling_status": str(
+            raw_metrics.get("coupling_status")
+            or (
+                "optical_model_continuous_force_proxy"
+                if visual_active
+                else "optical_model_no_contact"
+            )
+        ),
+    }
+    resolved_block_reason = None if prediction_ready else (
+        block_reason
+        or str(payload.get("reason") or payload.get("status") or "current_runtime_model_not_ready")
+    )
+    return {
+        "contract_version": OPERATOR_VISUALIZATION_CONTRACT_VERSION,
+        "frame_id": frame_id,
+        "timestamp": timestamp,
+        "source": source,
+        "source_kind": "full_spectrum_optical_frame",
+        "model_source": "ordinary_fbg_all_data_beta_v1",
+        "prediction_status": str(payload.get("status") or "unavailable"),
+        "prediction_ready": prediction_ready,
+        "response_allowed": response_allowed,
+        "response_block_reason": resolved_block_reason,
+        "response_state": response_state,
+        "contact": {
+            "label": str(contact.get("label") or response_state),
+            "visual_active": visual_active,
+            "confidence": _operator_finite_float(contact.get("confidence")),
+            "contact_probability": _operator_finite_float(
+                contact.get("contact_probability")
+            ),
+        },
+        "position": {
+            "display_label": display_position if visual_active else None,
+            "formal_label": position.get("label") if prediction_ready else None,
+            "confidence": _operator_finite_float(position.get("confidence")),
+            "visual_confidence": _operator_finite_float(
+                position.get("visual_confidence")
+            ),
+        },
+        "force": {
+            "display_n": display_force_n,
+            "estimated_n": estimated_force_n,
+            "continuous_estimated_n": continuous_force_n,
+            "unit": "N",
+            "range_status": force.get("range_status") if prediction_ready else None,
+            "calibrated_range_n": (
+                force.get("calibrated_range_n") if prediction_ready else None
+            ),
+            "upper_limit_applied": False,
+            "model_source": force.get("model_source") if prediction_ready else None,
+        },
+        "surface": {
+            "active": visual_active,
+            "position_id": display_position if visual_active else None,
+            "deformation_proxy": (
+                _operator_finite_float(twin.get("deformation_proxy"), 0.0)
+                if visual_active
+                else 0.0
+            ),
+            "drive_force_n": display_force_n,
+            "surface_grid": grid,
+            "surface_metrics": metrics,
+        },
+        "trace_sample": {
+            "frame_id": frame_id,
+            "timestamp": timestamp,
+            "value_n": display_force_n,
+            "surface_peak": peak or 0.0,
+            "response_state": response_state,
+        },
+        "sync": {
+            "status": "synced",
+            "spectrum_frame_id": frame_id,
+            "surface_frame_id": frame_id,
+            "trace_frame_id": frame_id,
+            "summary_frame_id": frame_id,
+            "force_frame_id": frame_id,
+        },
+        "quality": {
+            "raw_qa_status": record.get("qa_status"),
+            "raw_qa_flags": list(record.get("qa_flags") or []),
+            "review_needed": bool(
+                prediction_ready
+                and isinstance(payload.get("uncertainty"), dict)
+                and payload["uncertainty"].get("review_needed") is True
+            ),
+        },
+        "prediction": copy.deepcopy(payload) if prediction_ready else None,
+    }
+
+
+def _startup_baseline_motion(
+    previous: np.ndarray,
+    current: np.ndarray,
+    valid_mask: np.ndarray,
+) -> tuple[float, float]:
+    eps = 1.0e-6
+    delta = np.log(np.maximum(current[valid_mask], eps)) - np.log(
+        np.maximum(previous[valid_mask], eps)
+    )
+    common_gain = float(np.median(delta))
+    shape_motion = float(np.sqrt(np.mean(np.square(delta - common_gain))))
+    return shape_motion, abs(common_gain)
+
+
+def _runtime_startup_force_evidence(
+    timestamp_sec: float | None,
+) -> dict[str, Any]:
+    reader = globals().get("px6d_reader")
+    if reader is None:
+        return {"available": False, "status": "force_reader_unavailable"}
+    try:
+        status = reader.status()
+    except Exception as exc:
+        return {
+            "available": False,
+            "status": "force_status_error",
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
+    available = bool(
+        status.get("connected")
+        and status.get("sample_fresh")
+        and status.get("tare_ready")
+    )
+    if not available:
+        return {
+            "available": False,
+            "status": "force_reference_not_ready",
+            "connected": bool(status.get("connected")),
+            "sample_fresh": bool(status.get("sample_fresh")),
+            "tare_ready": bool(status.get("tare_ready")),
+        }
+    try:
+        snapshot = reader.synchronized_snapshot(timestamp_sec or time.time())
+    except Exception as exc:
+        return {
+            "available": False,
+            "status": "force_snapshot_error",
+            "reason": f"{type(exc).__name__}: {exc}",
+        }
+    force_n = _operator_finite_float(snapshot.get("force_fz_n"))
+    return {
+        "available": bool(snapshot.get("ok") and force_n is not None),
+        "status": snapshot.get("status"),
+        "force_fz_n": force_n,
+        "sync_offset_ms": snapshot.get("sync_offset_ms"),
+    }
+
+
+def _ensure_current_runtime_startup_baseline(
     latest_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Run the latest optical-only Beta model on each unique spectrum frame."""
+    """Create a trusted baseline from stable frames in this acquisition session."""
 
-    global ALL_SOURCE_BETA_BASELINE_TOKEN
-    global ALL_SOURCE_BETA_LAST_FRAME_KEY
-    global ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT
-    global ALL_SOURCE_BETA_LAST_PAYLOAD
+    global CURRENT_RUNTIME_STARTUP_BASELINE_LAST_FRAME_KEY
+    global CURRENT_RUNTIME_STARTUP_BASELINE_STATUS
 
-    if not ALL_SOURCE_BETA_ENABLED:
-        return {
-            "ok": False,
-            "status": "beta_runtime_disabled",
-            "reason": "TOUCH_BETA_ALL_DATA_MODEL is not enabled",
-            "runtime_role": "not_active",
+    pair = bridge.spectral_model_input(channel_id="P22")
+    if pair.get("ok"):
+        with CURRENT_RUNTIME_LOCK:
+            CURRENT_RUNTIME_STARTUP_BASELINE_STATUS = {
+                "status": "ready",
+                "ready": True,
+                "frame_count": int(
+                    pair.get("baseline_spectrum_sample_count") or 0
+                ),
+                "baseline_status": pair.get("baseline_spectrum_status"),
+            }
+        return pair
+
+    config = _load_runtime_startup_baseline_config()
+    if not bool(config.get("enabled", True)):
+        return pair
+
+    latest = latest_override if isinstance(latest_override, dict) else pair.get("latest")
+    if not isinstance(latest, dict):
+        return pair
+    wavelength_values = latest.get("wavelength_nm")
+    intensity_values = latest.get("intensity")
+    if (
+        not isinstance(wavelength_values, list)
+        or not isinstance(intensity_values, list)
+        or len(wavelength_values) < 16
+        or len(wavelength_values) != len(intensity_values)
+    ):
+        return pair
+
+    wavelength = np.asarray(wavelength_values, dtype=float)
+    intensity = np.asarray(intensity_values, dtype=float)
+    if (
+        not np.all(np.isfinite(wavelength))
+        or not np.all(np.isfinite(intensity))
+        or not np.all(np.diff(wavelength) > 0.0)
+        or float(np.max(np.abs(intensity))) <= 1.0e-9
+    ):
+        return pair
+
+    try:
+        source_timestamp_sec = float(latest.get("timestamp"))
+        if not math.isfinite(source_timestamp_sec):
+            source_timestamp_sec = None
+    except (TypeError, ValueError):
+        source_timestamp_sec = None
+    frame_key = (
+        latest.get("frame_id"),
+        latest.get("timestamp"),
+        latest.get("source"),
+        _spectrum_fingerprint(wavelength_values, intensity_values),
+    )
+    minimum_frames = max(3, int(config.get("minimum_frames", 5)))
+    minimum_span_sec = max(0.0, float(config.get("minimum_span_sec", 0.12)))
+    max_shape_motion = max(
+        0.0, float(config.get("max_shape_motion_rms", 0.0060))
+    )
+    max_common_gain_motion = max(
+        0.0, float(config.get("max_common_gain_motion", 0.0060))
+    )
+    maximum_force_abs_n = max(
+        0.0, float(config.get("maximum_force_abs_n", 0.10))
+    )
+    require_force_release = bool(
+        config.get("require_force_release_if_available", True)
+    )
+    policy = str(
+        config.get("policy") or "current_session_stable_five_frame_median"
+    )
+    observed_monotonic_sec = time.monotonic()
+
+    with CURRENT_RUNTIME_LOCK:
+        if frame_key == CURRENT_RUNTIME_STARTUP_BASELINE_LAST_FRAME_KEY:
+            return {
+                **pair,
+                "startup_baseline_status": copy.deepcopy(
+                    CURRENT_RUNTIME_STARTUP_BASELINE_STATUS
+                ),
+            }
+        CURRENT_RUNTIME_STARTUP_BASELINE_LAST_FRAME_KEY = frame_key
+
+        force_evidence = _runtime_startup_force_evidence(source_timestamp_sec)
+        force_n = _operator_finite_float(force_evidence.get("force_fz_n"))
+        if (
+            require_force_release
+            and force_evidence.get("available")
+            and force_n is not None
+            and abs(force_n) > maximum_force_abs_n
+        ):
+            CURRENT_RUNTIME_STARTUP_BASELINE_FRAMES.clear()
+            CURRENT_RUNTIME_STARTUP_BASELINE_STATUS = {
+                "status": "startup_baseline_waiting_for_release",
+                "ready": False,
+                "frame_count": 0,
+                "force_fz_n": force_n,
+                "maximum_force_abs_n": maximum_force_abs_n,
+                "policy": policy,
+            }
+            return {
+                **pair,
+                "startup_baseline_status": copy.deepcopy(
+                    CURRENT_RUNTIME_STARTUP_BASELINE_STATUS
+                ),
+            }
+
+        CURRENT_RUNTIME_STARTUP_BASELINE_FRAMES.append(
+            {
+                "wavelength_nm": wavelength.copy(),
+                "intensity": intensity.copy(),
+                "timestamp_sec": source_timestamp_sec,
+                "observed_monotonic_sec": observed_monotonic_sec,
+            }
+        )
+        maximum_buffer_frames = max(minimum_frames + 3, minimum_frames * 2)
+        if len(CURRENT_RUNTIME_STARTUP_BASELINE_FRAMES) > maximum_buffer_frames:
+            del CURRENT_RUNTIME_STARTUP_BASELINE_FRAMES[:-maximum_buffer_frames]
+
+        frame_count = len(CURRENT_RUNTIME_STARTUP_BASELINE_FRAMES)
+        if frame_count < minimum_frames:
+            CURRENT_RUNTIME_STARTUP_BASELINE_STATUS = {
+                "status": "startup_baseline_collecting",
+                "ready": False,
+                "frame_count": frame_count,
+                "minimum_frames": minimum_frames,
+                "force_gate": force_evidence,
+                "policy": policy,
+            }
+            return {
+                **pair,
+                "startup_baseline_status": copy.deepcopy(
+                    CURRENT_RUNTIME_STARTUP_BASELINE_STATUS
+                ),
+            }
+
+        candidate = CURRENT_RUNTIME_STARTUP_BASELINE_FRAMES[-minimum_frames:]
+        reference_x = candidate[-1]["wavelength_nm"]
+        aligned = np.vstack(
+            [
+                np.interp(reference_x, item["wavelength_nm"], item["intensity"])
+                for item in candidate
+            ]
+        )
+        median_spectrum = np.median(aligned, axis=0)
+        bright_floor = max(
+            1.0,
+            float(np.percentile(np.abs(median_spectrum), 95)) * 0.01,
+        )
+        valid_mask = np.isfinite(median_spectrum) & (
+            np.abs(median_spectrum) >= bright_floor
+        )
+        if int(np.sum(valid_mask)) < 16:
+            valid_mask = np.isfinite(median_spectrum)
+        motions = [
+            _startup_baseline_motion(
+                aligned[index - 1], aligned[index], valid_mask
+            )
+            for index in range(1, aligned.shape[0])
+        ]
+        shape_motion_rms = max((item[0] for item in motions), default=0.0)
+        common_gain_motion = max((item[1] for item in motions), default=0.0)
+        source_timestamps = [
+            float(item["timestamp_sec"])
+            for item in candidate
+            if item.get("timestamp_sec") is not None
+        ]
+        source_span = (
+            max(source_timestamps) - min(source_timestamps)
+            if len(source_timestamps) >= 2
+            else 0.0
+        )
+        monotonic_span = float(
+            candidate[-1]["observed_monotonic_sec"]
+            - candidate[0]["observed_monotonic_sec"]
+        )
+        span_sec = max(float(source_span), monotonic_span)
+        stable = bool(
+            span_sec >= minimum_span_sec
+            and shape_motion_rms <= max_shape_motion
+            and common_gain_motion <= max_common_gain_motion
+        )
+        if not stable:
+            CURRENT_RUNTIME_STARTUP_BASELINE_STATUS = {
+                "status": "startup_baseline_waiting_for_stability",
+                "ready": False,
+                "frame_count": frame_count,
+                "candidate_frame_count": minimum_frames,
+                "span_sec": span_sec,
+                "shape_motion_rms": shape_motion_rms,
+                "common_gain_motion": common_gain_motion,
+                "max_shape_motion_rms": max_shape_motion,
+                "max_common_gain_motion": max_common_gain_motion,
+                "force_gate": force_evidence,
+                "policy": policy,
+            }
+            return {
+                **pair,
+                "startup_baseline_status": copy.deepcopy(
+                    CURRENT_RUNTIME_STARTUP_BASELINE_STATUS
+                ),
+            }
+
+        baseline_result = bridge.set_runtime_startup_spectrum_baseline(
+            "P22",
+            reference_x,
+            median_spectrum,
+            sample_count=minimum_frames,
+            span_sec=span_sec,
+            shape_motion_rms=shape_motion_rms,
+            common_gain_motion=common_gain_motion,
+            policy=policy,
+        )
+        CURRENT_RUNTIME_STARTUP_BASELINE_STATUS = {
+            "status": baseline_result.get("status"),
+            "ready": bool(baseline_result.get("ok")),
+            "frame_count": minimum_frames,
+            "span_sec": span_sec,
+            "shape_motion_rms": shape_motion_rms,
+            "common_gain_motion": common_gain_motion,
+            "force_gate": force_evidence,
+            "policy": policy,
         }
-    adapter = ALL_SOURCE_BETA_ADAPTER
+        if baseline_result.get("ok"):
+            CURRENT_RUNTIME_STARTUP_BASELINE_FRAMES.clear()
+
+    refreshed = bridge.spectral_model_input(channel_id="P22")
+    return {
+        **refreshed,
+        "startup_baseline_status": copy.deepcopy(
+            CURRENT_RUNTIME_STARTUP_BASELINE_STATUS
+        ),
+    }
+
+
+def _predict_current_runtime(
+    latest_override: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the sole deployed optical model on each unique spectrum frame."""
+
+    global CURRENT_RUNTIME_BASELINE_TOKEN
+    global CURRENT_RUNTIME_LAST_FRAME_KEY
+    global CURRENT_RUNTIME_UNIQUE_FRAME_COUNT
+    global CURRENT_RUNTIME_LAST_PAYLOAD
+
+    adapter = CURRENT_RUNTIME_ADAPTER
     if adapter is None:
         return {
             "ok": False,
-            "status": "latest_beta_model_unavailable",
-            "reason": ALL_SOURCE_BETA_ERROR,
-            "runtime_role": "primary_beta_latest_model_only",
-            "old_model_fallback_enabled": False,
+            "status": "current_runtime_model_unavailable",
+            "reason": CURRENT_RUNTIME_ERROR,
+            "runtime_role": "deployed_current_model_only",
         }
 
-    pair = bridge.spectral_model_input(channel_id="P22")
+    pair = _ensure_current_runtime_startup_baseline(latest_override)
     if not pair.get("ok"):
+        startup_status = pair.get("startup_baseline_status")
+        startup_state = (
+            str(startup_status.get("status"))
+            if isinstance(startup_status, dict) and startup_status.get("status")
+            else None
+        )
+        blocked_status = (
+            startup_state
+            or ("baseline_required" if pair.get("current_ready") else "spectrum_required")
+        )
         return {
             "ok": False,
-            "status": (
-                "baseline_required"
-                if pair.get("current_ready")
-                else "spectrum_required"
-            ),
-            "reason": pair.get("reason"),
-            "runtime_role": "primary_beta_latest_model_only",
-            "old_model_fallback_enabled": False,
+            "status": blocked_status,
+            "reason": startup_status or pair.get("reason"),
+            "runtime_role": "deployed_current_model_only",
         }
     latest = pair["latest"]
     if (
@@ -894,21 +1258,21 @@ def _predict_all_source_beta(
     )
     started = time.perf_counter()
     try:
-        with ALL_SOURCE_BETA_LOCK:
-            if baseline_token != ALL_SOURCE_BETA_BASELINE_TOKEN:
+        with CURRENT_RUNTIME_LOCK:
+            if baseline_token != CURRENT_RUNTIME_BASELINE_TOKEN:
                 adapter.set_baseline(
                     baseline["wavelength_nm"],
                     baseline["intensity"],
                 )
-                ALL_SOURCE_BETA_BASELINE_TOKEN = baseline_token
-                ALL_SOURCE_BETA_LAST_FRAME_KEY = None
-                ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT = 0
-                ALL_SOURCE_BETA_LAST_PAYLOAD = None
+                CURRENT_RUNTIME_BASELINE_TOKEN = baseline_token
+                CURRENT_RUNTIME_LAST_FRAME_KEY = None
+                CURRENT_RUNTIME_UNIQUE_FRAME_COUNT = 0
+                CURRENT_RUNTIME_LAST_PAYLOAD = None
             if (
-                frame_key == ALL_SOURCE_BETA_LAST_FRAME_KEY
-                and ALL_SOURCE_BETA_LAST_PAYLOAD is not None
+                frame_key == CURRENT_RUNTIME_LAST_FRAME_KEY
+                and CURRENT_RUNTIME_LAST_PAYLOAD is not None
             ):
-                cached = copy.deepcopy(ALL_SOURCE_BETA_LAST_PAYLOAD)
+                cached = copy.deepcopy(CURRENT_RUNTIME_LAST_PAYLOAD)
                 cached["duplicate_frame_ignored"] = True
                 cached["cache_lookup_latency_ms"] = (
                     time.perf_counter() - started
@@ -958,7 +1322,7 @@ def _predict_all_source_beta(
                         "reason": f"{type(exc).__name__}: {exc}",
                     }
                 if runtime_baseline_update.get("ok"):
-                    ALL_SOURCE_BETA_BASELINE_TOKEN = _spectrum_token(
+                    CURRENT_RUNTIME_BASELINE_TOKEN = _spectrum_token(
                         pending_baseline["wavelength_nm"].tolist(),
                         pending_baseline["intensity"].tolist(),
                     )
@@ -967,22 +1331,21 @@ def _predict_all_source_beta(
                         baseline["wavelength_nm"],
                         baseline["intensity"],
                     )
-                    ALL_SOURCE_BETA_BASELINE_TOKEN = baseline_token
-                    ALL_SOURCE_BETA_LAST_FRAME_KEY = None
-                    ALL_SOURCE_BETA_LAST_PAYLOAD = None
+                    CURRENT_RUNTIME_BASELINE_TOKEN = baseline_token
+                    CURRENT_RUNTIME_LAST_FRAME_KEY = None
+                    CURRENT_RUNTIME_LAST_PAYLOAD = None
                     runtime_baseline_update = {
                         **runtime_baseline_update,
                         "adapter_baseline_rollback_applied": True,
                         "rollback_baseline_token": baseline_token,
                     }
-            ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT += 1
+            CURRENT_RUNTIME_UNIQUE_FRAME_COUNT += 1
             payload = {
                 **prediction,
-                "runtime_role": "primary_beta_latest_model_only",
+                "runtime_role": "deployed_current_model_only",
                 "drives_operator_ui": True,
                 "drives_digital_twin": True,
-                "old_model_fallback_enabled": False,
-                "unique_frame_count": ALL_SOURCE_BETA_UNIQUE_FRAME_COUNT,
+                "unique_frame_count": CURRENT_RUNTIME_UNIQUE_FRAME_COUNT,
                 "backend_inference_latency_ms": (
                     time.perf_counter() - started
                 )
@@ -991,657 +1354,15 @@ def _predict_all_source_beta(
                 "cache_lookup_latency_ms": 0.0,
                 "runtime_baseline_update": runtime_baseline_update,
             }
-            ALL_SOURCE_BETA_LAST_FRAME_KEY = frame_key
-            ALL_SOURCE_BETA_LAST_PAYLOAD = copy.deepcopy(payload)
+            CURRENT_RUNTIME_LAST_FRAME_KEY = frame_key
+            CURRENT_RUNTIME_LAST_PAYLOAD = copy.deepcopy(payload)
             return payload
     except Exception as exc:
         return {
             "ok": False,
-            "status": "latest_beta_model_inference_error",
+            "status": "current_runtime_model_inference_error",
             "reason": f"{type(exc).__name__}: {exc}",
-            "runtime_role": "primary_beta_latest_model_only",
-            "old_model_fallback_enabled": False,
-        }
-
-
-def _predict_dynamic_temporal_shadow(
-    latest_override: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Evaluate each unique spectrum on the model's trained temporal scale."""
-
-    global DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN
-    global DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY
-    global DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT
-    global DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD
-    global DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC
-    global DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM
-
-    adapter = DYNAMIC_TEMPORAL_SHADOW_ADAPTER
-    if adapter is None:
-        return {
-            "ok": False,
-            "status": "dynamic_shadow_unavailable",
-            "reason": DYNAMIC_TEMPORAL_SHADOW_ERROR,
-            "runtime_role": "shadow_only_not_driving_digital_twin",
-            "drives_operator_ui": False,
-            "drives_digital_twin": False,
-        }
-    pair = bridge.spectral_model_input(channel_id="P22")
-    if not pair.get("ok"):
-        return {
-            "ok": False,
-            "status": "baseline_required" if pair.get("current_ready") else "spectrum_required",
-            "reason": pair.get("reason"),
-            "runtime_role": "shadow_only_not_driving_digital_twin",
-            "drives_operator_ui": False,
-            "drives_digital_twin": False,
-        }
-    latest = pair["latest"]
-    if (
-        isinstance(latest_override, dict)
-        and isinstance(latest_override.get("wavelength_nm"), list)
-        and isinstance(latest_override.get("intensity"), list)
-        and latest_override.get("wavelength_nm")
-        and len(latest_override["wavelength_nm"]) == len(latest_override["intensity"])
-    ):
-        # Synchronized recording passes the exact spectrum frame being written.
-        # This avoids a one-frame race if the live SDK publishes again between
-        # the capture read and temporal-model inference.
-        latest = latest_override
-    baseline = pair["baseline"]
-    baseline_token = _spectrum_token(
-        baseline["wavelength_nm"],
-        baseline["intensity"],
-    )
-    frame_key = (
-        latest.get("frame_id"),
-        latest.get("timestamp"),
-        latest.get("source"),
-        _spectrum_fingerprint(latest["wavelength_nm"], latest["intensity"]),
-    )
-    started = time.perf_counter()
-    try:
-        with DYNAMIC_TEMPORAL_SHADOW_LOCK:
-            if baseline_token != DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN:
-                adapter.set_baseline(
-                    baseline["wavelength_nm"],
-                    baseline["intensity"],
-                )
-                DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN = baseline_token
-                DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY = None
-                DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT = 0
-                DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD = None
-                DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC = None
-                DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM = None
-            if (
-                frame_key == DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY
-                and DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD is not None
-            ):
-                cached = copy.deepcopy(DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD)
-                cached["duplicate_frame_ignored"] = True
-                cached["cache_lookup_latency_ms"] = (
-                    time.perf_counter() - started
-                ) * 1000.0
-                return cached
-
-            DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT += 1
-            run_inference = (
-                DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT
-                % DYNAMIC_TEMPORAL_SHADOW_INFERENCE_STRIDE
-                == 0
-            )
-            current_spectrum = np.asarray(latest["intensity"], dtype=float)
-            try:
-                current_timestamp_sec = float(latest.get("timestamp"))
-            except (TypeError, ValueError):
-                current_timestamp_sec = None
-            if (
-                current_timestamp_sec is not None
-                and DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC is not None
-                and current_timestamp_sec
-                < DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC
-            ):
-                return {
-                    "ok": False,
-                    "status": "out_of_order_temporal_frame_rejected",
-                    "reason": "source_timestamp_moved_backwards",
-                    "source_timestamp_sec": current_timestamp_sec,
-                    "last_source_timestamp_sec": (
-                        DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC
-                    ),
-                    "runtime_role": "shadow_only_not_driving_digital_twin",
-                    "drives_operator_ui": False,
-                    "drives_digital_twin": False,
-                }
-            expected_interval_sec = max(
-                0.01,
-                float(adapter.bundle.get("frame_interval_sec_estimated") or 0.04),
-            )
-            source_interval_sec: float | None = None
-            if (
-                current_timestamp_sec is not None
-                and DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC is not None
-            ):
-                candidate_interval = (
-                    current_timestamp_sec
-                    - DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC
-                )
-                if 0.0 < candidate_interval <= 5.0:
-                    source_interval_sec = candidate_interval
-            resample_steps = 1
-            if (
-                source_interval_sec is not None
-                and DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM is not None
-                and DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM.shape
-                == current_spectrum.shape
-            ):
-                resample_steps = max(
-                    1,
-                    min(
-                        DYNAMIC_TEMPORAL_SHADOW_MAX_RESAMPLE_STEPS,
-                        int(round(source_interval_sec / expected_interval_sec)),
-                    ),
-                )
-
-            raw_response_level = str(latest.get("response_level") or "").lower()
-            raw_qa_status = str(latest.get("qa_status") or "").lower()
-            external_no_contact_hint = bool(
-                raw_response_level == "no_contact"
-                and raw_qa_status not in {"invalid", "error", "stale"}
-            )
-            previous_spectrum = DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM
-            prediction: dict[str, Any] | None = None
-            for step_index in range(1, resample_steps + 1):
-                is_physical_frame = step_index == resample_steps
-                if previous_spectrum is None or resample_steps == 1:
-                    model_spectrum = current_spectrum
-                else:
-                    fraction = step_index / resample_steps
-                    model_spectrum = previous_spectrum + fraction * (
-                        current_spectrum - previous_spectrum
-                    )
-                prediction = adapter.update(
-                    latest["wavelength_nm"],
-                    model_spectrum,
-                    run_inference=bool(run_inference and is_physical_frame),
-                    physical_frame=is_physical_frame,
-                    external_no_contact_hint=(
-                        external_no_contact_hint if is_physical_frame else None
-                    ),
-                    source_timestamp_sec=(
-                        current_timestamp_sec if is_physical_frame else None
-                    ),
-                )
-            if prediction is None:  # pragma: no cover - defensive contract guard
-                raise RuntimeError("temporal resampler produced no model frame")
-            runtime_baseline_update = None
-            pending_baseline = adapter.consume_pending_runtime_baseline_update()
-            if pending_baseline is not None:
-                try:
-                    runtime_baseline_update = (
-                        bridge.set_runtime_recovery_spectrum_baseline(
-                            "P22",
-                            pending_baseline["wavelength_nm"],
-                            pending_baseline["intensity"],
-                            sample_count=int(
-                                pending_baseline.get("sample_count") or 1
-                            ),
-                            span_sec=float(
-                                pending_baseline.get("span_sec") or 0.0
-                            ),
-                            shape_motion_rms=pending_baseline.get(
-                                "shape_motion_rms"
-                            ),
-                            common_gain_motion=pending_baseline.get(
-                                "common_gain_motion"
-                            ),
-                            policy=str(
-                                pending_baseline.get("policy")
-                                or "multi_evidence_release_then_spectral_stationarity"
-                            ),
-                        )
-                    )
-                except Exception as exc:
-                    runtime_baseline_update = {
-                        "ok": False,
-                        "status": "runtime_recovery_baseline_commit_error",
-                        "reason": f"{type(exc).__name__}: {exc}",
-                    }
-                if runtime_baseline_update.get("ok"):
-                    baseline_token = _spectrum_token(
-                        pending_baseline["wavelength_nm"].tolist(),
-                        pending_baseline["intensity"].tolist(),
-                    )
-                    DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN = baseline_token
-                else:
-                    # The adapter applies its recovered baseline before asking the
-                    # bridge to commit it. Keep both layers transactional: if the
-                    # bridge rejects the candidate, restore the previously active
-                    # spectrum instead of letting model and bridge references drift.
-                    adapter.set_baseline(
-                        baseline["wavelength_nm"],
-                        baseline["intensity"],
-                    )
-                    DYNAMIC_TEMPORAL_SHADOW_BASELINE_TOKEN = baseline_token
-                    DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC = None
-                    DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM = None
-                    runtime_baseline_update = {
-                        **runtime_baseline_update,
-                        "adapter_baseline_rollback_applied": True,
-                        "rollback_baseline_token": baseline_token,
-                    }
-            DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_TIMESTAMP_SEC = current_timestamp_sec
-            DYNAMIC_TEMPORAL_SHADOW_LAST_SOURCE_SPECTRUM = current_spectrum.copy()
-            payload = {
-                "ok": True,
-                "status": prediction.get("status"),
-                "prediction": prediction,
-                "inference_executed_this_frame": run_inference,
-                "unique_frame_count": DYNAMIC_TEMPORAL_SHADOW_UNIQUE_FRAME_COUNT,
-                "inference_latency_ms": (time.perf_counter() - started) * 1000.0,
-                "duplicate_frame_ignored": False,
-                "cache_lookup_latency_ms": 0.0,
-                "physical_frame_resampling_enabled": True,
-                "temporal_resample_steps": resample_steps,
-                "model_frame_interval_ms": expected_interval_sec * 1000.0,
-                "source_frame_interval_ms": (
-                    source_interval_sec * 1000.0
-                    if source_interval_sec is not None
-                    else None
-                ),
-                "external_no_contact_hint": external_no_contact_hint,
-                "baseline_token": baseline_token,
-                "runtime_baseline_update": runtime_baseline_update,
-                "runtime_role": "shadow_only_not_driving_digital_twin",
-                "drives_operator_ui": False,
-                "drives_digital_twin": False,
-                "deployment_ready": False,
-                "response_level_semantics": "approximate_manual_level_not_force_N",
-            }
-            DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY = frame_key
-            DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD = copy.deepcopy(payload)
-            return payload
-    except Exception as exc:
-        return {
-            "ok": False,
-            "status": "dynamic_shadow_inference_error",
-            "reason": f"{type(exc).__name__}: {exc}",
-            "runtime_role": "shadow_only_not_driving_digital_twin",
-            "drives_operator_ui": False,
-            "drives_digital_twin": False,
-        }
-
-
-def _dynamic_temporal_display_prediction(
-    dynamic_payload: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Adapt the pre-review temporal model to the existing twin contract.
-
-    The artifact retains its validation metadata, while an explicitly selected
-    temporal mode may drive the Operator view and digital twin.
-    """
-
-    payload = dynamic_payload if isinstance(dynamic_payload, dict) else {}
-    prediction = payload.get("prediction")
-    if not payload.get("ok") or not isinstance(prediction, dict):
-        return {
-            "ok": False,
-            "status": str(payload.get("status") or "dynamic_temporal_unavailable"),
-            "reason": payload.get("reason"),
-            "prediction": None,
-            "runtime_role": "operator_validation_candidate",
-            "drives_operator_ui": False,
-            "drives_digital_twin": False,
-        }
-    if prediction.get("ready") is not True:
-        return {
-            "ok": False,
-            "status": str(prediction.get("status") or "window_warming_up"),
-            "reason": "temporal_window_not_ready",
-            "prediction": None,
-            "history_frames": prediction.get("history_frames"),
-            "required_frames": prediction.get("required_frames"),
-            "runtime_role": "operator_validation_candidate",
-            "drives_operator_ui": False,
-            "drives_digital_twin": False,
-        }
-
-    proxy = prediction.get("digital_twin_proxy")
-    if not isinstance(proxy, dict):
-        return {
-            "ok": False,
-            "status": "dynamic_temporal_proxy_missing",
-            "reason": "digital_twin_proxy_missing",
-            "prediction": None,
-            "runtime_role": "operator_validation_candidate",
-            "drives_operator_ui": False,
-            "drives_digital_twin": False,
-        }
-
-    contact = prediction.get("contact") or {
-        "label": "no_contact",
-        "confidence": None,
-        "probabilities": {},
-    }
-    position = prediction.get("position")
-    response_level = prediction.get("response_level")
-    position_confidence = (
-        float(position.get("confidence"))
-        if isinstance(position, dict) and position.get("confidence") is not None
-        else None
-    )
-    response_confidence = (
-        float(response_level.get("confidence"))
-        if isinstance(response_level, dict)
-        and response_level.get("confidence") is not None
-        else None
-    )
-    uncertainty_reasons: list[str] = []
-    if proxy.get("active") is True:
-        if position_confidence is not None and position_confidence < 0.55:
-            uncertainty_reasons.append("low_position_confidence")
-        if response_confidence is not None and response_confidence < 0.55:
-            uncertainty_reasons.append("low_response_level_confidence")
-
-    force_level = response_level or {
-        "label": "no_contact",
-        "confidence": contact.get("confidence"),
-        "probabilities": {},
-    }
-    display_prediction = {
-        "schema_version": "dynamic_temporal_validation_display_v1",
-        "recognition_source": "dynamic_temporal_v3_validation",
-        "contact": contact,
-        "position": position,
-        # Keep the legacy key for the existing frontend contract. Its semantics
-        # remain an approximate response level, never a calibrated force value.
-        "force_level": force_level,
-        "response_level": response_level,
-        "force_model_scope": "approximate_manual_response_level_not_force_N",
-        "response_level_semantics": "approximate_manual_level_not_force_N",
-        "operational_state": prediction.get("operational_state"),
-        "release_guard": prediction.get("release_guard"),
-        "runtime_baseline_recovery": prediction.get(
-            "runtime_baseline_recovery"
-        ),
-        "digital_twin": {
-            "active": bool(proxy.get("active")),
-            "position_id": proxy.get("position_id"),
-            "force_level": proxy.get("response_level"),
-            "response_level": proxy.get("response_level"),
-            "deformation_proxy": float(proxy.get("deformation_proxy") or 0.0),
-            "surface_grid": proxy.get("surface_grid"),
-            "surface_metrics": proxy.get("surface_metrics"),
-            "visualization_semantics": proxy.get("visualization_semantics"),
-            "physical_output_semantics": proxy.get("physical_output_semantics"),
-        },
-        "uncertainty": {
-            "review_needed": bool(uncertainty_reasons),
-            "reasons": uncertainty_reasons,
-        },
-        "temporal_window": {
-            "history_frames": prediction.get("history_frames"),
-            "required_frames": prediction.get("required_frames"),
-            "frame_counter": prediction.get("frame_counter"),
-        },
-    }
-    return {
-        "ok": True,
-        "status": "temporal_validation_ready",
-        "prediction": display_prediction,
-        "runtime_role": "operator_validation_candidate",
-        "drives_operator_ui": True,
-        "drives_digital_twin": True,
-        "deployment_ready": False,
-        "validation_only": True,
-    }
-
-
-def _static_spectral_model_status() -> dict:
-    observed_windows = (
-        {
-            str(window.candidate_id): float(window.center_nm)
-            for window in STATIC_SPECTRAL_PREDICTOR.peak_windows
-        }
-        if STATIC_SPECTRAL_PREDICTOR is not None
-        else {}
-    )
-    observed_centers = list(observed_windows.values())
-    return {
-        "loaded": STATIC_SPECTRAL_PREDICTOR is not None,
-        "model_path": str(STATIC_SPECTRAL_MODEL_PATH),
-        "model_error": STATIC_SPECTRAL_MODEL_ERROR,
-        "model_bundle_sha256": (
-            STATIC_SPECTRAL_PREDICTOR.bundle_sha256
-            if STATIC_SPECTRAL_PREDICTOR is not None
-            else None
-        ),
-        "recognition_scope": "manual_fingertip_static_spectrum_position_and_level",
-        "contact_geometry": "broad_approximate_manual_fingertip_contact",
-        "position_classes": ["P11", "P21", "P31", "P12", "P22", "P32", "P13", "P23", "P33"],
-        "force_classes": ["light", "normal", "hard"],
-        "force_semantics": "approximate_manual_response_level_not_force_N",
-        "training_no_contact_semantics": "post_press_release_recovery_no_contact",
-        "runtime_baseline_contract": "stable_multiframe_post_release_recovery_baseline_required",
-        "evaluation_scope": "single_session_leave_one_repeat_index_out_baseline",
-        "confidence_source": "uncalibrated_predict_proba",
-        "uncertainty_policy": "diagnostic_only_does_not_change_prediction",
-        "observed_model_feature_windows_nm": observed_windows,
-        "observed_model_feature_window_range_nm": (
-            [min(observed_centers), max(observed_centers)]
-            if observed_centers
-            else None
-        ),
-        "observed_model_feature_window_status": "trained_current_ordinary_fbg_dataset",
-        "future_3x3_target_plan_active": False,
-        "shadow_candidate": {
-            "loaded": STATIC_SPECTRAL_CANDIDATE_PREDICTOR is not None,
-            "model_path": str(STATIC_SPECTRAL_CANDIDATE_MODEL_PATH),
-            "model_error": STATIC_SPECTRAL_CANDIDATE_ERROR,
-            "model_bundle_sha256": (
-                STATIC_SPECTRAL_CANDIDATE_PREDICTOR.bundle_sha256
-                if STATIC_SPECTRAL_CANDIDATE_PREDICTOR is not None
-                else None
-            ),
-            "runtime_role": "shadow_only_not_driving_digital_twin",
-            "deployment_ready": False,
-            "baseline_contract": "same_current_session_baseline_as_primary_model",
-            "candidate_id": "v7_fused_common_mode_corrected_shift",
-            "confidence_source": "ensemble_vote_fraction_not_calibrated",
-            "promotion_gate": "labeled_live_position_and_level_validation_required",
-            "temporal_stabilization": {
-                "runtime_role": "shadow_diagnostic_only",
-                "window_unique_frames": 5,
-                "minimum_contact_frames": 3,
-                "release_frames": 2,
-            },
-            "session_level_calibration": _session_level_calibration_status(),
-        },
-    }
-
-
-def _predict_static_spectral_shadow(
-    latest_wavelength: list[float],
-    latest_intensity: list[float],
-    baseline_wavelength: list[float],
-    baseline_intensity: list[float],
-) -> dict:
-    """Run the candidate beside the deployed model without controlling the UI."""
-
-    if STATIC_SPECTRAL_CANDIDATE_PREDICTOR is None:
-        return {
-            "ok": False,
-            "status": "candidate_unavailable",
-            "reason": STATIC_SPECTRAL_CANDIDATE_ERROR,
-            "runtime_role": "shadow_only_not_driving_digital_twin",
-        }
-    started = time.perf_counter()
-    try:
-        prediction = STATIC_SPECTRAL_CANDIDATE_PREDICTOR.predict(
-            latest_wavelength,
-            latest_intensity,
-            baseline_wavelength_nm=baseline_wavelength,
-            baseline_intensity_counts=baseline_intensity,
-        )
-        return {
-            "ok": True,
-            "status": "shadow_ready",
-            "prediction": prediction,
-            "inference_latency_ms": (time.perf_counter() - started) * 1000.0,
-            "runtime_role": "shadow_only_not_driving_digital_twin",
-            "drives_operator_ui": False,
-            "drives_digital_twin": False,
-        }
-    except Exception as exc:
-        return {
-            "ok": False,
-            "status": "shadow_inference_error",
-            "reason": f"{type(exc).__name__}: {exc}",
-            "runtime_role": "shadow_only_not_driving_digital_twin",
-        }
-
-
-def _predict_static_spectral_frame(*, include_shadow: bool = False) -> dict:
-    global STATIC_SPECTRAL_MODEL_CACHE_KEY, STATIC_SPECTRAL_MODEL_CACHE_VALUE
-
-    pair = bridge.spectral_model_input(channel_id="P22")
-    if STATIC_SPECTRAL_PREDICTOR is None:
-        return {
-            "ok": False,
-            "status": "model_unavailable",
-            "reason": STATIC_SPECTRAL_MODEL_ERROR or "static spectral model is not loaded",
-            "input": {
-                key: pair.get(key)
-                for key in (
-                    "current_ready",
-                    "baseline_ready",
-                    "baseline_spectrum_status",
-                    "baseline_spectrum_sample_count",
-                    "baseline_spectrum_span_sec",
-                )
-            },
-        }
-    if not pair.get("ok"):
-        return {
-            "ok": False,
-            "status": "baseline_required" if pair.get("current_ready") else "spectrum_required",
-            "reason": pair.get("reason"),
-            "input": {
-                key: pair.get(key)
-                for key in (
-                    "current_ready",
-                    "baseline_ready",
-                    "baseline_spectrum_status",
-                    "baseline_spectrum_sample_count",
-                    "baseline_spectrum_span_sec",
-                )
-            },
-        }
-    latest = pair["latest"]
-    baseline = pair["baseline"]
-    latest_intensity = latest["intensity"]
-    latest_wavelength = latest["wavelength_nm"]
-    baseline_intensity = baseline["intensity"]
-    baseline_wavelength = baseline["wavelength_nm"]
-
-    baseline_token = _spectrum_token(baseline_wavelength, baseline_intensity)
-
-    cache_key = (
-        bool(include_shadow),
-        latest.get("frame_id"),
-        latest.get("timestamp"),
-        latest.get("source"),
-        _spectrum_fingerprint(latest_wavelength, latest_intensity),
-        pair.get("baseline_spectrum_sample_count"),
-        pair.get("baseline_spectrum_status"),
-        baseline_token,
-    )
-    started = time.perf_counter()
-    try:
-        with STATIC_SPECTRAL_MODEL_LOCK:
-            if (
-                STATIC_SPECTRAL_MODEL_CACHE_KEY == cache_key
-                and STATIC_SPECTRAL_MODEL_CACHE_VALUE is not None
-            ):
-                cached = copy.deepcopy(STATIC_SPECTRAL_MODEL_CACHE_VALUE)
-                cached["cache_hit"] = True
-                cached["cache_lookup_latency_ms"] = (time.perf_counter() - started) * 1000.0
-                return cached
-            prediction = STATIC_SPECTRAL_PREDICTOR.predict(
-                latest_wavelength,
-                latest_intensity,
-                baseline_wavelength_nm=baseline_wavelength,
-                baseline_intensity_counts=baseline_intensity,
-            )
-            if include_shadow:
-                shadow_candidate = _predict_static_spectral_shadow(
-                    latest_wavelength,
-                    latest_intensity,
-                    baseline_wavelength,
-                    baseline_intensity,
-                )
-                if shadow_candidate.get("ok") and isinstance(
-                    shadow_candidate.get("prediction"), dict
-                ):
-                    shadow_candidate["temporal_stabilization"] = (
-                        STATIC_SPECTRAL_SHADOW_STABILIZER.update(
-                            frame_id=latest.get("frame_id")
-                            or latest.get("timestamp"),
-                            prediction=shadow_candidate["prediction"],
-                            baseline_token=baseline_token,
-                            timestamp=latest.get("timestamp"),
-                        )
-                    )
-                    shadow_candidate["session_calibrated_force"] = (
-                        _apply_session_level_calibration(
-                            shadow_candidate["prediction"],
-                            shadow_candidate["temporal_stabilization"],
-                            baseline_token=baseline_token,
-                        )
-                    )
-            else:
-                shadow_candidate = {
-                    "ok": False,
-                    "status": "shadow_not_requested",
-                    "runtime_role": "shadow_only_not_driving_digital_twin",
-                    "drives_operator_ui": False,
-                    "drives_digital_twin": False,
-                    "request_hint": "set include_shadow=true for validation",
-                }
-            result = {
-                "ok": True,
-                "status": "ready",
-                "prediction": prediction,
-                "shadow_candidate": shadow_candidate,
-                "inference_latency_ms": (time.perf_counter() - started) * 1000.0,
-                "cache_hit": False,
-                "cache_lookup_latency_ms": 0.0,
-                "input": {
-                    "current_ready": True,
-                    "baseline_ready": True,
-                    "baseline_spectrum_sample_count": pair.get("baseline_spectrum_sample_count"),
-                    "baseline_spectrum_noise_ratio": pair.get("baseline_spectrum_noise_ratio"),
-                    "baseline_spectrum_drift_ratio": pair.get("baseline_spectrum_drift_ratio"),
-                    "baseline_spectrum_span_sec": pair.get("baseline_spectrum_span_sec"),
-                    "baseline_spectrum_status": pair.get("baseline_spectrum_status"),
-                    "baseline_spectrum_semantic_role": pair.get(
-                        "baseline_spectrum_semantic_role"
-                    ),
-                    "baseline_spectrum_token": baseline_token,
-                    "frame_id": latest.get("frame_id"),
-                    "timestamp": latest.get("timestamp"),
-                    "spectrum_points": len(latest["intensity"]),
-                },
-            }
-            STATIC_SPECTRAL_MODEL_CACHE_KEY = cache_key
-            STATIC_SPECTRAL_MODEL_CACHE_VALUE = copy.deepcopy(result)
-            return result
-    except Exception as exc:
-        return {
-            "ok": False,
-            "status": "inference_error",
-            "reason": f"{type(exc).__name__}: {exc}",
-            "input": {"current_ready": True, "baseline_ready": True},
+            "runtime_role": "deployed_current_model_only",
         }
 
 
@@ -2668,85 +2389,22 @@ def _capture_spectrum_frame() -> dict[str, Any]:
 
 
 def _capture_temporal_response(latest: dict[str, Any]) -> dict[str, Any]:
-    if ALL_SOURCE_BETA_ENABLED:
-        prediction = _predict_all_source_beta(latest_override=latest)
-        return {
-            "model_source": "ordinary_fbg_all_data_beta_v1",
-            "model_status": prediction.get("status"),
-            "model_ready": bool(
-                prediction.get("ok")
-                and prediction.get("status") == "ready"
-            ),
-            "inference_latency_ms": prediction.get(
-                "backend_inference_latency_ms",
-                prediction.get("inference_latency_ms"),
-            ),
-            "estimated_force_fz_n": prediction.get(
-                "estimated_force_fz_n"
-            ),
-            "force_sensor_is_runtime_input": False,
-            "runtime_input": "optical_spectrum_time_series",
-            "drives_operator_ui": True,
-            "drives_digital_twin": True,
-            **prediction,
-        }
-
-    wavelength = latest.get("wavelength_nm")
-    intensity = latest.get("intensity")
-    if (
-        not isinstance(wavelength, list)
-        or not isinstance(intensity, list)
-        or not wavelength
-        or len(wavelength) != len(intensity)
-    ):
-        return {
-            "model_source": "dynamic_temporal_v3_shadow",
-            "model_status": "invalid_temporal_spectrum",
-            "model_ready": False,
-            "reason": "wavelength_and_intensity_arrays_required",
-            "drives_operator_ui": False,
-            "drives_digital_twin": False,
-        }
-    frame_key = (
-        latest.get("frame_id"),
-        latest.get("timestamp"),
-        latest.get("source"),
-        _spectrum_fingerprint(wavelength, intensity),
-    )
-    with DYNAMIC_TEMPORAL_SHADOW_LOCK:
-        if (
-            frame_key != DYNAMIC_TEMPORAL_SHADOW_LAST_FRAME_KEY
-            or DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD is None
-        ):
-            return {
-                "model_source": "dynamic_temporal_v3_shadow",
-                "model_status": "temporal_prediction_not_available_for_frame",
-                "model_ready": False,
-                "reason": "recorder_is_cache_consumer_not_temporal_state_producer",
-                "drives_operator_ui": False,
-                "drives_digital_twin": False,
-            }
-        payload = copy.deepcopy(DYNAMIC_TEMPORAL_SHADOW_LAST_PAYLOAD)
-    prediction = payload.get("prediction")
-    if not isinstance(prediction, dict):
-        return {
-            "model_source": "dynamic_temporal_v3_shadow",
-            "model_status": payload.get("status") or "dynamic_temporal_unavailable",
-            "model_ready": False,
-            "reason": payload.get("reason"),
-            "inference_latency_ms": payload.get("inference_latency_ms"),
-            "drives_operator_ui": False,
-            "drives_digital_twin": False,
-        }
+    prediction = _predict_current_runtime(latest_override=latest)
     return {
-        "model_source": "dynamic_temporal_v3_shadow",
-        "model_status": payload.get("status") or prediction.get("status"),
-        "model_ready": bool(payload.get("ok") and prediction.get("ready")),
-        "inference_latency_ms": payload.get("inference_latency_ms"),
-        "inference_executed_this_frame": payload.get("inference_executed_this_frame"),
-        "temporal_resample_steps": payload.get("temporal_resample_steps"),
-        "drives_operator_ui": False,
-        "drives_digital_twin": False,
+        "model_source": "ordinary_fbg_all_data_beta_v1",
+        "model_status": prediction.get("status"),
+        "model_ready": bool(
+            prediction.get("ok") and prediction.get("status") == "ready"
+        ),
+        "inference_latency_ms": prediction.get(
+            "backend_inference_latency_ms",
+            prediction.get("inference_latency_ms"),
+        ),
+        "estimated_force_fz_n": prediction.get("estimated_force_fz_n"),
+        "force_sensor_is_runtime_input": False,
+        "runtime_input": "optical_spectrum_time_series",
+        "drives_operator_ui": True,
+        "drives_digital_twin": True,
         **prediction,
     }
 
@@ -2761,7 +2419,7 @@ def _resolve_capture_output_root() -> Path:
 
 def _capture_provenance_snapshot() -> dict[str, Any]:
     baseline_token, model_pair = _current_runtime_baseline_token()
-    model_status = _static_spectral_model_status()
+    model_status = _current_runtime_status()
     sdk_status = sdk_live_reader.status()
     force_status = px6d_reader.status()
     attested_by = str(
@@ -2773,7 +2431,7 @@ def _capture_provenance_snapshot() -> dict[str, Any]:
         "px6d_reference": PX6D_REFERENCE_CONFIG_PATH,
         "thumb_scene": THUMB_SCENE_CONFIG_PATH,
         "mfbg_intensity_profile": PROJECT_ROOT / "config" / "mfbg_intensity_3x3.yaml",
-        "hybrid_spectrum_channels": DYNAMIC_TEMPORAL_PEAK_CONFIG_PATH,
+        "hybrid_spectrum_channels": HYBRID_SPECTRUM_CHANNEL_CONFIG_PATH,
     }
     return {
         "software": dict(RELEASE_IDENTITY),
@@ -2806,7 +2464,9 @@ def _capture_provenance_snapshot() -> dict[str, Any]:
         "model": {
             "runtime_role": "primary_operator_and_digital_twin",
             "model_path": model_status.get("model_path"),
-            "model_bundle_sha256": model_status.get("model_bundle_sha256"),
+            "model_bundle_sha256": _artifact_identity(
+                CURRENT_RUNTIME_MODEL_PATH
+            ).get("sha256"),
             "loaded": model_status.get("loaded"),
             "confidence_source": model_status.get("confidence_source"),
             "evaluation_scope": model_status.get("evaluation_scope"),
@@ -2960,7 +2620,7 @@ def _operator_response_band_thresholds() -> dict[str, float | str]:
         "normal_max": normal_max,
         "semantics": str(
             raw.get("semantics")
-            or "uncalibrated_normalized_visual_response_not_force_N"
+            or "normalized_surface_activity_thresholds_only"
         ),
     }
 
@@ -3972,7 +3632,7 @@ async def application_lifespan(_app: FastAPI):
 
 
 app = FastAPI(
-    title="TOUCH System Trained Static Spectrum Twin",
+    title="TOUCH",
     version=str(RELEASE_IDENTITY.get("version") or "unknown"),
     lifespan=application_lifespan,
 )
@@ -3985,6 +3645,8 @@ app.add_middleware(
 app.include_router(mfbg_intensity_router)
 app.mount("/static", StaticFiles(directory=FRONTEND_ROOT), name="static")
 
+CURRENT_RECOGNITION_SCOPE = "optical_contact_position_and_continuous_fz"
+
 
 @app.get("/")
 def index() -> FileResponse:
@@ -3993,43 +3655,49 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict:
-    payload = {
+    runtime_status = _current_runtime_status()
+    return {
         "ok": True,
-        "app": "TOUCH System Trained Static Spectrum Twin",
+        "app": "TOUCH",
         "version": RELEASE_IDENTITY.get("version"),
         "build_id": RELEASE_IDENTITY.get("build_id"),
         "source_commit": RELEASE_IDENTITY.get("source_commit"),
         "release": dict(RELEASE_IDENTITY),
-        "mode": "standalone_bayspec_trained_static_spectrum_twin",
-        "backend_contract_version": "trained_static_spectrum_api_v2",
+        "mode": "standalone_touch_all_data_spectral_runtime",
+        "backend_contract_version": "touch_current_runtime_api_v1",
         "previous_p22_pd_voltage_app": "kept_separate",
         "optical_intensity_edition": "kept_separate",
-        "demodulation_mode": "dynamic_temporal_full_spectrum_classifier",
-        "recognition_scope": "manual_fingertip_static_spectrum_position_and_level",
-        "primary_signal": "512_point_bayspec_full_spectrum_plus_stable_recovery_baseline",
+        "demodulation_mode": "current_optical_force_runtime",
+        "recognition_scope": CURRENT_RECOGNITION_SCOPE,
+        "primary_signal": "bayspec_full_spectrum_time_series",
         "diagnostic_spectrum_scope": "global_9fbg_wavelength_intensity_area_shape",
         "carrier_channel_id": "P22",
-        "carrier_channel_role": "full_spectrum_transport_for_trained_model",
+        "carrier_channel_role": "full_spectrum_transport_for_current_runtime",
         "temperature_strain_decoupled": False,
         "array_mode": "global_spectrum_unmapped",
         "physical_channel_mapping_final": False,
         "real_3x3_enabled": False,
-        "trained_static_model_primary": False,
-        "default_operator_recognition": "dynamic_temporal_v3_validation",
-        "dynamic_temporal_validation_primary": True,
-        "dynamic_temporal_validation_diagnostics_only": False,
-        "static_spectral_fallback_available": STATIC_SPECTRAL_PREDICTOR is not None,
+        "default_operator_recognition": "ordinary_fbg_all_data_beta_v1",
         "mfbg_intensity_profile_available": True,
         "future_primary_sensor_profile": "mfbg_intensity_3x3",
         "active_runtime_sensor_profile": "ordinary_fbg_hybrid_spectral",
         "sensor_profile_isolation": True,
         "position_output_semantics": "approximate_manual_fingertip_contact_region",
-        "response_level_semantics": "approximate_manual_light_normal_hard_not_force_N",
+        "response_level_semantics": "continuous_optical_fz_estimate_no_fixed_upper_limit",
         "response_band_thresholds": _operator_response_band_thresholds(),
         "not_pd_voltage": True,
         "calibrated_physical_output": False,
-        "trained_static_spectral_model": _static_spectral_model_status(),
-        "dynamic_temporal_shadow": _dynamic_temporal_shadow_status(),
+        "runtime_model": runtime_status,
+        "observed_training_force_range_n": runtime_status[
+            "observed_training_force_range_n"
+        ],
+        "validated_force_range_n": runtime_status[
+            "observed_training_force_range_n"
+        ],
+        "force_above_observed_training_range": (
+            "reported_as_unvalidated_extrapolation_without_upper_clip"
+        ),
+        "force_sensor_is_runtime_model_input": False,
         "array_wavelength_plan": _array_wavelength_plan_payload(),
         "ui_style": "lab_light_digital_twin_like_previous_app",
         "status": bridge.status(),
@@ -4040,50 +3708,12 @@ def health() -> dict:
         "optical_force_capture": optical_force_capture.status(),
         "recorded_demo": recorded_demo_library.status(),
         "recognition_runtime": {
-            "active_model_id": "dynamic_temporal_v3_validation",
-            "display_name": "Temporal validation",
-            "switchable": True,
-            "legacy_models_enabled": True,
+            "active_model_id": "ordinary_fbg_all_data_beta_v1",
+            "display_name": "Current all-data spectral model",
+            "switchable": False,
+            "model_count": 1,
         },
     }
-    if ALL_SOURCE_BETA_ENABLED:
-        payload.update(
-            {
-                "demodulation_mode": "all_source_optical_force_beta",
-                "recognition_scope": (
-                    "optical_contact_position_and_continuous_fz_estimation"
-                ),
-                "primary_signal": "bayspec_full_spectrum_time_series",
-                "trained_static_model_primary": False,
-                "default_operator_recognition": (
-                    "ordinary_fbg_all_data_beta_v1"
-                ),
-                "dynamic_temporal_validation_primary": False,
-                "dynamic_temporal_validation_diagnostics_only": False,
-                "static_spectral_fallback_available": False,
-                "all_source_beta_primary": True,
-                "all_source_beta_model": _all_source_beta_status(),
-                "response_level_semantics": (
-                    "continuous_optical_fz_estimate_0_to_5_n"
-                ),
-                "force_sensor_is_runtime_model_input": False,
-                "old_model_fallback_enabled": False,
-                "recognition_runtime": {
-                    "active_model_id": "ordinary_fbg_all_data_beta_v1",
-                    "display_name": "All-data spectral model",
-                    "switchable": False,
-                    "legacy_models_enabled": False,
-                },
-            }
-        )
-    else:
-        payload.update(
-            {
-                "all_source_beta_primary": False,
-                "all_source_beta_model": _all_source_beta_status(),
-            }
-        )
-    return payload
 
 
 @app.get("/api/status")
@@ -4190,6 +3820,173 @@ def px6d_trace(limit: int = Query(default=500, ge=1, le=20000)) -> dict:
     return result
 
 
+def _measurement_json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _measurement_json_safe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_measurement_json_safe(item) for item in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _measurement_default_root() -> Path:
+    capture_status = optical_force_capture.status()
+    configured = (
+        capture_status.get("requested_output_root")
+        or capture_status.get("default_output_root")
+    )
+    if configured:
+        return Path(str(configured)).expanduser().resolve()
+    return (Path.home() / "Documents" / "TOUCH" / "captures").resolve()
+
+
+def _measurement_has_trace(session_dir: Path) -> bool:
+    return any(
+        (session_dir / filename).is_file()
+        for filename in ("frame_summary.csv", "synchronized_frames.jsonl")
+    )
+
+
+def _measurement_csv_fields(session_dir: Path) -> set[str]:
+    summary_path = session_dir / "frame_summary.csv"
+    if not summary_path.is_file():
+        return set()
+    try:
+        with summary_path.open(encoding="utf-8-sig", newline="") as handle:
+            return set(next(csv.reader(handle), []))
+    except OSError:
+        return set()
+
+
+def _measurement_session_metadata(session_dir: Path) -> dict[str, Any]:
+    metadata_path = session_dir / "session_metadata.json"
+    metadata: dict[str, Any] = {}
+    if metadata_path.is_file():
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+            if isinstance(payload, dict):
+                metadata = payload
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            metadata = {}
+    fields = _measurement_csv_fields(session_dir)
+    selected_outputs = metadata.get("selected_outputs")
+    selected_outputs = selected_outputs if isinstance(selected_outputs, list) else []
+    modified_at = max(
+        (
+            candidate.stat().st_mtime
+            for candidate in (
+                session_dir / "frame_summary.csv",
+                session_dir / "synchronized_frames.jsonl",
+                metadata_path,
+            )
+            if candidate.is_file()
+        ),
+        default=session_dir.stat().st_mtime,
+    )
+    return {
+        "session_id": str(metadata.get("session_id") or session_dir.name),
+        "path": str(session_dir.resolve()),
+        "position_label": str(metadata.get("position_label") or "unlabeled"),
+        "trial_id": str(metadata.get("trial_id") or "--"),
+        "started_at_epoch_sec": metadata.get("started_at_epoch_sec"),
+        "ended_at_epoch_sec": metadata.get("ended_at_epoch_sec"),
+        "captured_timeline_frames": metadata.get("captured_timeline_frames"),
+        "selected_outputs": selected_outputs,
+        "has_force_reference": bool(
+            "force" in selected_outputs
+            or "force_fz_n" in fields
+            or (session_dir / "force_timeseries.csv").is_file()
+        ),
+        "has_optical_estimate": bool(
+            "optical_estimated_fz_n" in fields
+            or (session_dir / "synchronized_frames.jsonl").is_file()
+        ),
+        "modified_at_epoch_sec": modified_at,
+    }
+
+
+def _measurement_sessions(root: Path, limit: int = 100) -> list[dict[str, Any]]:
+    if not root.exists() or not root.is_dir():
+        return []
+    candidates = [root] if _measurement_has_trace(root) else [
+        child
+        for child in root.iterdir()
+        if child.is_dir() and _measurement_has_trace(child)
+    ]
+    sessions = [_measurement_session_metadata(candidate) for candidate in candidates]
+    sessions.sort(
+        key=lambda item: float(item.get("modified_at_epoch_sec") or 0.0),
+        reverse=True,
+    )
+    return sessions[:limit]
+
+
+def _downsample_measurement_trace(
+    rows: list[dict[str, Any]], limit: int = 600
+) -> list[dict[str, Any]]:
+    if len(rows) <= limit:
+        selected = rows
+    else:
+        indices = np.linspace(0, len(rows) - 1, num=limit, dtype=int)
+        selected = [rows[int(index)] for index in np.unique(indices)]
+    fields = (
+        "capture_index",
+        "elapsed_time_sec",
+        "reference_fz_n",
+        "analysis_estimated_fz_n",
+        "analysis_raw_estimated_fz_n",
+        "analysis_estimate_source",
+        "recorded_runtime_optical_estimated_fz_n",
+        "optical_estimated_fz_n",
+        "force_phase",
+        "cycle_id",
+    )
+    return [
+        {field: _measurement_json_safe(row.get(field)) for field in fields}
+        for row in selected
+    ]
+
+
+def _measurement_estimate_evidence(
+    session_dir: Path,
+    trace_rows: list[dict[str, Any]],
+    requested_source: str,
+    analysis_config: MeasurementAnalysisConfig,
+) -> dict[str, Any]:
+    """Resolve one scientifically coherent force-estimate curve.
+
+    The automatic order favors grouped out-of-fold predictions. Current-model
+    replay is second because a recording may also have been used to train that
+    model. Recorded runtime output remains available as historical evidence,
+    but is never mixed frame-by-frame with either newer source.
+    """
+
+    return resolve_measurement_estimate_evidence(
+        session_dir,
+        trace_rows,
+        requested_source,
+        outputs_root=PROJECT_ROOT / "outputs",
+        model_path=CURRENT_RUNTIME_MODEL_PATH,
+        peak_config_path=HYBRID_SPECTRUM_CHANNEL_CONFIG_PATH,
+        runtime_recovery_config=_load_runtime_baseline_recovery_config(),
+        runtime_gate_config=_load_all_source_runtime_gate_config(),
+        baseline_frame_count=analysis_config.replay_baseline_frame_count,
+        baseline_strategy=analysis_config.replay_baseline_strategy,
+        baseline_minimum_stable_frames=(
+            analysis_config.replay_baseline_minimum_stable_frames
+        ),
+        baseline_stability_mad_multiplier=(
+            analysis_config.replay_baseline_stability_mad_multiplier
+        ),
+    )
+
+
 @app.get("/api/px6d_capture/status")
 def px6d_capture_status() -> dict:
     capture_status = optical_force_capture.status()
@@ -4273,97 +4070,153 @@ def px6d_capture_stop() -> dict:
     return {"mode": "optical_px6d_synchronized_capture", **result}
 
 
-@app.get("/api/shadow/session_level_calibration")
-def shadow_session_level_calibration_status() -> dict:
-    current_token, pair = _current_runtime_baseline_token()
-    status_payload = _session_level_calibration_status()
-    status_payload.update(
+@app.get("/api/measurement/sessions")
+def measurement_sessions(
+    root: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=250),
+) -> dict:
+    selected_root = (
+        Path(root).expanduser().resolve()
+        if root and str(root).strip()
+        else _measurement_default_root()
+    )
+    sessions = _measurement_sessions(selected_root, limit=limit)
+    return _measurement_json_safe(
         {
             "ok": True,
-            "current_baseline_ready": current_token is not None,
-            "current_baseline_token": current_token,
-            "baseline_matches": bool(
-                current_token is not None
-                and status_payload.get("baseline_token") == current_token
-            ),
-            "baseline_status": pair.get("baseline_spectrum_status"),
+            "mode": "diagnostics_measurement_analysis",
+            "root": str(selected_root),
+            "session_count": len(sessions),
+            "sessions": sessions,
         }
     )
-    return status_payload
 
 
-@app.post("/api/shadow/session_level_calibration")
-async def load_shadow_session_level_calibration(request: Request) -> dict:
-    global STATIC_SPECTRAL_SESSION_CALIBRATOR
-    global STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE
-
+@app.post("/api/measurement/analyze")
+async def measurement_analyze(request: Request) -> dict:
     try:
-        request_payload = await request.json()
-    except Exception:
-        return {"ok": False, "status": "request_body_must_be_json"}
-    payload = request_payload.get("calibration", request_payload)
-    try:
-        calibrator = PerPositionOrdinalCalibrator.from_dict(payload)
+        payload = await request.json()
     except Exception as exc:
         return {
             "ok": False,
-            "status": "invalid_session_calibration_payload",
+            "mode": "diagnostics_measurement_analysis",
+            "status": "analysis_request_invalid",
+            "reason": f"request body must be JSON: {type(exc).__name__}",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "mode": "diagnostics_measurement_analysis",
+            "status": "analysis_request_invalid",
+            "reason": "request body must be a JSON object",
+        }
+    requested_estimate_source = str(
+        payload.get("estimate_source") or "best_available"
+    ).strip().lower()
+    if requested_estimate_source not in EVIDENCE_SOURCES:
+        return {
+            "ok": False,
+            "mode": "diagnostics_measurement_analysis",
+            "status": "measurement_estimate_source_invalid",
+            "reason": f"unsupported estimate source: {requested_estimate_source}",
+            "supported_estimate_sources": list(EVIDENCE_SOURCES),
+        }
+    raw_session_dir = str(payload.get("session_dir") or "").strip()
+    if not raw_session_dir:
+        return {
+            "ok": False,
+            "mode": "diagnostics_measurement_analysis",
+            "status": "session_required",
+            "reason": "select a completed recording session",
+        }
+    session_dir = Path(raw_session_dir).expanduser().resolve()
+    if not session_dir.is_dir() or not _measurement_has_trace(session_dir):
+        return {
+            "ok": False,
+            "mode": "diagnostics_measurement_analysis",
+            "status": "measurement_trace_not_found",
+            "reason": "frame_summary.csv or synchronized_frames.jsonl was not found",
+        }
+    capture_status = optical_force_capture.status()
+    active_output = capture_status.get("output_directory")
+    if capture_status.get("running") and active_output:
+        try:
+            active_matches = Path(str(active_output)).expanduser().resolve() == session_dir
+        except OSError:
+            active_matches = False
+        if active_matches:
+            return {
+                "ok": False,
+                "mode": "diagnostics_measurement_analysis",
+                "status": "recording_still_active",
+                "reason": "stop and save the recording before analysis",
+            }
+    try:
+        config = load_measurement_config(
+            MEASUREMENT_ANALYSIS_CONFIG_PATH
+            if MEASUREMENT_ANALYSIS_CONFIG_PATH.is_file()
+            else None
+        )
+        trace_rows = await asyncio.to_thread(load_measurement_trace, session_dir)
+        evidence = await asyncio.to_thread(
+            _measurement_estimate_evidence,
+            session_dir,
+            trace_rows,
+            requested_estimate_source,
+            config,
+        )
+        if not evidence.get("ok"):
+            return _measurement_json_safe(
+                {
+                    "ok": False,
+                    "mode": "diagnostics_measurement_analysis",
+                    "status": evidence.get(
+                        "status", "measurement_estimate_source_unavailable"
+                    ),
+                    "reason": evidence.get("reason"),
+                    "requested_estimate_source": requested_estimate_source,
+                    "evidence": evidence,
+                }
+            )
+        result = await asyncio.to_thread(
+            analyze_measurement_session,
+            session_dir,
+            config,
+            estimate_overlay=evidence.get("overlay"),
+            estimate_source_info=evidence,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        return {
+            "ok": False,
+            "mode": "diagnostics_measurement_analysis",
+            "status": "analysis_failed",
             "reason": f"{type(exc).__name__}: {exc}",
         }
-    missing_positions = sorted(
-        set(CALIBRATION_POSITION_ORDER) - set(calibrator.anchors)
+    return _measurement_json_safe(
+        {
+            "ok": True,
+            "mode": "diagnostics_measurement_analysis",
+            "status": "complete",
+            "requested_estimate_source": requested_estimate_source,
+            "selected_estimate_source": evidence.get("source"),
+            "estimate_evidence": {
+                key: value
+                for key, value in evidence.items()
+                if key != "overlay"
+            },
+            "session": _measurement_session_metadata(session_dir),
+            "summary": result["summary"],
+            "cycle_rows": result["cycle_rows"],
+            "trace": _downsample_measurement_trace(result["trace_rows"]),
+        }
     )
-    if missing_positions:
-        return {
-            "ok": False,
-            "status": "incomplete_position_calibration",
-            "missing_positions": missing_positions,
-        }
-    current_token, pair = _current_runtime_baseline_token()
-    if current_token is None:
-        return {
-            "ok": False,
-            "status": "current_runtime_baseline_required",
-            "baseline_status": pair.get("baseline_spectrum_status"),
-        }
-    if calibrator.baseline_token != current_token:
-        return {
-            "ok": False,
-            "status": "calibration_baseline_token_mismatch",
-            "calibration_baseline_token": calibrator.baseline_token,
-            "current_baseline_token": current_token,
-        }
-    with STATIC_SPECTRAL_SESSION_CALIBRATION_LOCK:
-        STATIC_SPECTRAL_SESSION_CALIBRATOR = calibrator
-        STATIC_SPECTRAL_SESSION_CALIBRATION_SOURCE = {
-            "loaded_at": time.time(),
-            "source": request_payload.get("source") or "local_api",
-            "trial_count": request_payload.get("trial_count"),
-        }
-    return {
-        "ok": True,
-        "status": "session_level_calibration_loaded_shadow_only",
-        **_session_level_calibration_status(),
-    }
-
-
-@app.delete("/api/shadow/session_level_calibration")
-def delete_shadow_session_level_calibration() -> dict:
-    return _clear_session_level_calibration("manual_api_clear")
 
 
 @app.post("/api/reset")
 def reset(keep_baseline: bool = Query(default=True)) -> dict:
     with LIVE_SOURCE_CONTROL_LOCK:
         result = bridge.reset(keep_baseline=keep_baseline)
-        result["dynamic_temporal_shadow_reset"] = _reset_dynamic_temporal_shadow(
-            "api_reset"
-        )
-        result["all_source_beta_reset"] = _reset_all_source_beta("api_reset")
-        if not keep_baseline:
-            result["session_level_calibration_reset"] = (
-                _clear_session_level_calibration("baseline_reset")
-            )
+        result["runtime_model_reset"] = _reset_current_runtime("api_reset")
         result.update({"mode": "bayspec_wavelength_shift_reset"})
         return result
 
@@ -4449,13 +4302,7 @@ def _begin_acquisition_session() -> dict:
     output scientifically ambiguous.
     """
 
-    calibration_reset = _clear_session_level_calibration(
-        "new_acquisition_session"
-    )
-    dynamic_shadow_reset = _reset_dynamic_temporal_shadow(
-        "new_acquisition_session"
-    )
-    all_source_beta_reset = _reset_all_source_beta(
+    runtime_model_reset = _reset_current_runtime(
         "new_acquisition_session"
     )
     result = bridge.reset(keep_baseline=False)
@@ -4463,9 +4310,7 @@ def _begin_acquisition_session() -> dict:
         **result,
         "baseline_invalidated": True,
         "baseline_requirement": "stable_current_session_post_release_recovery",
-        "session_level_calibration_reset": calibration_reset,
-        "dynamic_temporal_shadow_reset": dynamic_shadow_reset,
-        "all_source_beta_reset": all_source_beta_reset,
+        "runtime_model_reset": runtime_model_reset,
     }
 
 
@@ -4952,11 +4797,8 @@ async def set_baseline(request: Request) -> dict:
         payload = {}
     with LIVE_SOURCE_CONTROL_LOCK:
         result = bridge.set_baseline(payload)
-        if result.get("baseline_set") or result.get("static_model_spectrum_baseline_ready"):
-            result["dynamic_temporal_shadow_reset"] = _reset_dynamic_temporal_shadow(
-                "runtime_baseline_replaced"
-            )
-            result["all_source_beta_reset"] = _reset_all_source_beta(
+        if result.get("baseline_set") or result.get("current_runtime_spectrum_baseline_ready"):
+            result["runtime_model_reset"] = _reset_current_runtime(
                 "runtime_baseline_replaced"
             )
         result.update({"mode": "bayspec_wavelength_baseline_set"})
@@ -5045,16 +4887,16 @@ def set_global_candidate_baseline(
         }
     )
     model_baseline_ready = bool(
-        model_baseline.get("static_model_spectrum_baseline_ready")
+        model_baseline.get("current_runtime_spectrum_baseline_ready")
     )
     result = (
         bridge.set_global_candidate_baseline(minimum_frames=minimum_frames)
         if model_baseline_ready
         else {
             "ok": False,
-            "reason": model_baseline.get("static_model_spectrum_baseline_status")
+            "reason": model_baseline.get("current_runtime_spectrum_baseline_status")
             or model_baseline.get("reason")
-            or "static_model_spectrum_baseline_not_ready",
+            or "current_runtime_spectrum_baseline_not_ready",
             "candidate_baseline_skipped": True,
         }
     )
@@ -5065,9 +4907,9 @@ def set_global_candidate_baseline(
         failure_reason = str(result.get("reason") or "global_candidate_baseline_not_ready")
     elif not model_baseline_ready:
         failure_reason = str(
-            model_baseline.get("static_model_spectrum_baseline_status")
+            model_baseline.get("current_runtime_spectrum_baseline_status")
             or model_baseline.get("reason")
-            or "static_model_spectrum_baseline_not_ready"
+            or "current_runtime_spectrum_baseline_not_ready"
         )
     result.update(
         {
@@ -5078,18 +4920,18 @@ def set_global_candidate_baseline(
                 else f"Baseline not ready: {failure_reason}. Keep the sensor released and try again."
             ),
             "mode": "global_9fbg_candidate_display_baseline",
-            "recognition_scope": "global_3x3_hybrid_spectral_fingerprint",
+            "recognition_scope": CURRENT_RECOGNITION_SCOPE,
             "physical_channel_mapping_final": False,
             "formal_model_baseline": False,
             "no_contact_attestation": copy.deepcopy(
                 GLOBAL_BASELINE_ATTESTATION
             ),
             "candidate_display_baseline_ok": candidate_baseline_ok,
-            "static_model_spectrum_baseline": {
+            "current_runtime_spectrum_baseline": {
                 "ok": model_baseline_ready,
                 "baseline_set": bool(model_baseline.get("baseline_set")),
                 "role": "post_press_release_recovery_no_contact_full_spectrum_baseline",
-                "status": model_baseline.get("static_model_spectrum_baseline_status"),
+                "status": model_baseline.get("current_runtime_spectrum_baseline_status"),
                 "sample_count": (
                     model_baseline.get("baseline_spectrum_sample_count_by_channel", {})
                     or {}
@@ -5109,20 +4951,14 @@ def set_global_candidate_baseline(
                 "reason": (
                     None
                     if model_baseline_ready
-                    else model_baseline.get("static_model_spectrum_baseline_status")
+                    else model_baseline.get("current_runtime_spectrum_baseline_status")
                     or model_baseline.get("reason")
                 ),
             },
         }
     )
     if baseline_ready:
-        result["session_level_calibration_reset"] = (
-            _clear_session_level_calibration("runtime_baseline_replaced")
-        )
-        result["dynamic_temporal_shadow_reset"] = (
-            _reset_dynamic_temporal_shadow("runtime_baseline_replaced")
-        )
-        result["all_source_beta_reset"] = _reset_all_source_beta(
+        result["runtime_model_reset"] = _reset_current_runtime(
             "runtime_baseline_replaced"
         )
     return result
@@ -5173,18 +5009,9 @@ def frame(
 def global_spectrum_frame(
     trace_limit: int = Query(default=8, ge=1, le=20000),
     include_spectrum: bool = Query(default=True),
-    include_shadow: bool = Query(default=False),
-    include_dynamic_shadow: bool = Query(default=False),
-    temporal_validation_mode: bool = Query(default=False),
 ) -> dict:
-    """Expose one full-spectrum carrier frame for joint nine-FBG processing.
+    """Return one atomic frame driven by the sole deployed spectral model."""
 
-    The hardware reader currently stores the raw spectrum on a legacy P22
-    carrier record. This endpoint makes that transport detail explicit and
-    prevents global recognition clients from treating P22 as their input scope.
-    """
-
-    temporal_validation_enabled = temporal_validation_mode is True
     watcher_status = export_watcher.status()
     sdk_status = sdk_live_reader.status()
     result = bridge.frame(
@@ -5192,465 +5019,229 @@ def global_spectrum_frame(
         trace_limit=trace_limit,
         include_spectrum=include_spectrum,
     )
-    latest = result.get("latest")
-    source_gate = _model_display_source_gate(latest, watcher_status, sdk_status)
-    global_candidate_summary = {
-        "valid_candidate_count": 0,
-        "expected_candidate_count": 9,
-        "dominant_candidate_id": None,
-        "peak_absolute_shift_pm": None,
-        "candidate_reference_status": "provisional_no_contact_reference",
-        "physical_channel_mapping_final": False,
-    }
-    global_frame_qa = {
-        "candidate_contract_complete": False,
-        "baseline_ready": False,
-        "source_fresh": bool(source_gate["source_fresh"]),
-        "live_source_active": source_gate["live_source_active"],
-        "selected_live_source": source_gate["selected_live_source"],
-        "model_input_source_allowed": source_gate["model_input_source_allowed"],
-        "wavelength_axis_valid": source_gate["wavelength_axis_valid"],
-        "wavelength_axis_blockers": source_gate["wavelength_axis_blockers"],
-        "formal_spectrum_input_allowed": source_gate[
-            "formal_spectrum_input_allowed"
-        ],
-        "model_input_source_mode": source_gate["model_input_source_mode"],
-        "operator_display_valid": source_gate["operator_display_valid"],
-        "frame_age_sec": None,
-        "display_available": False,
-        "formal_recognition_allowed": False,
-        "blockers": ["no_global_spectrum_frame"],
-    }
-    if isinstance(latest, dict):
-        latest = dict(latest)
-        candidate_peaks = [
-            peak
-            for peak in (latest.get("spectrum_peaks") or [])
-            if isinstance(peak, dict) and peak.get("candidate_mapping")
-        ]
-        valid_candidates = [peak for peak in candidate_peaks if peak.get("valid") is True]
-        dominant_candidate = max(
-            valid_candidates,
-            key=lambda peak: float(peak.get("candidate_absolute_shift_pm") or 0.0),
-            default=None,
-        )
-        candidate_statuses = {
-            str(peak.get("candidate_reference_status") or "unknown")
-            for peak in valid_candidates
-        }
-        baseline_ready = (
-            len(valid_candidates) == 9
-            and candidate_statuses == {"session_global_no_contact_baseline"}
-        )
-        received_at = latest.get("ingested_at")
-        try:
-            frame_age_sec = max(0.0, time.time() - float(received_at))
-        except (TypeError, ValueError):
-            frame_age_sec = None
-        source_fresh = bool(source_gate["source_fresh"])
-        operator_display_valid = bool(source_gate["operator_display_valid"])
-        candidate_contract_complete = (
-            len(candidate_peaks) == 9
-            and len(valid_candidates) == 9
-            and [peak.get("candidate_id") for peak in candidate_peaks]
-            == [f"FBG{index:02d}" for index in range(1, 10)]
-        )
-        blockers: list[str] = []
-        if not candidate_contract_complete:
-            blockers.append("incomplete_or_invalid_global_candidate_set")
-        if not baseline_ready:
-            blockers.append("global_candidate_baseline_not_ready")
-        if not operator_display_valid:
-            blockers.append("stale_or_cached_global_frame")
-        response_allowed = (
-            candidate_contract_complete
-            and baseline_ready
-            and operator_display_valid
-        )
-        blockers.extend(
-            [
-                "physical_p11_p33_mapping_not_approved",
-                "deployable_global_model_not_attached",
-            ]
-        )
-        global_candidate_summary.update(
-            {
-                "valid_candidate_count": len(valid_candidates),
-                "dominant_candidate_id": (
-                    dominant_candidate.get("candidate_id")
-                    if dominant_candidate is not None
-                    else None
-                ),
-                "peak_absolute_shift_pm": (
-                    dominant_candidate.get("candidate_absolute_shift_pm")
-                    if dominant_candidate is not None
-                    else None
-                ),
-                "candidate_reference_status": (
-                    next(iter(candidate_statuses))
-                    if len(candidate_statuses) == 1
-                    else "mixed_or_incomplete_reference"
-                ),
-                "baseline_ready": baseline_ready,
-                "responding_candidate_count": (
-                    sum(
-                        1
-                        for peak in valid_candidates
-                        if float(peak.get("candidate_absolute_shift_pm") or 0.0) >= 10.0
-                    )
-                    if response_allowed
-                    else 0
-                ),
-                "response_allowed": response_allowed,
-            }
-        )
-        global_frame_qa = {
-            "candidate_contract_complete": candidate_contract_complete,
-            "baseline_ready": baseline_ready,
-            "source_fresh": source_fresh,
-            "live_source_active": source_gate["live_source_active"],
-            "selected_live_source": source_gate["selected_live_source"],
-            "model_input_source_allowed": source_gate["model_input_source_allowed"],
-            "wavelength_axis_valid": source_gate["wavelength_axis_valid"],
-            "wavelength_axis_blockers": source_gate[
-                "wavelength_axis_blockers"
-            ],
-            "formal_spectrum_input_allowed": source_gate[
-                "formal_spectrum_input_allowed"
-            ],
-            "model_input_source_mode": source_gate["model_input_source_mode"],
-            "operator_display_valid": operator_display_valid,
-            "frame_age_sec": frame_age_sec,
-            "display_available": bool(candidate_peaks),
-            "response_allowed": response_allowed,
-            "formal_recognition_allowed": False,
-            "blockers": blockers,
-        }
-        latest.update(
-            {
-                "recognition_scope": "global_3x3_hybrid_spectral_fingerprint",
-                "candidate_contract_version": "global_9fbg_candidate_frame_v1",
-                "global_candidate_ids": [f"FBG{index:02d}" for index in range(1, 10)],
-                "carrier_channel_id": "P22",
-                "carrier_channel_role": "legacy_full_spectrum_transport_only",
-                "physical_channel_mapping_final": False,
-                "global_candidate_summary": global_candidate_summary,
-                "source_fresh": source_fresh,
-                "operator_display_valid": operator_display_valid,
-                "frame_age_sec": frame_age_sec,
-                "response_allowed": response_allowed,
-                "response_block_reason": next(
-                    (
-                        reason
-                        for reason in (
-                            "incomplete_or_invalid_global_candidate_set",
-                            "global_candidate_baseline_not_ready",
-                            "stale_or_cached_global_frame",
-                        )
-                        if reason in blockers
-                    ),
-                    None,
-                ),
-            }
-        )
-        result["latest"] = latest
-    # Restore the pre-review runtime contract: temporal validation drives the
-    # live twin when selected, while the much slower static ensemble remains an
-    # explicit fallback or diagnostic comparison.
-    # The Beta edition is latest-model-only. Running the legacy static model
-    # before replacing its result with the Beta prediction adds avoidable work
-    # to every UI poll and delays delivery of a newly acquired frame.
-    static_inference_requested = bool(
-        not ALL_SOURCE_BETA_ENABLED
-        and (not temporal_validation_enabled or include_shadow)
+    raw_latest = result.get("latest")
+    latest = dict(raw_latest) if isinstance(raw_latest, dict) else None
+    source_gate = _model_display_source_gate(
+        latest,
+        watcher_status,
+        sdk_status,
     )
-    if (
-        source_gate["formal_spectrum_input_allowed"]
-        and static_inference_requested
-    ):
-        static_model_frame = _predict_static_spectral_frame(
-            include_shadow=bool(include_shadow)
+
+    candidate_peaks = [
+        peak
+        for peak in ((latest or {}).get("spectrum_peaks") or [])
+        if isinstance(peak, dict) and peak.get("candidate_mapping")
+    ]
+    valid_candidates = [
+        peak for peak in candidate_peaks if peak.get("valid") is True
+    ]
+    dominant_candidate = max(
+        valid_candidates,
+        key=lambda peak: float(
+            peak.get("candidate_absolute_shift_pm") or 0.0
+        ),
+        default=None,
+    )
+    candidate_statuses = {
+        str(peak.get("candidate_reference_status") or "unknown")
+        for peak in valid_candidates
+    }
+    candidate_contract_complete = bool(
+        len(candidate_peaks) == 9
+        and len(valid_candidates) == 9
+        and [peak.get("candidate_id") for peak in candidate_peaks]
+        == [f"FBG{index:02d}" for index in range(1, 10)]
+    )
+    candidate_baseline_ready = bool(
+        len(valid_candidates) == 9
+        and candidate_statuses == {"session_global_no_contact_baseline"}
+    )
+    global_candidate_summary = {
+        "valid_candidate_count": len(valid_candidates),
+        "expected_candidate_count": 9,
+        "dominant_candidate_id": (
+            dominant_candidate.get("candidate_id")
+            if dominant_candidate is not None
+            else None
+        ),
+        "peak_absolute_shift_pm": (
+            dominant_candidate.get("candidate_absolute_shift_pm")
+            if dominant_candidate is not None
+            else None
+        ),
+        "candidate_reference_status": (
+            next(iter(candidate_statuses))
+            if len(candidate_statuses) == 1
+            else "mixed_or_incomplete_reference"
+        ),
+        "physical_channel_mapping_final": False,
+        "baseline_ready": candidate_baseline_ready,
+        "candidate_contract_complete": candidate_contract_complete,
+        "diagnostic_only": True,
+    }
+
+    if source_gate["model_input_source_allowed"]:
+        runtime_prediction = _predict_current_runtime(
+            latest_override=latest,
         )
-    elif source_gate["formal_spectrum_input_allowed"]:
-        static_model_frame = {
-            "ok": False,
-            "status": "skipped_temporal_validation_mode",
-            "reason": "dynamic_temporal_model_is_active",
-            "inference_skipped": True,
-        }
     else:
-        static_model_frame = {
+        runtime_prediction = {
             "ok": False,
-            "status": "formal_spectrum_input_blocked",
+            "status": "current_runtime_source_blocked",
             "reason": (
                 "wavelength_grid_required_for_formal_recognition"
                 if not source_gate["wavelength_axis_valid"]
                 else "stale_or_mismatched_live_source"
             ),
-            "source_gate": {
-                key: source_gate[key]
-                for key in (
-                    "model_input_source_mode",
-                    "qa_valid",
-                    "wavelength_axis_valid",
-                    "wavelength_axis_blockers",
-                )
-            },
+            "runtime_role": "deployed_current_model_only",
         }
-    static_prediction = static_model_frame.get("prediction") if static_model_frame.get("ok") else None
-    static_shadow = (
-        static_model_frame.get("shadow_candidate")
-        if isinstance(static_model_frame.get("shadow_candidate"), dict)
-        else None
+    runtime_ready = bool(
+        runtime_prediction.get("ok")
+        and runtime_prediction.get("status") == "ready"
+        and source_gate["operator_display_valid"]
     )
-    static_shadow_prediction = (
-        static_shadow.get("prediction")
-        if static_shadow is not None and static_shadow.get("ok")
-        else None
-    )
-    dynamic_requested = bool(
-        not ALL_SOURCE_BETA_ENABLED
-        and (include_dynamic_shadow is True or temporal_validation_enabled)
-    )
-    if not dynamic_requested:
-        dynamic_temporal_shadow = {
-            "ok": False,
-            "status": "dynamic_shadow_not_requested",
-            "request_hint": "set include_dynamic_shadow=true for diagnostic validation",
-            "runtime_role": "shadow_only_not_driving_digital_twin",
-            "drives_operator_ui": False,
-            "drives_digital_twin": False,
-        }
-    elif not source_gate["model_input_source_allowed"]:
-        dynamic_temporal_shadow = {
-            "ok": False,
-            "status": "dynamic_shadow_source_blocked",
-            "reason": "stale_or_mismatched_live_source",
-            "runtime_role": "shadow_only_not_driving_digital_twin",
-            "drives_operator_ui": False,
-            "drives_digital_twin": False,
-        }
-    else:
-        dynamic_temporal_shadow = _predict_dynamic_temporal_shadow()
-    dynamic_temporal_display = _dynamic_temporal_display_prediction(
-        dynamic_temporal_shadow
-    )
-    static_model_assisted_display_allowed = bool(
-        static_model_frame.get("ok") and source_gate["operator_display_valid"]
-    )
-    temporal_model_assisted_display_allowed = bool(
-        temporal_validation_enabled
-        and source_gate["model_input_source_allowed"]
-        and dynamic_temporal_display.get("ok")
-    )
-    if temporal_validation_enabled:
-        model_assisted_display_allowed = temporal_model_assisted_display_allowed
-        active_spectral_prediction = dynamic_temporal_display.get("prediction")
-        active_spectral_model_source = "dynamic_temporal_v3_validation"
-        active_spectral_model_status = dynamic_temporal_display.get("status")
-        active_spectral_model_expected = True
-        active_spectral_model_loaded = DYNAMIC_TEMPORAL_SHADOW_ADAPTER is not None
-        active_spectral_model_progress = {
-            "history_frames": dynamic_temporal_display.get("history_frames"),
-            "required_frames": dynamic_temporal_display.get("required_frames"),
-        }
-    else:
-        model_assisted_display_allowed = static_model_assisted_display_allowed
-        active_spectral_prediction = static_prediction
-        active_spectral_model_source = "static_spectral_model"
-        active_spectral_model_status = static_model_frame.get("status")
-        active_spectral_model_expected = bool(
-            _static_spectral_model_status().get("loaded")
+    block_reason = (
+        None
+        if runtime_ready
+        else str(
+            runtime_prediction.get("reason")
+            or runtime_prediction.get("status")
+            or "current_runtime_not_ready"
         )
-        active_spectral_model_loaded = active_spectral_model_expected
-        active_spectral_model_progress = None
-    if model_assisted_display_allowed:
-        model_assisted_display_block_reason = None
-    elif (
-        temporal_validation_enabled
-        and not source_gate["model_input_source_allowed"]
-    ):
-        model_assisted_display_block_reason = "stale_or_mismatched_live_source"
-    elif (
-        not temporal_validation_enabled
-        and not source_gate["formal_spectrum_input_allowed"]
-    ):
-        model_assisted_display_block_reason = (
-            "wavelength_grid_required_for_formal_recognition"
-            if not source_gate["wavelength_axis_valid"]
-            else "stale_or_mismatched_live_source"
-        )
-    elif temporal_validation_enabled:
-        model_assisted_display_block_reason = str(
-            dynamic_temporal_display.get("reason")
-            or dynamic_temporal_display.get("status")
-            or "dynamic_temporal_model_not_ready"
-        )
-    elif static_model_frame.get("ok"):
-        model_assisted_display_block_reason = "stale_or_mismatched_live_source"
-    else:
-        model_assisted_display_block_reason = str(
-            static_model_frame.get("reason") or static_model_frame.get("status") or "model_not_ready"
-        )
+    )
+    operator_visualization_frame = _build_operator_visualization_frame(
+        latest,
+        runtime_prediction,
+        ready=runtime_ready,
+        block_reason=block_reason,
+    )
 
-    all_source_beta_prediction: dict[str, Any] | None = None
-    if ALL_SOURCE_BETA_ENABLED:
-        if source_gate["model_input_source_allowed"]:
-            all_source_beta_prediction = _predict_all_source_beta(
-                latest_override=latest,
-            )
-        else:
-            all_source_beta_prediction = {
-                "ok": False,
-                "status": "latest_beta_model_source_blocked",
-                "reason": (
-                    "wavelength_grid_required_for_formal_recognition"
-                    if not source_gate["wavelength_axis_valid"]
-                    else "stale_or_mismatched_live_source"
+    try:
+        frame_age_sec = (
+            max(0.0, time.time() - float(latest.get("ingested_at")))
+            if latest is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        frame_age_sec = None
+
+    global_frame_qa = {
+        "candidate_contract_complete": candidate_contract_complete,
+        "candidate_baseline_ready": candidate_baseline_ready,
+        "candidate_diagnostics_only": True,
+        "source_fresh": bool(source_gate["source_fresh"]),
+        "live_source_active": source_gate["live_source_active"],
+        "selected_live_source": source_gate["selected_live_source"],
+        "model_input_source_allowed": source_gate[
+            "model_input_source_allowed"
+        ],
+        "wavelength_axis_valid": source_gate["wavelength_axis_valid"],
+        "wavelength_axis_blockers": source_gate[
+            "wavelength_axis_blockers"
+        ],
+        "formal_spectrum_input_allowed": source_gate[
+            "formal_spectrum_input_allowed"
+        ],
+        "model_input_source_mode": source_gate["model_input_source_mode"],
+        "operator_display_valid": source_gate["operator_display_valid"],
+        "frame_age_sec": frame_age_sec,
+        "display_available": latest is not None,
+        "runtime_baseline_ready": runtime_prediction.get("status")
+        not in {"baseline_required", "spectrum_required"},
+        "formal_recognition_allowed": runtime_ready,
+        "response_allowed": runtime_ready,
+        "blockers": [] if runtime_ready else [block_reason],
+    }
+
+    if latest is not None:
+        latest.update(
+            {
+                "recognition_scope": CURRENT_RECOGNITION_SCOPE,
+                "carrier_channel_id": "P22",
+                "carrier_channel_role": (
+                    "full_spectrum_transport_for_current_runtime"
                 ),
-                "runtime_role": "primary_beta_latest_model_only",
-                "old_model_fallback_enabled": False,
+                "physical_channel_mapping_final": False,
+                "global_candidate_summary": global_candidate_summary,
+                "source_fresh": bool(source_gate["source_fresh"]),
+                "operator_display_valid": bool(
+                    source_gate["operator_display_valid"]
+                ),
+                "frame_age_sec": frame_age_sec,
+                "response_allowed": runtime_ready,
+                "response_block_reason": block_reason,
+                "runtime_prediction": runtime_prediction,
+                "active_spectral_prediction": runtime_prediction,
+                "active_spectral_model_source": (
+                    "ordinary_fbg_all_data_beta_v1"
+                ),
+                "active_spectral_model_status": runtime_prediction.get(
+                    "status"
+                ),
+                "operator_visualization_frame": (
+                    operator_visualization_frame
+                ),
             }
-
-        beta_ready = bool(
-            all_source_beta_prediction.get("ok")
-            and all_source_beta_prediction.get("status") == "ready"
-            and source_gate["operator_display_valid"]
         )
-        model_assisted_display_allowed = beta_ready
-        active_spectral_prediction = all_source_beta_prediction
-        active_spectral_model_source = "ordinary_fbg_all_data_beta_v1"
-        active_spectral_model_status = all_source_beta_prediction.get("status")
-        active_spectral_model_expected = True
-        active_spectral_model_loaded = ALL_SOURCE_BETA_ADAPTER is not None
-        active_spectral_model_progress = {
-            "history_frames": all_source_beta_prediction.get(
-                "history_frames"
-            ),
-            "history_duration_sec": all_source_beta_prediction.get(
-                "history_duration_sec"
-            ),
-            "temporal_window_sec": all_source_beta_prediction.get(
-                "temporal_window_sec"
-            ),
-            "unique_frame_count": all_source_beta_prediction.get(
-                "unique_frame_count"
-            ),
-        }
-        model_assisted_display_block_reason = (
-            None
-            if beta_ready
-            else str(
-                all_source_beta_prediction.get("reason")
-                or all_source_beta_prediction.get("status")
-                or "latest_beta_model_not_ready"
-            )
-        )
-        static_model_frame = {
-            "ok": False,
-            "status": "skipped_beta_latest_model_only",
-            "reason": "old_models_are_not_loaded_or_bundled_in_beta",
-        }
-        static_prediction = None
-        static_shadow = None
-        static_shadow_prediction = None
-        dynamic_temporal_shadow = {
-            "ok": False,
-            "status": "skipped_beta_latest_model_only",
-            "reason": "old_models_are_not_loaded_or_bundled_in_beta",
-            "runtime_role": "disabled_in_beta_latest_model_only",
-            "drives_operator_ui": False,
-            "drives_digital_twin": False,
-        }
-        dynamic_temporal_display = {
-            "ok": False,
-            "status": "skipped_beta_latest_model_only",
-            "reason": "old_models_are_not_loaded_or_bundled_in_beta",
-        }
-        temporal_model_assisted_display_allowed = False
-        static_model_assisted_display_allowed = False
-        global_frame_qa["formal_recognition_allowed"] = beta_ready
-        global_frame_qa["response_allowed"] = beta_ready
-        global_frame_qa["model_baseline_ready"] = bool(
-            all_source_beta_prediction.get("ok")
-            and all_source_beta_prediction.get("status") == "ready"
-        )
-        global_frame_qa["blockers"] = (
-            []
-            if beta_ready
-            else [model_assisted_display_block_reason]
-        )
-
-    if isinstance(latest, dict):
-        latest["trained_static_spectral_prediction"] = static_prediction
-        latest["trained_static_spectral_model_status"] = static_model_frame.get("status")
-        latest["active_spectral_prediction"] = active_spectral_prediction
-        latest["active_spectral_model_source"] = active_spectral_model_source
-        latest["active_spectral_model_status"] = active_spectral_model_status
-        latest["active_spectral_model_loaded"] = active_spectral_model_loaded
-        latest["active_spectral_model_progress"] = active_spectral_model_progress
         result["latest"] = latest
+
+    runtime_status = _current_runtime_status()
     result.update(
         {
-            "mode": "bayspec_global_9fbg_spectrum_frame",
-            "scope": "global_3x3_hybrid_spectral_fingerprint",
+            "mode": "touch_current_spectral_runtime_frame",
+            "scope": CURRENT_RECOGNITION_SCOPE,
             "selected_channel": None,
             "carrier_channel_id": "P22",
-            "carrier_channel_role": "legacy_full_spectrum_transport_only",
-            "candidate_contract_version": "global_9fbg_candidate_frame_v1",
-            "global_candidate_ids": [f"FBG{index:02d}" for index in range(1, 10)],
+            "carrier_channel_role": (
+                "full_spectrum_transport_for_current_runtime"
+            ),
             "physical_channel_mapping_final": False,
             "global_candidate_summary": global_candidate_summary,
             "global_frame_qa": global_frame_qa,
-            "candidate_contract_complete": global_frame_qa.get(
-                "candidate_contract_complete"
-            ),
-            "baseline_ready": global_frame_qa.get("baseline_ready"),
-            "source_fresh": global_frame_qa.get("source_fresh"),
-            "operator_display_valid": global_frame_qa.get(
+            "source_fresh": global_frame_qa["source_fresh"],
+            "operator_display_valid": global_frame_qa[
                 "operator_display_valid"
+            ],
+            "frame_age_sec": frame_age_sec,
+            "formal_recognition_allowed": runtime_ready,
+            "model_assisted_display_allowed": runtime_ready,
+            "model_assisted_display_block_reason": block_reason,
+            "active_spectral_model_expected": True,
+            "active_spectral_model_loaded": runtime_status["loaded"],
+            "active_spectral_model_source": (
+                "ordinary_fbg_all_data_beta_v1"
             ),
-            "frame_age_sec": global_frame_qa.get("frame_age_sec"),
-            "display_available": global_frame_qa.get("display_available"),
-            "formal_recognition_allowed": global_frame_qa.get(
-                "formal_recognition_allowed"
+            "active_spectral_model_status": runtime_prediction.get(
+                "status"
             ),
-            "model_assisted_display_allowed": model_assisted_display_allowed,
-            "model_assisted_display_block_reason": model_assisted_display_block_reason,
-            "temporal_validation_mode": temporal_validation_enabled,
-            "temporal_model_assisted_display_allowed": (
-                temporal_model_assisted_display_allowed
+            "active_spectral_model_progress": {
+                key: runtime_prediction.get(key)
+                for key in (
+                    "history_frames",
+                    "history_duration_sec",
+                    "temporal_window_sec",
+                    "unique_frame_count",
+                )
+            },
+            "active_spectral_prediction": runtime_prediction,
+            "runtime_model": runtime_status,
+            "runtime_prediction": runtime_prediction,
+            "operator_visualization_frame": operator_visualization_frame,
+            "response_band_thresholds": (
+                _operator_response_band_thresholds()
             ),
-            "static_model_assisted_display_allowed": (
-                static_model_assisted_display_allowed
-            ),
-            "active_spectral_model_expected": active_spectral_model_expected,
-            "active_spectral_model_loaded": active_spectral_model_loaded,
-            "active_spectral_model_source": active_spectral_model_source,
-            "active_spectral_model_status": active_spectral_model_status,
-            "active_spectral_model_progress": active_spectral_model_progress,
-            "active_spectral_prediction": active_spectral_prediction,
-            "all_source_beta_model": _all_source_beta_status(),
-            "all_source_beta_prediction": all_source_beta_prediction,
-            "trained_static_spectral_model": _static_spectral_model_status(),
-            "trained_static_spectral_frame": static_model_frame,
-            "trained_static_spectral_prediction": static_prediction,
-            "trained_static_spectral_shadow": static_shadow,
-            "trained_static_spectral_shadow_prediction": static_shadow_prediction,
-            "dynamic_temporal_shadow": dynamic_temporal_shadow,
-            "dynamic_temporal_display": dynamic_temporal_display,
-            "response_band_thresholds": _operator_response_band_thresholds(),
-            "blockers": global_frame_qa.get("blockers", []),
+            "blockers": global_frame_qa["blockers"],
             "export_watcher": watcher_status,
             "sdk_live": sdk_status,
             "sense_control": sense_controller.status(),
-            "px6d_reference": _px6d_reference_for_record(result.get("latest")),
+            "px6d_reference": _px6d_reference_for_record(
+                result.get("latest")
+            ),
             "px6d_status": px6d_reader.status(),
             "optical_force_capture": optical_force_capture.status(),
         }
     )
     return result
-
 
 @app.get("/api/thumb_scene_config")
 def thumb_scene_config() -> dict:

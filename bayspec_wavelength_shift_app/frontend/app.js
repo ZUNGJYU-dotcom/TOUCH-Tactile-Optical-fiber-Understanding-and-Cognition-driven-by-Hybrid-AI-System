@@ -74,9 +74,6 @@ const spectrumCaptureBackgroundButton = document.getElementById("spectrumCapture
 const spectrumClearBackgroundButton = document.getElementById("spectrumClearBackgroundButton");
 const spectrumProcessingStatus = document.getElementById("spectrumProcessingStatus");
 const spectrumBackgroundStatus = document.getElementById("spectrumBackgroundStatus");
-const settingsTemporalValidationButton = document.getElementById("settingsTemporalValidationButton");
-const settingsStaticFallbackButton = document.getElementById("settingsStaticFallbackButton");
-const legacyRecognitionRuntimeControls = document.getElementById("legacyRecognitionRuntimeControls");
 const operatorDiagnosticsButton = document.getElementById("operatorDiagnosticsButton");
 const demoModule = document.querySelector(".demo-module");
 const opticalSummaryCard = document.querySelector(".summary-hud");
@@ -104,6 +101,12 @@ const px6dCaptureOutputRoot = document.getElementById("px6dCaptureOutputRoot");
 const px6dCaptureBrowseButton = document.getElementById("px6dCaptureBrowseButton");
 const px6dCaptureStartButton = document.getElementById("px6dCaptureStartButton");
 const px6dCaptureStopButton = document.getElementById("px6dCaptureStopButton");
+const measurementRootInput = document.getElementById("measurementRootInput");
+const measurementSessionSelect = document.getElementById("measurementSessionSelect");
+const measurementEstimateSource = document.getElementById("measurementEstimateSource");
+const measurementRefreshButton = document.getElementById("measurementRefreshButton");
+const measurementAnalyzeButton = document.getElementById("measurementAnalyzeButton");
+const measurementComparisonCanvas = document.getElementById("measurementComparisonCanvas");
 const diagnosticAccordionCards = Array.from(
   document.querySelectorAll(".right-panel details.diagnostic-card, .right-panel > details.demo-module")
 );
@@ -322,7 +325,6 @@ const LIVE_MODEL_POLL_INTERVAL_MS = 50;
 const LIVE_SOURCE_PROBE_INTERVAL_MS = 1500;
 const PX6D_UI_POLL_INTERVAL_MS = 100;
 const PX6D_CAPTURE_POLL_INTERVAL_MS = 500;
-const RECOGNITION_MODE_STORAGE_KEY = "touch-recognition-mode-v2";
 const ARRAY_DISPLAY_ROWS = [
   ["P11", "P21", "P31"],
   ["P12", "P22", "P32"],
@@ -371,9 +373,11 @@ const THREE_SURFACE_ARRAY_TO_SCENE_X_SIGN = 1;
 const THREE_SURFACE_ARRAY_TO_SCENE_Z_SIGN = -1;
 const THREE_SURFACE_AXIS_MODE = "swap_array_xy";
 const WAVELENGTH_PLAN_ORDER = ["P11", "P12", "P13", "P21", "P22", "P23", "P31", "P32", "P33"];
-const GLOBAL_RECOGNITION_SCOPE = "global_3x3_hybrid_spectral_fingerprint";
-const ALL_SOURCE_BETA_RECOGNITION_SOURCE = "ordinary_fbg_all_data_beta_v1";
-const OPTICAL_FORCE_DISPLAY_MAX_N = 5;
+const GLOBAL_RECOGNITION_SCOPE = "optical_contact_position_and_continuous_fz";
+const CURRENT_RUNTIME_MODEL_SOURCE = "ordinary_fbg_all_data_beta_v1";
+const OPERATOR_VISUALIZATION_CONTRACT_VERSION = "touch_operator_visualization_v1";
+const OPTICAL_FORCE_CALIBRATED_MAX_N = 5;
+const OPTICAL_FORCE_MIN_DISPLAY_MAX_N = 5;
 const GLOBAL_CANDIDATE_IDS = Array.from({ length: 9 }, (_, index) => `FBG${String(index + 1).padStart(2, "0")}`);
 const GLOBAL_PROXY_FULL_SCALE_PM = 75;
 const GLOBAL_PROXY_VISIBLE_MIN = 0.12;
@@ -383,6 +387,45 @@ const GLOBAL_EVENT_MIN_CONDITIONING_FRAMES = 12;
 const GLOBAL_EVENT_SINGLE_PEAK_TRIGGER_PM = 18;
 const GLOBAL_EVENT_PRIMARY_TRIGGER_PM = 8;
 const GLOBAL_EVENT_SECONDARY_TRIGGER_PM = 3;
+
+function opticalForceAxisStep(maximumN) {
+  const roughStep = Math.max(OPTICAL_FORCE_MIN_DISPLAY_MAX_N, Number(maximumN) || 0) / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(Math.max(roughStep, 0.001)));
+  const normalized = roughStep / magnitude;
+  const nice = normalized <= 1
+    ? 1
+    : normalized <= 2
+      ? 2
+      : normalized <= 2.5
+        ? 2.5
+        : normalized <= 5
+          ? 5
+          : 10;
+  return nice * magnitude;
+}
+
+function updateOpticalForceDisplayMaximum(valueN) {
+  const currentMaximum = Math.max(
+    OPTICAL_FORCE_MIN_DISPLAY_MAX_N,
+    Number(state.opticalForceDisplayMaxN) || 0
+  );
+  const value = Number(valueN);
+  if (!Number.isFinite(value) || value <= currentMaximum) return currentMaximum;
+  const requiredMaximum = Math.max(OPTICAL_FORCE_MIN_DISPLAY_MAX_N, value * 1.08);
+  const step = opticalForceAxisStep(requiredMaximum);
+  state.opticalForceDisplayMaxN = Math.max(
+    currentMaximum,
+    Math.ceil(requiredMaximum / step) * step
+  );
+  return state.opticalForceDisplayMaxN;
+}
+
+function formatForceScaleTick(valueN, includeUnit = false) {
+  const value = Math.max(0, Number(valueN) || 0);
+  const decimals = value < 10 && Math.abs(value - Math.round(value)) > 1.0e-6 ? 2 : 0;
+  const text = Number(value.toFixed(decimals)).toString();
+  return includeUnit ? `${text} N` : text;
+}
 const ARRAY_SLIDE_STEPS = {
   // 5.0 s at 1.0x: light 0.5 s, release 2.0 s, hard 2.0 s,
   // then a 0.5 s smooth release so loop boundaries remain physical.
@@ -474,142 +517,52 @@ function centeredGlobalProxySurfaceGrid(proxyValue) {
   ];
 }
 
-function trainedStaticModelSurface(prediction) {
-  const twin = prediction?.digital_twin || {};
-  const positionId = String(twin.position_id || "");
-  const coordinate = ARRAY_CHANNEL_COORDS[positionId];
-  const forceLevel = String(twin.force_level || "");
-  const contactActive = prediction?.contact?.label === "contact" && twin.active === true && coordinate;
-  if (!contactActive) {
-    return {
-      grid: [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
-      peak: 0,
-      mean: 0,
-      activeArea: 0,
-      centroidX: 0,
-      centroidY: 0,
-      spread: 0.24,
-      dominantChannel: null,
-      respondingChannels: [],
-    };
-  }
-  // Keep the trained label, response marker, color band, and deformation on
-  // one contract even when the operator thresholds are tuned in config.
-  const peakByForce = {
-    light: 0.5 * (RESPONSE_BAND_THRESHOLDS.noContactMax + RESPONSE_BAND_THRESHOLDS.smallMax),
-    normal: 0.5 * (RESPONSE_BAND_THRESHOLDS.smallMax + RESPONSE_BAND_THRESHOLDS.moderateMax),
-    hard: 0.5 * (RESPONSE_BAND_THRESHOLDS.moderateMax + 1.0),
-  };
-  const peak = peakByForce[forceLevel] ?? Math.max(0.08, Math.min(1, Number(twin.deformation_proxy) || 0));
-  const providedGrid = Array.isArray(twin.surface_grid) && twin.surface_grid.length === 3
-    ? twin.surface_grid.map((row) => (Array.isArray(row) ? row.map((value) => Math.max(0, Math.min(1, Number(value) || 0))) : []))
-    : null;
-  const providedMetrics = twin.surface_metrics || {};
-  if (providedGrid?.every((row) => row.length === 3)) {
-    const valuesByChannel = new Map();
-    ARRAY_DISPLAY_ROWS.forEach((row, rowIndex) => {
-      row.forEach((channelId, columnIndex) => {
-        valuesByChannel.set(channelId, providedGrid[rowIndex][columnIndex]);
-      });
-    });
-    const flat = providedGrid.flat();
-    const respondingChannels = ARRAY_DISPLAY_ORDER.filter(
-      (channelId) => (valuesByChannel.get(channelId) || 0) >= 0.055
-    );
-    return {
-      grid: providedGrid,
-      peak: Number(providedMetrics.surface_peak ?? Math.max(...flat, peak)),
-      mean: Number(providedMetrics.surface_mean ?? (flat.reduce((sum, value) => sum + value, 0) / flat.length)),
-      activeArea: Number(providedMetrics.surface_area_active ?? (respondingChannels.length / ARRAY_DISPLAY_ORDER.length)),
-      centroidX: Number(providedMetrics.surface_centroid_x ?? coordinate.x),
-      centroidY: Number(providedMetrics.surface_centroid_y ?? coordinate.y),
-      spread: Number(providedMetrics.surface_spread ?? 0.34),
-      dominantChannel: String(providedMetrics.dominant_channel || positionId),
-      respondingChannels,
-      valuesByChannel,
-    };
-  }
-  // Manual pressing covers a broad, approximate fingertip patch. The Gaussian
-  // footprint intentionally differs from the small point-load gauge domain.
-  const sigma = 0.78 + 0.12 * peak;
-  const valuesByChannel = new Map();
-  for (const channelId of ARRAY_DISPLAY_ORDER) {
-    const point = ARRAY_CHANNEL_COORDS[channelId];
-    const distanceSquared = (point.x - coordinate.x) ** 2 + (point.y - coordinate.y) ** 2;
-    valuesByChannel.set(channelId, peak * Math.exp(-distanceSquared / (2 * sigma * sigma)));
-  }
-  const grid = ARRAY_DISPLAY_ROWS.map((row) => row.map((channelId) => valuesByChannel.get(channelId) || 0));
-  const flat = grid.flat();
-  const weightSum = flat.reduce((sum, value) => sum + value, 0);
-  const respondingChannels = ARRAY_DISPLAY_ORDER.filter((channelId) => (valuesByChannel.get(channelId) || 0) >= 0.055);
-  return {
-    grid,
-    peak,
-    mean: flat.reduce((sum, value) => sum + value, 0) / flat.length,
-    activeArea: respondingChannels.length / ARRAY_DISPLAY_ORDER.length,
-    centroidX: coordinate.x,
-    centroidY: coordinate.y,
-    spread: sigma,
-    dominantChannel: positionId,
-    respondingChannels,
-    valuesByChannel,
-    weightSum,
-  };
+function resetRuntimeTraceHistory() {
+  state.runtimeTraceRecords = [];
+  state.runtimeTraceSource = null;
+  state.opticalForceDisplayMaxN = OPTICAL_FORCE_MIN_DISPLAY_MAX_N;
 }
 
-function resetTrainedModelTraceHistory() {
-  state.trainedModelTraceRecords = [];
-  state.trainedModelTraceSource = null;
-}
-
-function appendTrainedModelTrace(rawRecord, prediction, trainedSurface) {
-  const source = String(rawRecord?.source || "trained_static_spectrum");
-  const allSourceBeta = String(
-    rawRecord?.active_spectral_model_source ||
-    prediction?.recognition_source ||
-    ""
-  ) === ALL_SOURCE_BETA_RECOGNITION_SOURCE;
-  if (state.trainedModelTraceSource && state.trainedModelTraceSource !== source) {
-    resetTrainedModelTraceHistory();
+function appendCurrentRuntimeTrace(rawRecord, contract) {
+  const source = String(rawRecord?.source || contract?.source || CURRENT_RUNTIME_MODEL_SOURCE);
+  if (state.runtimeTraceSource && state.runtimeTraceSource !== source) {
+    resetRuntimeTraceHistory();
   }
-  state.trainedModelTraceSource = source;
-  const frameId = rawRecord?.frame_id ?? rawRecord?.spectrum_frame_id ?? null;
-  const timestamp = rawRecord?.timestamp ?? Date.now() / 1000;
+  state.runtimeTraceSource = source;
+  const frameId = contract?.frame_id ?? rawRecord?.frame_id ?? rawRecord?.spectrum_frame_id ?? null;
+  const timestamp = contract?.timestamp ?? rawRecord?.timestamp ?? Date.now() / 1000;
+  const displayForceN = finiteNumberOrNull(contract?.force?.display_n);
+  const surfacePeak = Math.max(
+    0,
+    Math.min(1, finiteNumberOrNull(contract?.trace_sample?.surface_peak) ?? 0)
+  );
   const record = {
     frame_id: frameId,
     timestamp,
     source,
     recognition_scope: GLOBAL_RECOGNITION_SCOPE,
-    trained_model_visual_response_ratio: Math.max(0, Math.min(1, Number(trainedSurface?.peak) || 0)),
-    trained_model_response_level: allSourceBeta
-      ? prediction?.digital_twin?.active
-        ? "continuous_optical_fz"
-        : "no_contact"
-      : prediction?.digital_twin?.active
-        ? prediction?.force_level?.label || prediction?.digital_twin?.force_level || "uncertain"
-        : "no_contact",
-    trained_model_position_id: prediction?.position?.label || null,
-    estimated_force_fz_n: allSourceBeta
-      ? Number(prediction?.estimated_force_fz_n ?? prediction?.force_fz?.estimated_n)
-      : null,
-    trained_model_review_needed: prediction?.uncertainty?.review_needed === true,
-    trace_response_semantics: allSourceBeta
-      ? "continuous_optical_force_visual_proxy"
-      : "trained_model_visual_response_percent",
+    visualization_contract_version: OPERATOR_VISUALIZATION_CONTRACT_VERSION,
+    trained_model_visual_response_ratio: surfacePeak,
+    trained_model_response_level: String(contract?.response_state || "no_contact"),
+    trained_model_position_id: contract?.position?.display_label || null,
+    estimated_force_fz_n: displayForceN,
+    optical_force_trace_n: displayForceN === null ? 0 : Math.max(0, displayForceN),
+    trained_model_review_needed: contract?.quality?.review_needed === true,
+    trace_response_semantics: "canonical_operator_display_force_n",
   };
-  const previous = state.trainedModelTraceRecords[state.trainedModelTraceRecords.length - 1];
+  const previous = state.runtimeTraceRecords[state.runtimeTraceRecords.length - 1];
   if (previous && frameId !== null && String(previous.frame_id) === String(frameId)) {
-    state.trainedModelTraceRecords[state.trainedModelTraceRecords.length - 1] = record;
+    state.runtimeTraceRecords[state.runtimeTraceRecords.length - 1] = record;
   } else {
-    state.trainedModelTraceRecords.push(record);
-    if (state.trainedModelTraceRecords.length > TRACE_WINDOW_POINTS) {
-      state.trainedModelTraceRecords.splice(
+    state.runtimeTraceRecords.push(record);
+    if (state.runtimeTraceRecords.length > TRACE_WINDOW_POINTS) {
+      state.runtimeTraceRecords.splice(
         0,
-        state.trainedModelTraceRecords.length - TRACE_WINDOW_POINTS
+        state.runtimeTraceRecords.length - TRACE_WINDOW_POINTS
       );
     }
   }
-  return state.trainedModelTraceRecords.map((item) => ({ ...item }));
+  return state.runtimeTraceRecords.map((item) => ({ ...item }));
 }
 
 function candidateTraceBaselineStats(candidateId, trace = []) {
@@ -828,73 +781,57 @@ function suppressGlobalSpatialProxy(proxy = {}, reason = "response_not_allowed")
 }
 
 function isModelPositionLevelMode(mode) {
-  return [
-    "trained_static_spectral_position_level",
-    "dynamic_temporal_validation_position_level",
-    "all_source_optical_force_position",
-  ].includes(String(mode || ""));
+  return String(mode || "") === "all_source_optical_force_position";
+}
+
+function operatorVisualizationContract(...values) {
+  for (const value of values) {
+    const candidate = value?.operator_visualization_frame || value;
+    if (candidate?.contract_version === OPERATOR_VISUALIZATION_CONTRACT_VERSION) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function activeModelPrediction(record = null, arrayFrame = null) {
-  return record?.active_spectral_prediction ||
-    arrayFrame?.active_spectral_prediction ||
-    record?.trained_static_spectral_prediction ||
-    arrayFrame?.trained_static_spectral_prediction ||
-    null;
+  const contract = operatorVisualizationContract(record, arrayFrame);
+  return contract?.prediction || null;
 }
 
 function opticalForcePresentation(record = null, arrayFrame = null, runtimeFrame = null) {
-  const prediction = activeModelPrediction(record, arrayFrame);
-  const forceCandidates = [
-    record?.estimated_force_fz_n,
-    record?.optical_force_estimate?.estimated_n,
-    arrayFrame?.estimated_force_fz_n,
-    arrayFrame?.optical_force_estimate?.estimated_n,
-    prediction?.estimated_force_fz_n,
-    prediction?.force_fz?.estimated_n,
-    runtimeFrame?.estimated_force_fz_n,
-    runtimeFrame?.active_spectral_prediction?.estimated_force_fz_n,
-    runtimeFrame?.active_spectral_prediction?.force_fz?.estimated_n,
-  ];
-  let valueN = null;
-  for (const candidate of forceCandidates) {
-    const numeric = finiteNumberOrNull(candidate);
-    if (numeric !== null) {
-      valueN = Math.max(0, Math.min(OPTICAL_FORCE_DISPLAY_MAX_N, numeric));
-      break;
-    }
+  const contract = operatorVisualizationContract(record, arrayFrame, runtimeFrame);
+  if (contract) {
+    const force = contract.force || {};
+    const rawValue = finiteNumberOrNull(force.display_n);
+    const valueN = rawValue === null ? null : Math.max(0, rawValue);
+    const calibratedRange = Array.isArray(force.calibrated_range_n)
+      ? force.calibrated_range_n
+      : [0, OPTICAL_FORCE_CALIBRATED_MAX_N];
+    const calibratedMaxN = Number.isFinite(Number(calibratedRange[1]))
+      ? Number(calibratedRange[1])
+      : OPTICAL_FORCE_CALIBRATED_MAX_N;
+    return {
+      enabled: true,
+      valueN,
+      prediction: contract.prediction || null,
+      source: String(contract.model_source || CURRENT_RUNTIME_MODEL_SOURCE),
+      calibratedMaxN,
+      rangeStatus: String(force.range_status || "unavailable"),
+    };
   }
-  const source = String(
-    record?.active_spectral_model_source ||
-    arrayFrame?.active_spectral_model_source ||
-    runtimeFrame?.active_spectral_model_source ||
-    prediction?.recognition_source ||
-    runtimeFrame?.active_spectral_prediction?.recognition_source ||
-    ""
-  );
-  const betaStatus = runtimeFrame?.all_source_beta_model || record?.all_source_beta_model || {};
-  const enabled =
-    state.betaForceDisplayEnabled === true ||
-    source === ALL_SOURCE_BETA_RECOGNITION_SOURCE ||
-    prediction?.recognition_source === ALL_SOURCE_BETA_RECOGNITION_SOURCE ||
-    betaStatus?.enabled === true ||
-    runtimeFrame?.all_source_beta_prediction != null ||
-    valueN !== null;
-  return { enabled, valueN, prediction, source };
+  return {
+    enabled: false,
+    valueN: null,
+    prediction: null,
+    source: CURRENT_RUNTIME_MODEL_SOURCE,
+    calibratedMaxN: OPTICAL_FORCE_CALIBRATED_MAX_N,
+    rangeStatus: "unavailable",
+  };
 }
 
-function activeModelDisplayName(record = null, arrayFrame = null) {
-  const source = String(
-    record?.active_spectral_model_source ||
-    arrayFrame?.active_spectral_model_source ||
-    "static_spectral_model"
-  );
-  if (source === ALL_SOURCE_BETA_RECOGNITION_SOURCE) {
-    return "All-data optical model";
-  }
-  return source === "dynamic_temporal_v3_validation"
-    ? "Temporal validation model"
-    : "Trained full-spectrum model";
+function activeModelDisplayName() {
+  return state.activeRecognitionModelLabel || "Current optical model";
 }
 
 function simulatedScenarioStateLabel(arrayFrame = {}, surfaceMetrics = {}) {
@@ -926,18 +863,19 @@ function surfaceContactPresentation({
 
   if (isModelPositionLevelMode(arrayMode)) {
     const prediction = activeModelPrediction(record, arrayFrame);
-    const active = prediction?.contact?.label === "contact" && prediction?.digital_twin?.active === true;
+    const twin = prediction?.digital_twin || {};
+    const active = (twin.visual_active ?? twin.active) === true;
     if (!active) {
       return {
         active: false,
         primary: "no_contact",
-        secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
+        secondary: heldMeasurement ? "Optical response level | held" : "Optical response level",
       };
     }
     return {
       active: true,
       primary: "contact",
-      secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
+      secondary: heldMeasurement ? "Optical response level | held" : "Optical response level",
     };
   }
 
@@ -949,7 +887,7 @@ function surfaceContactPresentation({
     return {
       active,
       primary: !complete ? "uncertain" : active ? "contact" : "no_contact",
-      secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
+      secondary: heldMeasurement ? "Optical response level | held" : "Optical response level",
     };
   }
 
@@ -969,14 +907,14 @@ function surfaceContactPresentation({
     return {
       active: true,
       primary: "contact",
-      secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
+      secondary: heldMeasurement ? "Optical response level | held" : "Optical response level",
     };
   }
 
   return {
     active: true,
     primary: scenarioState === "no_contact" ? "no_contact" : "contact",
-    secondary: heldMeasurement ? "Optical response level · held" : "Optical response level",
+    secondary: heldMeasurement ? "Optical response level | held" : "Optical response level",
   };
 }
 
@@ -1015,8 +953,6 @@ function surfaceSceneToArrayCoord(x, z) {
 const state = {
   paused: false,
   frame: null,
-  betaForceDisplayEnabled: false,
-  betaRecognitionRuntime: false,
   activeRecognitionModelLabel: "Loading...",
   lastRenderedSourceFrameKey: null,
   selectedChannel: "P22",
@@ -1043,16 +979,9 @@ const state = {
   threeNeedsRefresh: true,
   targetTraceRecords: [],
   smoothTraceRecords: [],
-  trainedModelTraceRecords: [],
-  trainedModelTraceSource: null,
-  temporalValidationMode: (() => {
-    try {
-      const storedMode = window.localStorage.getItem(RECOGNITION_MODE_STORAGE_KEY);
-      return storedMode !== "static";
-    } catch {
-      return true;
-    }
-  })(),
+  runtimeTraceRecords: [],
+  runtimeTraceSource: null,
+  opticalForceDisplayMaxN: OPTICAL_FORCE_MIN_DISPLAY_MAX_N,
   targetSpectrumRecord: null,
   smoothSpectrumRecord: null,
   chartsNeedRefresh: true,
@@ -1136,6 +1065,9 @@ const state = {
   px6dCapturePollController: null,
   px6dCaptureStatusEpoch: 0,
   px6dCaptureStatus: null,
+  measurementRequestInFlight: false,
+  measurementSessions: [],
+  measurementResult: null,
   pageVisible: document.visibilityState !== "hidden",
   animationFrameId: null,
   controlsInteracting: false,
@@ -1327,7 +1259,7 @@ function updatePx6dPanel(payload = {}) {
   const px6dPort = status.active_port || status.port || status.configured_port || "COM3";
   setText(
     "diagnosticPx6dConnection",
-    connected ? `${px6dPort} · connected` : `${px6dPort} · ${connectionState}`
+    connected ? `${px6dPort} | connected` : `${px6dPort} | ${connectionState}`
   );
   setText("diagnosticPx6dFirmware", `Firmware ${status?.firmware_version || "--"}`);
   setText("diagnosticPx6dRawFz", Number.isFinite(rawFz) ? `${rawFz.toFixed(3)} N` : "--");
@@ -1354,7 +1286,7 @@ function updatePx6dPanel(payload = {}) {
   const derivedSpecs = [
     ["diagnosticPx6dForceResultant", displayedMechanical?.force_resultant_n, "N", 3],
     ["diagnosticPx6dShearResultant", displayedMechanical?.shear_resultant_n, "N", 3],
-    ["diagnosticPx6dMomentResultant", displayedMechanical?.moment_resultant_nm, "N·m", 4],
+    ["diagnosticPx6dMomentResultant", displayedMechanical?.moment_resultant_nm, "N*m", 4],
     ["diagnosticPx6dUtilization", displayedMechanical?.peak_utilization_percent, "%", 1],
   ];
   derivedSpecs.forEach(([id, value, unit, digits]) => {
@@ -1384,14 +1316,14 @@ function updatePx6dPanel(payload = {}) {
     "diagnosticPx6dCompressionSign",
     Number.isFinite(compressionSign)
       ? compressionSign < 0
-        ? "raw −Fz = compression"
+        ? "raw 鈭扚z = compression"
         : "raw +Fz = compression"
       : "--"
   );
   const forceRange = finiteNumberOrNull(status?.force_full_scale_per_axis_n);
   const momentRange = finiteNumberOrNull(status?.moment_full_scale_per_axis_nm);
-  setText("diagnosticPx6dForceRange", Number.isFinite(forceRange) ? `±${forceRange.toFixed(0)} N / axis` : "--");
-  setText("diagnosticPx6dMomentRange", Number.isFinite(momentRange) ? `±${momentRange.toFixed(1)} N·m / axis` : "--");
+  setText("diagnosticPx6dForceRange", Number.isFinite(forceRange) ? `+/-${forceRange.toFixed(0)} N / axis` : "--");
+  setText("diagnosticPx6dMomentRange", Number.isFinite(momentRange) ? `+/-${momentRange.toFixed(1)} N*m / axis` : "--");
 
   const syncOffset = finiteNumberOrNull(pair?.sync_offset_ms);
   const syncQuality = aligned?.sync_quality || (state.px6dOpticalFrame ? "not paired" : "waiting");
@@ -1409,7 +1341,7 @@ function updatePx6dPanel(payload = {}) {
     Number.isFinite(sequenceStart)
       ? sequenceStart === sequenceEnd
         ? `#${sequenceStart}`
-        : `#${sequenceStart}–${sequenceEnd}`
+        : `#${sequenceStart}鈥?{sequenceEnd}`
       : sample?.sequence_id
         ? `#${sample.sequence_id}`
         : "--"
@@ -1605,7 +1537,7 @@ function updatePx6dCapturePanel(payload = {}) {
   const ratioElement = document.getElementById("px6dCaptureRatio");
   if (ratioElement) {
     ratioElement.title = payload?.last_sync_quality
-      ? `${payload.last_sync_quality} · ${Number.isFinite(syncOffset) ? `${syncOffset.toFixed(1)} ms` : "--"}`
+      ? `${payload.last_sync_quality} | ${Number.isFinite(syncOffset) ? `${syncOffset.toFixed(1)} ms` : "--"}`
       : "";
   }
   const output = payload?.output_directory;
@@ -1628,6 +1560,9 @@ function updatePx6dCapturePanel(payload = {}) {
     const preferredRoot = payload?.requested_output_root || payload?.default_output_root;
     if (preferredRoot && !px6dCaptureOutputRoot.dataset.userEdited) {
       px6dCaptureOutputRoot.value = preferredRoot;
+    }
+    if (preferredRoot && measurementRootInput && !measurementRootInput.dataset.userEdited) {
+      measurementRootInput.value = preferredRoot;
     }
   }
   const locked = running || state.px6dCaptureRequestInFlight;
@@ -1692,6 +1627,337 @@ function invalidatePx6dCaptureStatusPoll() {
   state.px6dCaptureStatusEpoch += 1;
   if (state.px6dCapturePollController && !state.px6dCapturePollController.signal.aborted) {
     state.px6dCapturePollController.abort();
+  }
+}
+
+function formatMeasurementMetric(value, digits = 2, unit = "") {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "--";
+  return `${numeric.toFixed(digits)}${unit ? ` ${unit}` : ""}`;
+}
+
+function setMeasurementStatus(label, detail = null) {
+  setText("measurementStatus", label);
+  if (detail !== null) setText("measurementOutput", detail);
+}
+
+function setMeasurementBusy(busy) {
+  state.measurementRequestInFlight = Boolean(busy);
+  if (measurementRefreshButton) measurementRefreshButton.disabled = busy;
+  if (measurementSessionSelect) measurementSessionSelect.disabled = busy;
+  if (measurementEstimateSource) measurementEstimateSource.disabled = busy;
+  if (measurementAnalyzeButton) {
+    measurementAnalyzeButton.disabled = busy || !measurementSessionSelect?.value;
+  }
+}
+
+function clearMeasurementMetrics() {
+  [
+    "measurementEvidence",
+    "measurementValidity",
+    "measurementBaseline",
+    "measurementPairedSamples",
+    "measurementCycleCount",
+    "measurementMae",
+    "measurementRmse",
+    "measurementCorrelation",
+    "measurementAmplitudeSlope",
+    "measurementLag",
+    "measurementAcquisitionRate",
+    "measurementInferenceLatency",
+    "measurementRecovery",
+  ].forEach((id) => setText(id, "--"));
+}
+
+function drawMeasurementComparison(trace = []) {
+  if (!measurementComparisonCanvas) return;
+  const bounds = measurementComparisonCanvas.getBoundingClientRect();
+  if (bounds.width < 20 || bounds.height < 20) return;
+  const scale = Math.min(window.devicePixelRatio || 1, 2);
+  measurementComparisonCanvas.width = Math.max(1, Math.round(bounds.width * scale));
+  measurementComparisonCanvas.height = Math.max(1, Math.round(bounds.height * scale));
+  const context = measurementComparisonCanvas.getContext("2d");
+  if (!context) return;
+  context.setTransform(scale, 0, 0, scale, 0, 0);
+  const width = bounds.width;
+  const height = bounds.height;
+  context.clearRect(0, 0, width, height);
+  context.fillStyle = "#fbfdff";
+  context.fillRect(0, 0, width, height);
+
+  const records = Array.isArray(trace) ? trace : [];
+  const times = records.map((row, index) => {
+    const value = Number(row?.elapsed_time_sec);
+    return Number.isFinite(value) ? value : index;
+  });
+  const series = [
+    {
+      field: "reference_fz_n",
+      color: "#0072b2",
+      values: records.map((row) => Number(row?.reference_fz_n)),
+      dash: [],
+    },
+    {
+      field: "analysis_estimated_fz_n",
+      color: "#d55e00",
+      values: records.map((row) => Number(
+        row?.analysis_estimated_fz_n ?? row?.optical_estimated_fz_n
+      )),
+      dash: [],
+    },
+  ];
+  const finiteValues = series.flatMap((item) => item.values.filter(Number.isFinite));
+  if (!records.length || !finiteValues.length) {
+    context.fillStyle = "#60798b";
+    context.font = "600 12px system-ui, sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText("Select a completed recording", width / 2, height / 2);
+    return;
+  }
+
+  const padding = { left: 38, right: 12, top: 20, bottom: 28 };
+  const chartWidth = Math.max(1, width - padding.left - padding.right);
+  const chartHeight = Math.max(1, height - padding.top - padding.bottom);
+  const minTime = Math.min(...times);
+  const maxTime = Math.max(...times);
+  const timeSpan = Math.max(maxTime - minTime, 1e-9);
+  let minValue = Math.min(0, ...finiteValues);
+  let maxValue = Math.max(0, ...finiteValues);
+  if (Math.abs(maxValue - minValue) < 1e-9) maxValue = minValue + 1;
+  const margin = Math.max((maxValue - minValue) * 0.08, 0.02);
+  minValue -= margin;
+  maxValue += margin;
+  const valueSpan = maxValue - minValue;
+  const xFor = (value) => padding.left + ((value - minTime) / timeSpan) * chartWidth;
+  const yFor = (value) => padding.top + (1 - (value - minValue) / valueSpan) * chartHeight;
+
+  context.lineWidth = 1;
+  context.strokeStyle = "#dce8ef";
+  context.fillStyle = "#6b8191";
+  context.font = "500 9px system-ui, sans-serif";
+  context.textAlign = "right";
+  context.textBaseline = "middle";
+  for (let index = 0; index <= 4; index += 1) {
+    const fraction = index / 4;
+    const y = padding.top + fraction * chartHeight;
+    context.beginPath();
+    context.moveTo(padding.left, y);
+    context.lineTo(width - padding.right, y);
+    context.stroke();
+    const value = maxValue - fraction * valueSpan;
+    context.fillText(value.toFixed(valueSpan < 2 ? 2 : 1), padding.left - 5, y);
+  }
+  context.textAlign = "center";
+  context.textBaseline = "top";
+  for (let index = 0; index <= 4; index += 1) {
+    const fraction = index / 4;
+    const x = padding.left + fraction * chartWidth;
+    context.beginPath();
+    context.moveTo(x, padding.top);
+    context.lineTo(x, height - padding.bottom);
+    context.stroke();
+    context.fillText((minTime + fraction * timeSpan).toFixed(1), x, height - padding.bottom + 6);
+  }
+  context.save();
+  context.translate(10, padding.top + chartHeight / 2);
+  context.rotate(-Math.PI / 2);
+  context.fillStyle = "#506b7e";
+  context.font = "700 9px system-ui, sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "top";
+  context.fillText("Fz (N)", 0, 0);
+  context.restore();
+
+  series.forEach((item) => {
+    context.strokeStyle = item.color;
+    context.lineWidth = 1.8;
+    context.lineJoin = "round";
+    context.lineCap = "round";
+    context.setLineDash(item.dash || []);
+    context.beginPath();
+    let drawing = false;
+    item.values.forEach((value, index) => {
+      if (!Number.isFinite(value) || !Number.isFinite(times[index])) {
+        drawing = false;
+        return;
+      }
+      const x = xFor(times[index]);
+      const y = yFor(value);
+      if (!drawing) context.moveTo(x, y);
+      else context.lineTo(x, y);
+      drawing = true;
+    });
+    context.stroke();
+  });
+  context.setLineDash([]);
+}
+
+function renderMeasurementResult(payload = {}) {
+  state.measurementResult = payload;
+  const summary = payload?.summary || {};
+  const data = summary?.data || {};
+  const direct = summary?.direct_comparison || {};
+  const lag = summary?.lag || {};
+  const cadence = summary?.cadence || {};
+  const cycles = Array.isArray(payload?.cycle_rows) ? payload.cycle_rows : [];
+  const recoveryValues = cycles
+    .map((cycle) => Number(cycle?.release_recovery_ratio))
+    .filter(Number.isFinite);
+  const meanRecovery = recoveryValues.length
+    ? recoveryValues.reduce((sum, value) => sum + value, 0) / recoveryValues.length
+    : NaN;
+
+  const selectedSource = String(
+    data?.analysis_estimate_source
+      || payload?.selected_estimate_source
+      || "recorded_runtime"
+  );
+  const selectedLabel = String(
+    data?.analysis_estimate_label || selectedSource.replaceAll("_", " ")
+  );
+  const evaluationValidity = String(data?.evaluation_validity || "unknown");
+  setText("measurementEvidence", selectedLabel);
+  setText("measurementValidity", evaluationValidity.replaceAll("_", " "));
+  setText("measurementSelectedLegend", selectedLabel);
+  const baseline = payload?.estimate_evidence?.provenance?.baseline || {};
+  const baselineConsistency = String(
+    baseline?.recorded_baseline_consistency_status || ""
+  );
+  const baselineLabel = selectedSource === "current_model_replay"
+    ? `${String(baseline?.method || "session baseline").replaceAll("_", " ")}${
+      baselineConsistency === "mismatch_warning" ? " | old baseline differs" : ""
+    }`
+    : selectedSource === "recorded_runtime"
+      ? "capture-time baseline"
+      : "not used";
+  setText("measurementBaseline", baselineLabel);
+  const evidenceElement = document.getElementById("measurementEvidence");
+  if (evidenceElement) evidenceElement.title = selectedLabel;
+  const validityElement = document.getElementById("measurementValidity");
+  if (validityElement) validityElement.title = evaluationValidity.replaceAll("_", " ");
+  const baselineElement = document.getElementById("measurementBaseline");
+  if (baselineElement) {
+    const normalizedDifference = Number(
+      baseline?.recorded_baseline_normalized_rms_difference
+    );
+    baselineElement.title = Number.isFinite(normalizedDifference)
+      ? `Stored-vs-session baseline RMS difference: ${(normalizedDifference * 100).toFixed(2)}%`
+      : baselineLabel;
+  }
+
+  setText("measurementPairedSamples", String(data?.paired_count ?? 0));
+  setText("measurementCycleCount", String(cycles.length));
+  setText("measurementMae", formatMeasurementMetric(direct?.mae_n, 3, "N"));
+  setText("measurementRmse", formatMeasurementMetric(direct?.rmse_n, 3, "N"));
+  setText("measurementCorrelation", formatMeasurementMetric(direct?.pearson_r, 3));
+  setText(
+    "measurementAmplitudeSlope",
+    formatMeasurementMetric(direct?.linear_slope_pred_vs_reference, 3),
+  );
+  setText("measurementLag", formatMeasurementMetric(lag?.lag_ms, 0, "ms"));
+  setText("measurementAcquisitionRate", formatMeasurementMetric(cadence?.acquisition_rate_hz, 2, "Hz"));
+  setText("measurementInferenceLatency", formatMeasurementMetric(cadence?.model_inference_latency_median_ms, 1, "ms"));
+  setText("measurementRecovery", Number.isFinite(meanRecovery) ? `${(meanRecovery * 100).toFixed(1)}%` : "--");
+
+  const comparisonStatus = String(data?.comparison_status || "unknown");
+  const forceAvailable = Number(data?.valid_reference_count || 0) > 0;
+  setMeasurementStatus(
+    forceAvailable ? "Complete" : "Optical only",
+    forceAvailable
+      ? `${selectedLabel} | ${data?.paired_count ?? 0} aligned samples | ${cycles.length} detected cycle${cycles.length === 1 ? "" : "s"}`
+      : "PX6D reference was not recorded; force comparison was skipped."
+  );
+  const output = document.getElementById("measurementOutput");
+  if (output) output.title = comparisonStatus.replaceAll("_", " ");
+  drawMeasurementComparison(payload?.trace || []);
+}
+
+function populateMeasurementSessions(sessions = [], selectedPath = "") {
+  state.measurementSessions = Array.isArray(sessions) ? sessions : [];
+  if (!measurementSessionSelect) return;
+  measurementSessionSelect.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = state.measurementSessions.length
+    ? "Select a completed recording"
+    : "No completed recordings found";
+  measurementSessionSelect.appendChild(placeholder);
+  state.measurementSessions.forEach((session) => {
+    const option = document.createElement("option");
+    option.value = String(session?.path || "");
+    const position = String(session?.position_label || "unlabeled");
+    const trial = String(session?.trial_id || "--");
+    const frames = Number(session?.captured_timeline_frames);
+    option.textContent = `${position} | ${trial}${Number.isFinite(frames) ? ` | ${frames} frames` : ""}`;
+    option.title = String(session?.session_id || session?.path || "");
+    measurementSessionSelect.appendChild(option);
+  });
+  if (selectedPath && state.measurementSessions.some((session) => session?.path === selectedPath)) {
+    measurementSessionSelect.value = selectedPath;
+  }
+  if (measurementAnalyzeButton) measurementAnalyzeButton.disabled = !measurementSessionSelect.value;
+}
+
+async function refreshMeasurementSessions() {
+  if (state.measurementRequestInFlight) return;
+  const root = String(measurementRootInput?.value || "").trim();
+  const previousSelection = measurementSessionSelect?.value || "";
+  setMeasurementBusy(true);
+  setMeasurementStatus("Searching", "Scanning the selected folder for completed recordings.");
+  try {
+    const suffix = root ? `?root=${encodeURIComponent(root)}` : "";
+    const payload = await requestJSON(
+      `/api/measurement/sessions${suffix}`,
+      { cache: "no-store" },
+      { timeoutMs: 10000 }
+    );
+    if (measurementRootInput && !measurementRootInput.dataset.userEdited && payload?.root) {
+      measurementRootInput.value = payload.root;
+    }
+    populateMeasurementSessions(payload?.sessions || [], previousSelection);
+    clearMeasurementMetrics();
+    state.measurementResult = null;
+    drawMeasurementComparison([]);
+    setMeasurementStatus(
+      payload?.session_count ? "Ready" : "No sessions",
+      payload?.session_count
+        ? `${payload.session_count} completed recording${payload.session_count === 1 ? "" : "s"} found.`
+        : "No frame_summary.csv or synchronized_frames.jsonl found in this folder."
+    );
+  } catch (error) {
+    populateMeasurementSessions([]);
+    setMeasurementStatus("Error", commandErrorMessage(error, "Unable to scan recordings"));
+  } finally {
+    setMeasurementBusy(false);
+  }
+}
+
+async function analyzeSelectedMeasurementSession() {
+  if (state.measurementRequestInFlight || !measurementSessionSelect?.value) return;
+  setMeasurementBusy(true);
+  const estimateSource = String(measurementEstimateSource?.value || "best_available");
+  setMeasurementStatus("Analyzing", "Resolving one traceable optical-force estimate and comparing it with PX6D Fz.");
+  try {
+    const payload = await requestJSON(
+      "/api/measurement/analyze",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_dir: measurementSessionSelect.value,
+          estimate_source: estimateSource,
+        }),
+      },
+      { timeoutMs: 120000 }
+    );
+    renderMeasurementResult(payload);
+  } catch (error) {
+    clearMeasurementMetrics();
+    drawMeasurementComparison([]);
+    setMeasurementStatus("Error", commandErrorMessage(error, "Measurement analysis failed"));
+  } finally {
+    setMeasurementBusy(false);
   }
 }
 
@@ -1778,11 +2044,11 @@ function levelLabel(level) {
     light_press: "light",
     normal_press: "normal",
     hard_press: "hard",
-    baseline_required: "set λ0 baseline",
+    baseline_required: "set 位0 baseline",
     wavelength_tracking_warning: "wavelength tracking warning",
     uncertain: "uncertain",
   };
-  if (clean.startsWith("baseline_collecting")) return "collecting λ0";
+  if (clean.startsWith("baseline_collecting")) return "collecting 位0";
   return labels[clean] || clean.replaceAll("_", " ");
 }
 
@@ -1855,31 +2121,31 @@ function acquisitionDisplayState(watcher = {}, sdkLive = {}) {
   const watchActive = Boolean(watcher?.active);
   if (sdkActive) {
     const freshness = operatorFreshnessLabel(sdkLive?.freshness || "waiting_for_sdk_frame");
-    if (freshness === "fresh") return { label: "SDK · live", short: "LIVE", tone: "live", detail: "Fresh direct SDK frames" };
-    if (freshness === "stale") return { label: "SDK · stale", short: "STALE", tone: "error", detail: "SDK is active but frames are stale" };
-    if (freshness === "error") return { label: "SDK · error", short: "ERROR", tone: "error", detail: sdkLive?.last_error || "SDK acquisition error" };
-    return { label: "SDK · waiting", short: "WAIT", tone: "waiting", detail: "Waiting for the first SDK frame" };
+    if (freshness === "fresh") return { label: "SDK | live", short: "LIVE", tone: "live", detail: "Fresh direct SDK frames" };
+    if (freshness === "stale") return { label: "SDK | stale", short: "STALE", tone: "error", detail: "SDK is active but frames are stale" };
+    if (freshness === "error") return { label: "SDK | error", short: "ERROR", tone: "error", detail: sdkLive?.last_error || "SDK acquisition error" };
+    return { label: "SDK | waiting", short: "WAIT", tone: "waiting", detail: "Waiting for the first SDK frame" };
   }
 
   if (watchActive) {
     const freshness = operatorFreshnessLabel(watcher?.freshness || "waiting_for_export");
-    if (freshness === "fresh") return { label: "Watch · live", short: "LIVE", tone: "live", detail: "Fresh Sense export frames" };
-    if (freshness === "stale") return { label: "Watch · stale", short: "STALE", tone: "error", detail: "Sense export data is stale" };
-    if (freshness === "error") return { label: "Watch · error", short: "ERROR", tone: "error", detail: watcher?.last_error || "Export watch error" };
-    return { label: "Watch · waiting", short: "WAIT", tone: "waiting", detail: "Waiting for a new Sense export" };
+    if (freshness === "fresh") return { label: "Watch | live", short: "LIVE", tone: "live", detail: "Fresh Sense export frames" };
+    if (freshness === "stale") return { label: "Watch | stale", short: "STALE", tone: "error", detail: "Sense export data is stale" };
+    if (freshness === "error") return { label: "Watch | error", short: "ERROR", tone: "error", detail: watcher?.last_error || "Export watch error" };
+    return { label: "Watch | waiting", short: "WAIT", tone: "waiting", detail: "Waiting for a new Sense export" };
   }
 
   if (state.liveRequested) {
-    return { label: "SDK · waiting", short: "WAIT", tone: "waiting", detail: "Live start accepted; waiting for acquisition" };
+    return { label: "SDK | waiting", short: "WAIT", tone: "waiting", detail: "Live start accepted; waiting for acquisition" };
   }
 
   const idleLabels = {
-    direct_sdk: "SDK · idle",
-    export_watch: "Watch · idle",
-    http_ingest: "HTTP · idle",
+    direct_sdk: "SDK | idle",
+    export_watch: "Watch | idle",
+    http_ingest: "HTTP | idle",
   };
   return {
-    label: idleLabels[inputSourceSelect?.value] || "Input · idle",
+    label: idleLabels[inputSourceSelect?.value] || "Input | idle",
     short: "IDLE",
     tone: "idle",
     detail: "Acquisition stopped",
@@ -1908,12 +2174,9 @@ function frameSourceIsFresh(frame) {
   return !qaStatus.includes("stale");
 }
 
-function trainedStaticModelDisplayReady(frame) {
-  const prediction = frame?.active_spectral_prediction || frame?.trained_static_spectral_prediction || frame?.trained_static_spectral_frame?.prediction;
-  return Boolean(
-    frame?.model_assisted_display_allowed === true &&
-    prediction?.digital_twin
-  );
+function currentModelDisplayReady(frame) {
+  const contract = operatorVisualizationContract(frame, frame?.latest, frame?.array_frame);
+  return contract?.response_allowed === true && Boolean(contract.prediction);
 }
 
 function frameResponseIsUsable(frame) {
@@ -2085,7 +2348,7 @@ function operatorAlertState({ record, sourceState, operatorQa, measurementAvaila
       severity: "WARNING",
       message: globalFrame
         ? "Global FBG01-FBG09 baseline required. Remove contact, wait for a stable spectrum, then press Set baseline."
-        : "λ0 baseline required. Remove contact, then press Set λ0.",
+        : "位0 baseline required. Remove contact, then press Set 位0.",
     };
   }
   if (
@@ -2138,6 +2401,9 @@ function traceAttenuationPercent(item) {
   if (Number.isFinite(modelResponseRatio)) {
     return Math.max(0, Math.min(100, modelResponseRatio * 100));
   }
+  if (item?.visualization_contract_version === OPERATOR_VISUALIZATION_CONTRACT_VERSION) {
+    return Number.NaN;
+  }
   const clampTraceValue = (value) => Math.max(-WAVELENGTH_SHIFT_FULL_SCALE_PM, Math.min(WAVELENGTH_SHIFT_FULL_SCALE_PM, value));
   if (item?.recognition_scope === GLOBAL_RECOGNITION_SCOPE) {
     const eventShiftPm = Number(item?.global_event_absolute_shift_pm);
@@ -2163,6 +2429,20 @@ function traceAttenuationPercent(item) {
   const responseRatio = responseRaw == null ? Number.NaN : Number(responseRaw);
   if (Number.isFinite(responseRatio)) return clampTraceValue(responseRatio * WAVELENGTH_SHIFT_FULL_SCALE_PM);
   return Number.NaN;
+}
+
+function traceOpticalForceN(item) {
+  const rawValue = item?.optical_force_trace_n;
+  if (rawValue === null || rawValue === undefined || rawValue === "") return Number.NaN;
+  const value = Number(rawValue);
+  return Number.isFinite(value)
+    ? Math.max(0, value)
+    : Number.NaN;
+}
+
+function traceDisplayValue(item) {
+  const forceN = traceOpticalForceN(item);
+  return Number.isFinite(forceN) ? forceN : traceAttenuationPercent(item);
 }
 
 function quantile(sortedValues, q) {
@@ -2321,88 +2601,54 @@ function responseText(record) {
   if (!record) return "Waiting for decoded BaySpec Bragg wavelength input.";
   const qaFlags = Array.isArray(record.qa_flags) ? record.qa_flags : [];
   if (record?.recognition_scope === GLOBAL_RECOGNITION_SCOPE) {
-    const prediction = activeModelPrediction(record);
-    const activeStatus = String(record?.active_spectral_model_status || record?.trained_static_spectral_model_status || "");
-    const modelName = activeModelDisplayName(record);
-    const allSourceBeta =
-      String(record?.active_spectral_model_source || prediction?.recognition_source || "") ===
-      ALL_SOURCE_BETA_RECOGNITION_SOURCE;
-    if (["ready", "temporal_validation_ready"].includes(activeStatus) && prediction?.digital_twin) {
-      if (prediction?.contact?.label !== "contact" || prediction?.digital_twin?.active !== true) {
+    const contract = operatorVisualizationContract(record);
+    const prediction = contract?.prediction || null;
+    const activeStatus = String(contract?.prediction_status || record?.active_spectral_model_status || "");
+    const modelName = activeModelDisplayName();
+    if (contract?.response_allowed === true && prediction?.digital_twin) {
+      const twin = prediction.digital_twin;
+      if ((twin.visual_active ?? twin.active) !== true) {
         return `${modelName}: no active contact; deformation is suppressed.`;
       }
-      const position = prediction?.position?.label || "unknown position";
-      if (allSourceBeta) {
-        const estimatedForce = Number(
-          prediction?.estimated_force_fz_n ?? prediction?.force_fz?.estimated_n
-        );
-        return Number.isFinite(estimatedForce)
-          ? `${modelName}: ${position} · optical Fz estimate ${estimatedForce.toFixed(2)} N.`
-          : `${modelName}: ${position} · optical Fz estimate unavailable.`;
-      }
-      const level = prediction?.force_level?.label || "uncertain level";
-      return `${modelName}: ${position} · approximate ${level} response level.`;
+      const position =
+        prediction?.position?.visual_label ||
+        prediction?.position?.label ||
+        "unknown position";
+      const estimatedForce = finiteNumberOrNull(contract?.force?.display_n);
+      return estimatedForce !== null
+        ? `${modelName}: ${position}; optical Fz estimate ${estimatedForce.toFixed(2)} N.`
+        : `${modelName}: ${position}; optical Fz estimate unavailable.`;
     }
-    if (allSourceBeta) {
-      if (activeStatus === "baseline_required") {
-        return "All-data optical model loaded · set a stable no-contact baseline.";
-      }
-      if (activeStatus === "latest_beta_model_source_blocked") {
-        return "All-data optical model loaded · waiting for a fresh wavelength-grid frame.";
-      }
-      if (record?.active_spectral_model_loaded === true) {
-        return `All-data optical model loaded · input waiting (${activeStatus || "no frame"}).`;
-      }
-      return "Latest deployed model unavailable · Diagnostics contains the explicit load error.";
+    if (activeStatus === "baseline_required") {
+      return `${modelName}: set a stable no-contact baseline.`;
     }
-    if (record?.active_spectral_model_source === "dynamic_temporal_v3_validation") {
-      const progress = record?.active_spectral_model_progress || {};
-      if (activeStatus === "window_warming_up") {
-        return `Temporal model loaded · warming ${progress.history_frames ?? 0}/${progress.required_frames ?? 20} live frames.`;
-      }
-      if (activeStatus === "baseline_required") {
-        return "Temporal model loaded · set a stable no-contact baseline before testing.";
-      }
-      if (activeStatus === "spectrum_required") {
-        return "Temporal model loaded · start Live to provide full-spectrum frames.";
-      }
-      if (record?.active_spectral_model_loaded === true) {
-        return `Temporal model loaded · input waiting (${activeStatus || "no frame"}).`;
-      }
+    if (["current_runtime_model_source_blocked", "spectrum_required"].includes(activeStatus)) {
+      return `${modelName}: waiting for a fresh wavelength-grid frame.`;
     }
-    const peaks = globalCandidatePeaks(record);
-    const globalBaselineReady = record?.global_frame_qa?.baseline_ready === true;
-    if (peaks.length !== GLOBAL_CANDIDATE_IDS.length) {
-      return `Incomplete global spectrum: ${peaks.length}/9 FBG candidates. Recognition is blocked.`;
+    if (record?.active_spectral_model_loaded === true) {
+      return `${modelName}: input waiting (${activeStatus || "no frame"}).`;
     }
-    if (!globalBaselineReady && String(record?.baseline_status || "").includes("required")) {
-      return "Complete nine-FBG spectrum received. Set a stable no-contact global baseline before interpreting candidate shifts.";
-    }
-    if (record?.global_frame_qa?.source_fresh === false || String(record?.qa_status || "") === "stale_frame") {
-      return "Global nine-FBG fingerprint is cached or stale. Restart live acquisition before interpreting response.";
-    }
-    return "Global nine-FBG event response captured after residual compensation. Raw peak drift remains available in Diagnostics.";
+    return "Current deployed model unavailable. Diagnostics contains the load error.";
   }
   if (record.qa_status === "invalid") {
     return `Frame QA invalid: ${qaFlags.join(", ") || "quality rule failed"}. Do not use this frame as a press response.`;
   }
   if (record.peak_axis_type === "pixel_index") {
-    return "Wavelength calibration is missing. Pixel-index spectra cannot provide a physical Δλ value.";
+    return "Wavelength calibration is missing. Pixel-index spectra cannot provide physical wavelength response.";
   }
   if (record.response_level === "baseline_required") {
     return record?.hybrid_spectral_response_available
       ? "Full spectrum received. Set a no-contact baseline before comparing wavelength, intensity, area, and shape features."
-      : "Spectrum received. Set the no-contact λ0 baseline before interpreting Bragg wavelength shift.";
+      : "Spectrum received. Set a no-contact baseline before interpreting Bragg wavelength shift.";
   }
   if (record.qa_status === "warning") {
-    return `Frame QA warning: ${qaFlags.join(", ") || "review peak tracking"}. Δλ remains an uncalibrated strain/temperature-coupled optical response.`;
+    return `Frame QA warning: ${qaFlags.join(", ") || "review peak tracking"}. Wavelength shift remains an uncalibrated strain/temperature-coupled optical response.`;
   }
   if (record?.hybrid_spectral_response_available) {
-    return "Measured response contains mixed wavelength, intensity, area, and spectral-shape changes. Point identity requires a labelled full-spectrum model.";
+    return "Measured response contains mixed wavelength, intensity, area, and spectral-shape changes. Point identity requires the deployed full-spectrum model.";
   }
-  return "Diagnostic response: signed Bragg wavelength shift Δλ = λB - λ0. It is not calibrated force and remains strain/temperature coupled.";
+  return "Diagnostic response: signed Bragg wavelength shift is not calibrated force and remains strain/temperature coupled.";
 }
-
 function liveResponseText(record, watcher, sdkLive) {
   const sdkFreshness = String(sdkLive?.freshness || "");
   if (sdkLive?.active && sdkFreshness === "stale") {
@@ -2538,6 +2784,9 @@ function cloneTraceRecords(records = []) {
     intensity_counts: Number(item?.intensity_counts),
     baseline_intensity_counts: Number(item?.baseline_intensity_counts),
     trained_model_visual_response_ratio: Number(item?.trained_model_visual_response_ratio),
+    optical_force_trace_n: item?.optical_force_trace_n === null || item?.optical_force_trace_n === undefined
+      ? null
+      : Number(item.optical_force_trace_n),
   }));
 }
 
@@ -2550,12 +2799,17 @@ function alignSmoothTraceRecords(previous, target) {
     const targetValue = Number(item?.intensity_counts);
     const priorModelRatio = Number(prior?.trained_model_visual_response_ratio);
     const targetModelRatio = Number(item?.trained_model_visual_response_ratio);
+    const priorForceN = traceOpticalForceN(prior);
+    const targetForceN = traceOpticalForceN(item);
     return {
       ...item,
       intensity_counts: Number.isFinite(priorValue) ? priorValue : targetValue,
       trained_model_visual_response_ratio: Number.isFinite(priorModelRatio)
         ? priorModelRatio
         : targetModelRatio,
+      optical_force_trace_n: Number.isFinite(priorForceN)
+        ? priorForceN
+        : targetForceN,
     };
   });
 }
@@ -2631,6 +2885,7 @@ function updateChartSmoothing(deltaSeconds) {
       const targetShiftPm = traceAttenuationPercent(item);
       const currentShiftPm = traceAttenuationPercent(state.smoothTraceRecords[index]);
       const modelResponseTrace = Number.isFinite(Number(item?.trained_model_visual_response_ratio));
+      const targetForceN = traceOpticalForceN(item);
       let nextShiftPm = Number.isFinite(currentShiftPm) ? currentShiftPm : targetShiftPm;
       if (Number.isFinite(targetValue)) {
         nextValue = isLatestPoint ? targetValue : dampToward(nextValue, targetValue, CHART_EASING, deltaSeconds);
@@ -2659,6 +2914,11 @@ function updateChartSmoothing(deltaSeconds) {
         trained_model_visual_response_ratio: modelResponseTrace
           ? nextRatio
           : item?.trained_model_visual_response_ratio,
+        // Keep quantitative force evidence on the acquisition cadence. Extra
+        // chart easing would hide low-force changes and add display latency.
+        optical_force_trace_n: Number.isFinite(targetForceN)
+          ? targetForceN
+          : item?.optical_force_trace_n,
         tracked_wavelength_nm: trackedWavelength,
         delta_wavelength_pm: Number.isFinite(nextShiftPm) ? nextShiftPm : item?.delta_wavelength_pm,
         delta_wavelength_nm: Number.isFinite(nextShiftPm) ? nextShiftPm / 1000 : item?.delta_wavelength_nm,
@@ -2717,17 +2977,22 @@ function drawGrid(ctx, width, height) {
 function updateTraceKpis(records) {
   const items = Array.isArray(records) ? records : [];
   const metricItems = state.targetTraceRecords.length ? state.targetTraceRecords : items;
-  const values = metricItems.map(traceAttenuationPercent).filter(Number.isFinite);
-  const modelResponseTrace = metricItems.some((item) =>
+  const opticalForceTrace = metricItems.some((item) => Number.isFinite(traceOpticalForceN(item)));
+  const values = metricItems.map(traceDisplayValue).filter(Number.isFinite);
+  const modelResponseTrace = !opticalForceTrace && metricItems.some((item) =>
     Number.isFinite(Number(item?.trained_model_visual_response_ratio))
   );
-  const measurementAvailable = frameResponseIsUsable(state.frame);
+  const measurementAvailable = opticalForceTrace
+    ? frameHasMeasurement(state.frame) && frameSourceIsFresh(state.frame)
+    : frameResponseIsUsable(state.frame);
   const globalFrame = state.frame?.scope === GLOBAL_RECOGNITION_SCOPE;
   const globalEventPeakPm = Number(state.frame?.surface_metrics?.global_event_absolute_shift_pm);
   const surfacePeakPm = Number(state.frame?.array_frame?.peak_wavelength_shift_pm);
   const current = measurementAvailable
-    ? modelResponseTrace && metricItems.length
-      ? traceAttenuationPercent(metricItems[metricItems.length - 1])
+    ? opticalForceTrace && metricItems.length
+      ? traceOpticalForceN(metricItems[metricItems.length - 1])
+      : modelResponseTrace && metricItems.length
+        ? traceAttenuationPercent(metricItems[metricItems.length - 1])
       : globalFrame && Number.isFinite(globalEventPeakPm)
         ? Math.max(0, globalEventPeakPm)
         : Number.isFinite(surfacePeakPm)
@@ -2736,18 +3001,20 @@ function updateTraceKpis(records) {
     : Number.NaN;
   const peak = measurementAvailable && values.length ? Math.max(...values.map(Math.abs)) : Number.NaN;
 
-  const unit = modelResponseTrace ? "%" : "pm";
+  const unit = opticalForceTrace ? "N" : modelResponseTrace ? "%" : "pm";
+  const currentDigits = opticalForceTrace ? 2 : Math.abs(current) >= 100 ? 0 : 1;
+  const peakDigits = opticalForceTrace ? 2 : Math.abs(peak) >= 100 ? 0 : 1;
   setText("traceCurrentLabel", "Now");
   setText("tracePeakLabel", "Peak");
   setCompactMetric(
     "traceCurrentValue",
-    formatCompactNumber(current, Math.abs(current) >= 100 ? 0 : 1),
-    Number.isFinite(current) ? `${current.toFixed(1)} ${unit}` : "--"
+    formatCompactNumber(current, currentDigits),
+    Number.isFinite(current) ? `${current.toFixed(currentDigits)} ${unit}` : "--"
   );
   setCompactMetric(
     "tracePeakValue",
-    formatCompactNumber(peak, Math.abs(peak) >= 100 ? 0 : 1),
-    Number.isFinite(peak) ? `${peak.toFixed(1)} ${unit}` : "--"
+    formatCompactNumber(peak, peakDigits),
+    Number.isFinite(peak) ? `${peak.toFixed(peakDigits)} ${unit}` : "--"
   );
 
   if (!measurementAvailable) {
@@ -2775,7 +3042,11 @@ function drawTrace(records) {
   drawGrid(ctx, width, height);
   let plotRecords = Array.isArray(records) ? records : [];
   updateTraceKpis(plotRecords);
-  if (plotRecords.length === 1 && Number.isFinite(traceAttenuationPercent(plotRecords[0]))) {
+  const opticalForceTrace = plotRecords.some((item) => Number.isFinite(traceOpticalForceN(item)));
+  const modelResponseTrace = !opticalForceTrace && plotRecords.some((item) =>
+    Number.isFinite(Number(item?.trained_model_visual_response_ratio))
+  );
+  if (plotRecords.length === 1 && Number.isFinite(traceDisplayValue(plotRecords[0]))) {
     plotRecords = [plotRecords[0], plotRecords[0]];
   }
   if (plotRecords.length < 2) {
@@ -2783,22 +3054,26 @@ function drawTrace(records) {
     ctx.font = "11px system-ui, sans-serif";
     ctx.fillText(
       frameHasMeasurement(state.frame)
-        ? plotRecords.some((item) => Number.isFinite(Number(item?.trained_model_visual_response_ratio)))
-          ? "Collecting model response history"
-          : "Collecting Δλ history"
+        ? opticalForceTrace
+          ? "Collecting optical force history"
+          : modelResponseTrace
+            ? "Collecting model response history"
+            : "Collecting 螖位 history"
         : "No response history",
       18,
       30
     );
     return;
   }
-  const values = plotRecords.map(traceAttenuationPercent).filter(Number.isFinite);
+  const values = plotRecords.map(traceDisplayValue).filter(Number.isFinite);
   if (!values.length) return;
-  const modelResponseTrace = plotRecords.some((item) =>
-    Number.isFinite(Number(item?.trained_model_visual_response_ratio))
-  );
-  const globalEventTrace = !modelResponseTrace && state.frame?.scope === GLOBAL_RECOGNITION_SCOPE;
-  const thresholds = globalEventTrace
+  const globalEventTrace = !opticalForceTrace && !modelResponseTrace && state.frame?.scope === GLOBAL_RECOGNITION_SCOPE;
+  const forceAxisMax = opticalForceTrace
+    ? updateOpticalForceDisplayMaximum(Math.max(...values))
+    : null;
+  const thresholds = opticalForceTrace
+    ? [0.25, 0.5, 0.75].map((ratio) => ratio * forceAxisMax)
+    : globalEventTrace
     ? [
         GLOBAL_PROXY_FULL_SCALE_PM * RESPONSE_BAND_THRESHOLDS.noContactMax,
         GLOBAL_PROXY_FULL_SCALE_PM * RESPONSE_BAND_THRESHOLDS.smallMax,
@@ -2815,14 +3090,22 @@ function drawTrace(records) {
         WAVELENGTH_SHIFT_FULL_SCALE_PM * RESPONSE_BAND_THRESHOLDS.smallMax,
         WAVELENGTH_SHIFT_FULL_SCALE_PM * RESPONSE_BAND_THRESHOLDS.moderateMax,
       ];
-  const minimumAxis = modelResponseTrace ? 100 : globalEventTrace ? GLOBAL_PROXY_FULL_SCALE_PM : 300;
+  const minimumAxis = opticalForceTrace
+    ? forceAxisMax
+    : modelResponseTrace
+      ? 100
+      : globalEventTrace
+        ? GLOBAL_PROXY_FULL_SCALE_PM
+        : 300;
   const maximumAbs = Math.max(minimumAxis, ...values.map(Math.abs), ...thresholds);
-  const axisStep = modelResponseTrace ? 25 : globalEventTrace ? 10 : 50;
+  const axisStep = opticalForceTrace ? opticalForceAxisStep(forceAxisMax) : modelResponseTrace ? 25 : globalEventTrace ? 10 : 50;
   const calculatedAxis = Math.ceil(maximumAbs / axisStep) * axisStep;
-  const axisLimit = globalEventTrace
+  const axisLimit = opticalForceTrace
+    ? forceAxisMax
+    : globalEventTrace
     ? calculatedAxis
     : Math.min(WAVELENGTH_SHIFT_FULL_SCALE_PM, calculatedAxis);
-  const yMin = globalEventTrace || modelResponseTrace ? 0 : -axisLimit;
+  const yMin = opticalForceTrace || globalEventTrace || modelResponseTrace ? 0 : -axisLimit;
   const yMax = axisLimit;
   const plotLeft = 28;
   const plotRight = Math.max(plotLeft + 1, width - 8);
@@ -2836,7 +3119,9 @@ function drawTrace(records) {
   const darkCanvas = useDarkCanvas();
   ctx.save();
   ctx.font = "10px system-ui, sans-serif";
-  const responseBands = globalEventTrace || modelResponseTrace
+  const responseBands = opticalForceTrace
+    ? []
+    : globalEventTrace || modelResponseTrace
     ? [
         { low: 0, high: thresholds[0], light: "rgba(117, 151, 170, 0.05)", dark: "rgba(117, 151, 170, 0.08)" },
         { low: thresholds[0], high: thresholds[1], light: "rgba(76, 171, 170, 0.055)", dark: "rgba(76, 171, 170, 0.08)" },
@@ -2858,9 +3143,11 @@ function drawTrace(records) {
     ctx.fillStyle = darkCanvas ? band.dark : band.light;
     ctx.fillRect(plotLeft, yTop, plotWidth, yBottom - yTop);
   });
-  const thresholdColors = darkCanvas
-    ? ["#44c7d6", "#e7c75f", "#b95b5b"]
-    : ["#5baec1", "#d9b86c", "#9f3f46"];
+  const thresholdColors = opticalForceTrace
+    ? thresholds.map(() => darkCanvas ? "#607f96" : "#9cb3c4")
+    : darkCanvas
+      ? ["#44c7d6", "#e7c75f", "#b95b5b"]
+      : ["#5baec1", "#d9b86c", "#9f3f46"];
   thresholds.forEach((line, idx) => {
     ctx.strokeStyle = thresholdColors[idx];
     ctx.globalAlpha = 0.48;
@@ -2874,7 +3161,7 @@ function drawTrace(records) {
     ctx.textAlign = "right";
     ctx.fillText(Number.isInteger(line) ? `${line}` : line.toFixed(1), plotLeft - 4, yOf(line) + 3);
   });
-  if (yMin < 0) {
+  if (yMin < 0 || opticalForceTrace) {
     ctx.strokeStyle = darkCanvas ? "rgba(180, 204, 222, 0.70)" : "rgba(92, 117, 136, 0.72)";
     ctx.globalAlpha = 0.9;
     ctx.setLineDash([3, 3]);
@@ -2891,7 +3178,7 @@ function drawTrace(records) {
 
   const lineColor = darkCanvas ? "#9b42ff" : "#0b91d2";
   const validPoints = plotRecords
-    .map((item, idx) => ({ x: xOf(idx), y: yOf(traceAttenuationPercent(item)) }))
+    .map((item, idx) => ({ x: xOf(idx), y: yOf(traceDisplayValue(item)) }))
     .filter((point) => Number.isFinite(point.y));
   if (validPoints.length) {
     const areaGradient = ctx.createLinearGradient(0, plotTop, 0, plotBottom);
@@ -2914,35 +3201,46 @@ function drawTrace(records) {
     else ctx.lineTo(point.x, point.y);
   });
   ctx.stroke();
-  const latestValue = traceAttenuationPercent(plotRecords[plotRecords.length - 1]);
+  const latestValue = traceDisplayValue(plotRecords[plotRecords.length - 1]);
   if (Number.isFinite(latestValue)) {
     ctx.fillStyle = lineColor;
     ctx.beginPath();
     ctx.arc(plotRight, yOf(latestValue), 3, 0, Math.PI * 2);
     ctx.fill();
-    if (modelResponseTrace) {
+    if (opticalForceTrace) {
+      traceCanvas.dataset.currentForceN = latestValue.toFixed(4);
+      delete traceCanvas.dataset.currentShiftPm;
+      delete traceCanvas.dataset.currentResponsePercent;
+    } else if (modelResponseTrace) {
       traceCanvas.dataset.currentResponsePercent = latestValue.toFixed(3);
       delete traceCanvas.dataset.currentShiftPm;
+      delete traceCanvas.dataset.currentForceN;
     } else {
       traceCanvas.dataset.currentShiftPm = latestValue.toFixed(3);
       delete traceCanvas.dataset.currentResponsePercent;
+      delete traceCanvas.dataset.currentForceN;
     }
   } else {
     delete traceCanvas.dataset.currentShiftPm;
     delete traceCanvas.dataset.currentResponsePercent;
+    delete traceCanvas.dataset.currentForceN;
   }
   ctx.fillStyle = darkCanvas ? "#88a8c5" : "#536f86";
   ctx.textAlign = "left";
   ctx.font = "9px system-ui, sans-serif";
-  const traceScope = modelResponseTrace
-    ? "Trained model visual response (%)"
+  const traceScope = opticalForceTrace
+    ? "Optical Fz estimate (N)"
+    : modelResponseTrace
+      ? "Trained model visual response (%)"
     : globalEventTrace
-    ? "Global event peak |Δλ| (pm)"
+    ? "Global event peak |螖位| (pm)"
     : state.arrayDemoActive
-      ? "Surface peak |Δλ| (pm)"
-      : `${state.frame?.selected_channel || state.selectedChannel} Δλ (pm)`;
-  traceCanvas.dataset.scope = modelResponseTrace
-    ? "trained_model_visual_response_percent"
+      ? "Surface peak |螖位| (pm)"
+      : `${state.frame?.selected_channel || state.selectedChannel} 螖位 (pm)`;
+  traceCanvas.dataset.scope = opticalForceTrace
+    ? "continuous_optical_force_n"
+    : modelResponseTrace
+      ? "trained_model_visual_response_percent"
     : globalEventTrace
     ? "global_residual_compensated_event_peak"
     : state.arrayDemoActive
@@ -4160,7 +4458,7 @@ function updateFingerScopeLabels() {
       "surfaceProxyCaption",
       state.selectedFinger === "all"
         ? "Shared response proxy across five fingertip views"
-        : `${label} view · shared response proxy`
+        : `${label} view | shared response proxy`
     );
   }
   for (const elementId of ["levelBadge", "heatmapChip"]) {
@@ -5400,41 +5698,6 @@ async function setSurfaceFullscreen(active) {
   state.surfaceNativeFullscreenEntered = false;
 }
 
-function updateRecognitionValidationMode(useTemporal, { announce = true, refresh = true } = {}) {
-  if (state.betaRecognitionRuntime) {
-    state.temporalValidationMode = false;
-    legacyRecognitionRuntimeControls?.setAttribute("hidden", "");
-    setText("recognitionModeStatus", state.activeRecognitionModelLabel);
-    return;
-  }
-  state.temporalValidationMode = Boolean(useTemporal);
-  settingsTemporalValidationButton?.classList.toggle("active", state.temporalValidationMode);
-  settingsStaticFallbackButton?.classList.toggle("active", !state.temporalValidationMode);
-  settingsTemporalValidationButton?.setAttribute("aria-pressed", String(state.temporalValidationMode));
-  settingsStaticFallbackButton?.setAttribute("aria-pressed", String(!state.temporalValidationMode));
-  setText("recognitionModeStatus", state.temporalValidationMode ? "Temporal validation" : "Static fallback");
-  try {
-    window.localStorage.setItem(
-      RECOGNITION_MODE_STORAGE_KEY,
-      state.temporalValidationMode ? "temporal" : "static"
-    );
-  } catch {
-    // The mode remains active for this session when storage is unavailable.
-  }
-  resetTrainedModelTraceHistory();
-  invalidateFrameRequestContext();
-  if (announce) {
-    setCommandFeedback(
-      state.temporalValidationMode
-        ? "Temporal validation enabled. Allow 20 live frames for the first prediction."
-        : "Static fallback enabled.",
-      "info",
-      { autoHideMs: 3600 }
-    );
-  }
-  if (refresh) fetchFrame({ force: true });
-}
-
 function projectedFingerHitRegions(rect) {
   const regions = [];
   const cameraUp = camera.up.clone().normalize();
@@ -6168,10 +6431,11 @@ function updateChannelSelectorLabels(channels) {
   });
 }
 
-const DIAGNOSTIC_WORKSPACES = new Set(["signal", "recording", "surface", "demo", "acquisition", "reference", "geometry"]);
+const DIAGNOSTIC_WORKSPACES = new Set(["signal", "recording", "measurement", "surface", "demo", "acquisition", "reference", "geometry"]);
 const DIAGNOSTIC_DEFAULT_CARD = {
   signal: ".diagnostic-channel-card",
   recording: ".diagnostic-capture-card",
+  measurement: ".diagnostic-measurement-card",
   surface: ".diagnostic-metrics-card",
   demo: ".demo-module",
   acquisition: ".diagnostic-frame-card",
@@ -6322,6 +6586,11 @@ function updateDiagnosticWorkspace(workspace) {
     const geometryControls = document.querySelector(".geometry-controls-scroll");
     if (geometryControls) geometryControls.scrollTop = 0;
   }
+  if (nextWorkspace === "measurement") {
+    requestAnimationFrame(() => {
+      drawMeasurementComparison(state.measurementResult?.trace || []);
+    });
+  }
 }
 
 function updateDisplayMode(mode) {
@@ -6418,7 +6687,7 @@ function updateArrayDiagnostics(arrayFrame, record, measurementAvailable = true)
   }).length;
   const mode = String(arrayFrame?.mode || "p22_fallback");
   const recordedDemo = isRecordedDemoSpectrum(record, arrayFrame);
-  const trainedStaticMode = isModelPositionLevelMode(mode);
+  const currentRuntimeMode = isModelPositionLevelMode(mode);
   const globalSpectrumMode = mode.startsWith("global_spectrum_");
   const fallbackLike = mode === "p22_fallback" || mode === "no_valid_channel" || mode === "";
   setText("realActiveChannels", globalSpectrumMode ? String(realActive) : fallbackLike ? (measurementAvailable ? "1" : "0") : String(realActive));
@@ -6429,16 +6698,16 @@ function updateArrayDiagnostics(arrayFrame, record, measurementAvailable = true)
     "surfaceSource",
     mode === "simulated_array_demo"
       ? recordedDemo ? "recorded spectrum + response proxy" : "simulated 3x3 array"
-      : trainedStaticMode
-        ? "trained 512-point spectrum"
+      : currentRuntimeMode
+        ? "current 512-point spectrum"
       : globalSpectrumMode
         ? measurementAvailable
           ? "global nine-FBG spectrum"
-          : "global nine-FBG · no frame"
+          : "global nine-FBG - no frame"
       : fallbackLike
         ? measurementAvailable
           ? "P22 fallback"
-          : "P22 fallback · no frame"
+          : "P22 fallback - no frame"
         : "future real 3x3 disabled"
   );
   setText(
@@ -6447,7 +6716,7 @@ function updateArrayDiagnostics(arrayFrame, record, measurementAvailable = true)
       ? "--"
       : mode === "simulated_array_demo"
       ? "coupled"
-      : trainedStaticMode
+      : currentRuntimeMode
         ? "coupled"
       : globalSpectrumMode
         ? "coupled"
@@ -6463,8 +6732,8 @@ function updateArrayDiagnostics(arrayFrame, record, measurementAvailable = true)
       ? recordedDemo
         ? "Data source: recorded 512-point BaySpec spectrum; surface remains a response proxy"
         : "Data source: simulated 3x3 array; mechanically coupled wavelength shift"
-      : trainedStaticMode
-        ? "Data source: trained static full-spectrum model; approximate manual fingertip position and response level"
+      : currentRuntimeMode
+        ? "Data source: current full-spectrum runtime model; approximate fingertip position and continuous optical force"
       : globalSpectrumMode
         ? "Data source: global FBG01-FBG09 spectrum; provisional wavelength-order spatial proxy"
       : fallbackLike
@@ -6484,7 +6753,7 @@ function updateArrayDiagnostics(arrayFrame, record, measurementAvailable = true)
         }
       )
       .join("");
-    arrayRawTable.innerHTML = `<thead><tr><th>Channel</th><th>x,y</th><th>Reference nm</th><th>Δλ</th><th>Normalized</th><th>Coupling</th></tr></thead><tbody>${rows}</tbody>`;
+    arrayRawTable.innerHTML = `<thead><tr><th>Channel</th><th>x,y</th><th>Reference nm</th><th>Shift pm</th><th>Normalized</th><th>Coupling</th></tr></thead><tbody>${rows}</tbody>`;
   }
   if (arrayJsonPreview) {
     const preview = {
@@ -6512,7 +6781,7 @@ function updateChannelGrid(grid, selected) {
       cell.style.background = `rgba(${Math.round(color.r * 255)}, ${Math.round(color.g * 255)}, ${Math.round(color.b * 255)}, 0.16)`;
     }
     const status = item.valid ? item.qa_status || "valid" : item.enabled ? "no data" : "disabled";
-    cell.innerHTML = `<strong>${item.channel_id}</strong><span>x,y ${formatNumber(item.x, 1)}, ${formatNumber(item.y, 1)}</span><span>Δλ ${formatPm(item.delta_wavelength_pm, 1, true)}</span><span>normalized ${formatNumber(item.wavelength_shift_response_ratio ?? item.response_value, 3)}</span><span>${item.coupling_status || status}</span>`;
+    cell.innerHTML = `<strong>${item.channel_id}</strong><span>x,y ${formatNumber(item.x, 1)}, ${formatNumber(item.y, 1)}</span><span>shift ${formatPm(item.delta_wavelength_pm, 1, true)}</span><span>normalized ${formatNumber(item.wavelength_shift_response_ratio ?? item.response_value, 3)}</span><span>${item.coupling_status || status}</span>`;
     channelGrid.appendChild(cell);
   }
 }
@@ -6521,9 +6790,9 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
   const channelIds = ["P11", "P21", "P31", "P12", "P22", "P32", "P13", "P23", "P33"];
   const channels = new Map((arrayFrame?.channels || []).map((item) => [item.channel_id, item]));
   const candidatePeaks = globalCandidatePeaks(record);
-  const trainedStaticView = isModelPositionLevelMode(arrayMode);
+  const currentRuntimeView = isModelPositionLevelMode(arrayMode);
   const globalCandidateView =
-    !trainedStaticView &&
+    !currentRuntimeView &&
     record?.recognition_scope === GLOBAL_RECOGNITION_SCOPE &&
     record?.physical_channel_mapping_final === false;
   const candidatesByProvisionalChannel = new Map(
@@ -6542,13 +6811,13 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
   const globalEventPeakShiftPm = Number(surfaceMetrics?.global_event_absolute_shift_pm ?? record?.absolute_shift_pm);
   const responseBlockReason = String(record?.response_block_reason || "");
   const unavailableResponseText = responseBlockReason === "stale_source_frame"
-    ? "Response unavailable · stale frame"
+    ? "Response unavailable - stale frame"
     : responseBlockReason === "global_candidate_baseline_required"
-      ? "Response unavailable · set baseline"
+      ? "Response unavailable - set baseline"
       : "No current response";
   // The band, summary, footprint, and surface deformation must share one
   // normalized response. Global live frames use the 75 pm spatial proxy scale,
-  // not the legacy 500 pm single-channel display scale.
+  // not the former 500 pm single-channel display scale.
   const peak = measurementAvailable
     ? normalizedSurfaceResponseRatio(surfaceMetrics, record)
     : Number.NaN;
@@ -6609,22 +6878,24 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
   }
 
   const forcePresentation = opticalForcePresentation(record, arrayFrame, runtimeFrame);
-  const activeResponsePrediction = trainedStaticView
-    ? forcePresentation.prediction
-    : null;
-  const allSourceBeta = forcePresentation.enabled;
+  const currentRuntimeForce = forcePresentation.enabled;
   const estimatedForceN = forcePresentation.valueN;
+  const forceScaleMaxN = currentRuntimeForce
+    ? updateOpticalForceDisplayMaximum(estimatedForceN)
+    : null;
   const responseBandRatio =
-    allSourceBeta && estimatedForceN !== null
-      ? Math.max(0, Math.min(1, estimatedForceN / OPTICAL_FORCE_DISPLAY_MAX_N))
+    currentRuntimeForce && estimatedForceN !== null
+      ? Math.max(0, Math.min(1, estimatedForceN / forceScaleMaxN))
       : peak;
-  setText("responseBandTitle", allSourceBeta ? "Estimated Force" : "Optical Response");
-  document.querySelector(".operator-band-card")?.classList.toggle("force-estimate-mode", allSourceBeta);
+  setText("responseBandTitle", currentRuntimeForce ? "Estimated Force" : "Optical Response");
+  document.querySelector(".operator-band-card")?.classList.toggle("force-estimate-mode", currentRuntimeForce);
   const responseBandLabels = Array.from(
     document.querySelectorAll(".operator-band-card .response-band-labels span")
   );
-  const responseBandLabelText = allSourceBeta
-    ? ["0 N", "1.25", "2.5", "3.75", "5 N"]
+  const responseBandLabelText = currentRuntimeForce
+    ? [0, 0.25, 0.5, 0.75, 1].map((ratio, index) =>
+        formatForceScaleTick(forceScaleMaxN * ratio, index === 0 || index === 4)
+      )
     : ["0%", "25%", "50%", "75%", "100%"];
   responseBandLabels.forEach((label, index) => {
     label.textContent = responseBandLabelText[index] || "";
@@ -6635,18 +6906,23 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
     if (track) {
       track.setAttribute(
         "aria-label",
-        allSourceBeta
-          ? "Force estimated from the optical spectrum, from 0 to 5 newtons"
+        currentRuntimeForce
+          ? `Force estimated from the optical spectrum; auto-ranging from 0 to ${formatForceScaleTick(forceScaleMaxN, true)}`
           : "Continuous normalized optical response from 0% to 100%; visual proxy only"
       );
     }
     marker.classList.toggle("unavailable", !measurementAvailable);
+    const aboveCalibratedRange = currentRuntimeForce && estimatedForceN !== null && (
+      forcePresentation.rangeStatus === "above_calibrated_range" ||
+      estimatedForceN > forcePresentation.calibratedMaxN
+    );
+    marker.classList.toggle("above-calibrated-range", aboveCalibratedRange);
     const markerPercent = measurementAvailable && Number.isFinite(responseBandRatio)
       ? Math.max(0, Math.min(100, responseBandRatio * 100))
       : 0;
     marker.style.left = `${markerPercent.toFixed(1)}%`;
     marker.style.transform = `translate(${-markerPercent.toFixed(1)}%, -50%)`;
-    marker.textContent = allSourceBeta
+    marker.textContent = currentRuntimeForce
       ? measurementAvailable && estimatedForceN !== null
         ? `${estimatedForceN.toFixed(2)} N`
         : "-- N"
@@ -6657,43 +6933,47 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
     marker.setAttribute("aria-valuemin", "0");
     marker.setAttribute(
       "aria-valuemax",
-      allSourceBeta ? String(OPTICAL_FORCE_DISPLAY_MAX_N) : "100"
+      currentRuntimeForce ? String(forceScaleMaxN) : "100"
     );
     if (measurementAvailable) {
-      const meterValue = allSourceBeta && estimatedForceN !== null
+      const meterValue = currentRuntimeForce && estimatedForceN !== null
         ? estimatedForceN
         : Math.max(0, Math.min(100, peak * 100));
       marker.setAttribute("aria-valuenow", meterValue.toFixed(2));
       marker.setAttribute(
         "aria-valuetext",
-        allSourceBeta && estimatedForceN !== null
-          ? `${estimatedForceN.toFixed(2)} newtons estimated from the optical spectrum`
+        currentRuntimeForce && estimatedForceN !== null
+          ? `${estimatedForceN.toFixed(2)} newtons estimated from the optical spectrum${aboveCalibratedRange ? "; above the currently validated range" : ""}`
           : formatPercent(peak, 0)
       );
+      marker.title = aboveCalibratedRange
+        ? `Above currently validated 0-${formatForceScaleTick(forcePresentation.calibratedMaxN, true)} range`
+        : "";
     } else {
       marker.removeAttribute("aria-valuenow");
       marker.setAttribute("aria-valuetext", "No current measurement");
+      marker.title = "";
     }
   }
-  const trainedPrediction = trainedStaticView
+  const runtimePrediction = currentRuntimeView
     ? activeModelPrediction(record, arrayFrame)
     : null;
   const responseBandValue = document.getElementById("responseBandValue");
   const compactResponseBandText = measurementAvailable
-    ? allSourceBeta && estimatedForceN !== null
-      ? `${estimatedForceN.toFixed(2)} N${heldMeasurement ? " · held" : ""}`
-      : `${formatPercent(peak, 0)} optical response${heldMeasurement ? " · held" : ""}`
-    : allSourceBeta ? "-- N" : unavailableResponseText;
+    ? currentRuntimeForce && estimatedForceN !== null
+      ? `${estimatedForceN.toFixed(2)} N${heldMeasurement ? " - held" : ""}`
+      : `${formatPercent(peak, 0)} optical response${heldMeasurement ? " - held" : ""}`
+    : currentRuntimeForce ? "-- N" : unavailableResponseText;
   setText("responseBandValue", compactResponseBandText);
   if (responseBandValue) {
     const eventPeakShift = globalCandidateView
       ? globalEventPeakShiftPm
       : arrayFrame?.peak_wavelength_shift_pm ?? record?.absolute_shift_pm;
-    const evidenceDetail = trainedPrediction
-      ? allSourceBeta && estimatedForceN !== null
+    const evidenceDetail = runtimePrediction
+      ? currentRuntimeForce && estimatedForceN !== null
         ? `${activeModelDisplayName(record, arrayFrame)}; ${estimatedForceN.toFixed(2)} N estimated from spectrum`
         : `${activeModelDisplayName(record, arrayFrame)}; ${formatPercent(peak, 0)} normalized visual response`
-      : `${formatPercent(peak, 0)} normalized response; ${formatPm(eventPeakShift, 1)} event peak |Δλ|`;
+      : `${formatPercent(peak, 0)} normalized response; ${formatPm(eventPeakShift, 1)} event peak |shift|`;
     responseBandValue.title = measurementAvailable ? evidenceDetail : unavailableResponseText;
     responseBandValue.setAttribute(
       "aria-label",
@@ -6706,9 +6986,9 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
   else if (heldMeasurement) note = noteDetail = "Last frame held; acquisition stopped";
   else if (arrayMode === "simulated_array_demo") {
     note = contactChannels.length
-      ? `${contactChannels.length} contact · ${coupledNeighborChannels.length} coupled`
+      ? `${contactChannels.length} contact - ${coupledNeighborChannels.length} coupled`
       : coupledNeighborChannels.length
-        ? `Below threshold · ${coupledNeighborChannels.length} coupled`
+        ? `Below threshold - ${coupledNeighborChannels.length} coupled`
         : "No active channels";
     noteDetail = contactChannels.length
       ? `${contactChannels.length} ${contactChannels.length === 1 ? "channel" : "channels"} above the ${formatPercent(RESPONSE_BAND_THRESHOLDS.noContactMax, 0)} contact threshold; ${coupledNeighborChannels.length} coupled ${coupledNeighborChannels.length === 1 ? "neighbor" : "neighbors"} below it`
@@ -6717,9 +6997,9 @@ function updateOperatorFootprint(arrayFrame, record, surfaceMetrics, arrayMode, 
         : "No active channels; baseline or recovery state";
   }
   else if (isModelPositionLevelMode(arrayMode)) {
-    note = trainedPrediction?.digital_twin?.active
-      ? `Model position ${trainedPrediction?.position?.label || "--"}; broad manual fingertip contact domain`
-      : `${activeModelDisplayName(record, arrayFrame)} · no active contact`;
+    note = runtimePrediction?.digital_twin?.active
+      ? `Model position ${runtimePrediction?.position?.label || "--"}; broad manual fingertip contact domain`
+      : `${activeModelDisplayName(record, arrayFrame)} - no active contact`;
   }
   else if (globalCandidateView) {
     note = candidatePeaks.length === GLOBAL_CANDIDATE_IDS.length
@@ -7251,7 +7531,7 @@ function updateDemoReadout(record) {
   setText(
     "demoReadoutNote",
     state.demoAutoplay
-      ? "Auto demo is cycling synchronized Δλ and shifted-spectrum frames; not live data."
+      ? "Auto demo is cycling synchronized 螖位 and shifted-spectrum frames; not live data."
       : "Manual demo frame with synchronized Bragg wavelength-shift input."
   );
 }
@@ -7304,18 +7584,18 @@ function updateUI(inputFrame) {
   );
   const surfaceMetrics = arrayFrame?.surface_metrics || {};
   const syncDiag = frameSyncDiagnostics(frame, record, trace, arrayFrame);
-  const trainedModelDisplay = trainedStaticModelDisplayReady(frame);
+  const currentModelDisplay = currentModelDisplayReady(frame);
   const opticalForceDisplay = opticalForcePresentation(record, arrayFrame, frame);
-  const activeModelSource = opticalForceDisplay.source;
-  const allSourceBetaActive = opticalForceDisplay.enabled;
+  const currentModelSource = opticalForceDisplay.source;
+  const currentRuntimeActive = opticalForceDisplay.enabled;
   const opticalForceEstimate = opticalForceDisplay.valueN;
   const opticalForceEstimateField = document.getElementById("opticalForceEstimateField");
-  if (opticalForceEstimateField) opticalForceEstimateField.hidden = !allSourceBetaActive;
+  if (opticalForceEstimateField) opticalForceEstimateField.hidden = !currentRuntimeActive;
   const opticalForceEstimateLabel = opticalForceEstimateField?.querySelector("span");
   if (opticalForceEstimateLabel) opticalForceEstimateLabel.textContent = "Estimated Force";
   setText(
     "opticalForceEstimate",
-    allSourceBetaActive && opticalForceEstimate !== null
+    currentRuntimeActive && opticalForceEstimate !== null
       ? `${opticalForceEstimate.toFixed(2)} N`
       : "-- N"
   );
@@ -7323,16 +7603,7 @@ function updateUI(inputFrame) {
   state.currentSurfaceGrid = Array.isArray(arrayFrame?.surface_grid) ? arrayFrame.surface_grid : null;
   state.currentSurfaceMetrics = surfaceMetrics;
   const wavelengthPlan = arrayFrame?.wavelength_plan || record?.wavelength_plan || {};
-  const trainedWindowRange = frame?.trained_static_spectral_model?.observed_model_feature_window_range_nm;
-  const trainedWindowCount = Object.keys(
-    frame?.trained_static_spectral_model?.observed_model_feature_windows_nm || {}
-  ).length;
-  setText(
-    "wavelengthPlanChip",
-    trainedModelDisplay && Array.isArray(trainedWindowRange) && trainedWindowRange.length === 2
-      ? `${Number(trainedWindowRange[0]).toFixed(1)}-${Number(trainedWindowRange[1]).toFixed(1)} nm · ${trainedWindowCount} trained FBG windows`
-      : wavelengthPlanText(wavelengthPlan, true)
-  );
+  setText("wavelengthPlanChip", wavelengthPlanText(wavelengthPlan, true));
   const cx = Number(surfaceMetrics.surface_centroid_x);
   const cy = Number(surfaceMetrics.surface_centroid_y);
   if (Number.isFinite(cx) && Number.isFinite(cy) && Number(surfaceMetrics.surface_peak) > 0.03) {
@@ -7343,7 +7614,7 @@ function updateUI(inputFrame) {
   const globalRecognitionFrame = frame?.scope === GLOBAL_RECOGNITION_SCOPE;
   const completeGlobalRecognitionFrame = isGlobalSpectrumFrame(frame, record);
   const globalDominantPeak = globalRecognitionFrame ? dominantGlobalCandidate(record) : null;
-  const dominantChannel = (trainedModelDisplay ? record?.model_position_id : null) || surfaceMetrics.dominant_channel || record?.dominant_channel || globalDominantPeak?.candidate_id || arrayFrame?.dominant_channel || frame?.selected_channel || state.selectedChannel;
+  const dominantChannel = (currentModelDisplay ? record?.model_position_id : null) || surfaceMetrics.dominant_channel || record?.dominant_channel || globalDominantPeak?.candidate_id || arrayFrame?.dominant_channel || frame?.selected_channel || state.selectedChannel;
   const measurementAvailable = frameHasMeasurement(frame);
   const responseAvailable = frameResponseIsUsable(frame);
   const sourceDisplayState = acquisitionDisplayState(watcher, sdkLive);
@@ -7421,14 +7692,10 @@ function updateUI(inputFrame) {
         ? "demo"
         : "ok";
   const baselineStatusKey = String(displayRecord?.baseline_status || "").toLowerCase();
-  const trainedModelBaselineReady =
+  const currentRuntimeBaselineReady =
     displayRecord?.active_spectral_model_status === "ready" ||
-    displayRecord?.active_spectral_model_status === "temporal_validation_ready" ||
-    displayRecord?.trained_static_spectral_model_status === "ready" ||
-    baselineStatusKey.includes("all_source_optical_force_baseline_ready") ||
-    baselineStatusKey.includes("static_model_full_spectrum_baseline_ready") ||
-    baselineStatusKey.includes("temporal_model_window_ready");
-  const globalBaselineReady = trainedModelBaselineReady || (
+    baselineStatusKey.includes("current_runtime_baseline_ready");
+  const globalBaselineReady = currentRuntimeBaselineReady || (
     globalRecognitionFrame &&
     globalCandidatePeaks(displayRecord).length === GLOBAL_CANDIDATE_IDS.length &&
     globalCandidatePeaks(displayRecord).every(
@@ -7522,7 +7789,7 @@ function updateUI(inputFrame) {
         : record?.peak_axis_type === "pixel_index"
           ? "Pixel-axis frame"
           : candidateSpectrumPeaks.length
-            ? `Wavelength-axis · ${candidateSpectrumPeaks.length} candidate FBG peaks`
+            ? `Wavelength-axis | ${candidateSpectrumPeaks.length} candidate FBG peaks`
             : "Wavelength-axis frame"
   );
   if (spectrumDrawer) spectrumDrawer.dataset.spectrumState = syncDiag.hasSpectrum ? "available" : "missing";
@@ -7538,10 +7805,10 @@ function updateUI(inputFrame) {
   setText(
     "spectrumAxisNote",
     record?.peak_axis_type === "pixel_index"
-      ? "Pixel index · optical intensity (counts)"
+      ? "Pixel index | optical intensity (counts)"
       : spectrumIsSynthetic
-        ? state.displayMode === "operator" ? "Wavelength (nm) · optical intensity (counts)" : "Wavelength (nm) · optical intensity (counts) · simulated"
-        : "Wavelength (nm) · reflected intensity (counts)"
+        ? state.displayMode === "operator" ? "Wavelength (nm) | optical intensity (counts)" : "Wavelength (nm) | optical intensity (counts) | simulated"
+        : "Wavelength (nm) | reflected intensity (counts)"
   );
   const spectrumPeakProfile = String(record?.spectrum_peak_profile || "").toLowerCase();
   setText(
@@ -7591,7 +7858,7 @@ function updateUI(inputFrame) {
   setText("dominantChannel", measurementAvailable ? dominantChannel || "--" : "--");
   setText("selectedView", syncDiag.status || "--");
   setText("stageAttenuation", formatPm(globalRecognitionFrame ? globalEventShiftPm : displayRecord?.delta_wavelength_pm, 1, true));
-  setText("stageRelative", globalRecognitionFrame ? "event Δλ after residual compensation" : displayRecord?.shift_direction || "--");
+  setText("stageRelative", globalRecognitionFrame ? "event 螖位 after residual compensation" : displayRecord?.shift_direction || "--");
   setText(
     "stagePeak",
     measurementAvailable
@@ -7605,7 +7872,7 @@ function updateUI(inputFrame) {
   const fingerScope = selectedFingerLabel();
   const selectedFingerScope =
     state.selectedFinger === "all" ? "All fingers" : fingerScope;
-  badge.textContent = trainedModelDisplay
+  badge.textContent = currentModelDisplay
     ? `${selectedFingerScope} spectrum model`
     : globalRecognitionFrame
     ? `${selectedFingerScope} spectral fingerprint`
@@ -7627,8 +7894,8 @@ function updateUI(inputFrame) {
   setText("surfaceModeNote", contactPresentation.secondary);
   setText(
     "heatmapChip",
-    trainedModelDisplay
-      ? `${selectedFingerScope} · ${dominantChannel || "--"}`
+    currentModelDisplay
+      ? `${selectedFingerScope} | ${dominantChannel || "--"}`
       : globalRecognitionFrame
       ? `${selectedFingerScope} spatial proxy`
       : isFallbackLikeFrame
@@ -7639,8 +7906,8 @@ function updateUI(inputFrame) {
   );
   setText(
     "heatmapAxisNote",
-    trainedModelDisplay
-      ? "Approximate broad-fingertip contact region from the trained 512-point spectrum model."
+    currentModelDisplay
+      ? "Approximate broad-fingertip contact region from the current 512-point spectrum model."
       : globalRecognitionFrame
       ? "Provisional FBG01-FBG09 wavelength-order spatial proxy. Verify physical P11-P33 positions with labelled point presses."
       : isFallbackLikeFrame
@@ -7654,7 +7921,7 @@ function updateUI(inputFrame) {
   const surfaceStateLevel =
     !responseAvailable
       ? measurementAvailable && !frameSourceIsFresh(frame) ? "stale_frame" : "idle"
-      : trainedModelDisplay
+      : currentModelDisplay
         ? record?.response_level
       : globalRecognitionFrame
         ? responseLevelFromSurfaceValue(surfaceMetrics.surface_peak)
@@ -7806,7 +8073,7 @@ function updateUI(inputFrame) {
     !measurementAvailable
       ? "No wavelength frame"
       : !responseAvailable
-        ? frameSourceIsFresh(frame) ? "Response unavailable" : "Stale frame · response disabled"
+        ? frameSourceIsFresh(frame) ? "Response unavailable" : "Stale frame | response disabled"
       : heldMeasurement
         ? "Last frame held"
         : globalRecognitionFrame
@@ -7848,24 +8115,24 @@ function updateUI(inputFrame) {
   );
   setText(
     "surfacePeakLabel",
-    allSourceBetaActive
+    currentRuntimeActive
       ? "Optical response"
-      : trainedModelDisplay
+      : currentModelDisplay
         ? "Visual response"
-        : "Peak |Δλ|"
+        : "Peak |螖位|"
   );
   const surfacePeakElement = document.getElementById("surfacePeak");
   if (surfacePeakElement) {
-    surfacePeakElement.title = allSourceBetaActive
+    surfacePeakElement.title = currentRuntimeActive
       ? "Digital-twin response normalized from the optical-only continuous Fz estimate"
-      : trainedModelDisplay
+      : currentModelDisplay
         ? "Trained model visual response proxy; not calibrated force"
         : "Peak absolute Bragg wavelength shift";
   }
   setText(
     "surfacePeak",
     responseAvailable
-      ? trainedModelDisplay
+      ? currentModelDisplay
         ? formatPercent(surfacePeakValue, 1)
         : formatPm(surfacePeakShiftPm, 1)
       : "--"
@@ -7922,7 +8189,7 @@ function updateUI(inputFrame) {
   }
   setText(
     "couplingStatus",
-    trainedModelDisplay
+    currentModelDisplay
       ? "trained full-spectrum fingerprint"
       : globalRecognitionFrame
       ? "global fingerprint; provisional spatial proxy"
@@ -7940,7 +8207,7 @@ function updateUI(inputFrame) {
   setText(
     "eventInterpretation",
     measurementAvailable
-      ? trainedModelDisplay
+      ? currentModelDisplay
         ? "model-driven manual fingertip position and approximate response level"
       : globalRecognitionFrame
         ? "global wavelength-order candidates; no spatial contact inference"
@@ -8041,412 +8308,211 @@ function updateUI(inputFrame) {
   requestThreeAnimation();
 }
 
-function normalizeGlobalSpectrumFrame(frame) {
-  if (frame?.scope !== GLOBAL_RECOGNITION_SCOPE || !frame?.latest) return frame;
-  const rawRecord = frame.latest;
-  const trainedModelFrame = frame?.trained_static_spectral_frame || {};
-  const activeModelSource = String(frame?.active_spectral_model_source || "static_spectral_model");
-  const temporalModelActive = activeModelSource === "dynamic_temporal_v3_validation";
-  const allSourceBetaActive = activeModelSource === ALL_SOURCE_BETA_RECOGNITION_SOURCE;
-  const trainedPrediction = frame?.active_spectral_prediction || frame?.trained_static_spectral_prediction || trainedModelFrame?.prediction || null;
-  const trainedModelExpected = frame?.active_spectral_model_expected === true || frame?.trained_static_spectral_model?.loaded === true;
-  const trainedModelReady = Boolean(
-    frame?.model_assisted_display_allowed === true &&
-    trainedPrediction?.digital_twin
-  );
-  const trainedContactActive = trainedModelReady && trainedPrediction?.digital_twin?.active === true;
-  const trainedForceLevel = allSourceBetaActive
-    ? ""
-    : String(
-        trainedPrediction?.force_level?.label ||
-        trainedPrediction?.digital_twin?.force_level ||
-        ""
-      );
-  const trainedResponseLevel = allSourceBetaActive
-    ? trainedContactActive
-      ? "contact"
-      : "no_contact"
-    : trainedContactActive && ["light", "normal", "hard"].includes(trainedForceLevel)
-      ? `${trainedForceLevel}_press`
-      : "no_contact";
-  const trainedSurface = trainedModelReady ? trainedStaticModelSurface(trainedPrediction) : null;
-  const trainedModelTrace = trainedModelReady
-    ? appendTrainedModelTrace(rawRecord, trainedPrediction, trainedSurface)
+function normalizeCanonicalVisualizationFrame(frame, contract) {
+  const rawRecord = frame.latest || {};
+  const prediction = contract.prediction || null;
+  const responseAllowed = contract.response_allowed === true;
+  const responseState = responseAllowed && contract.response_state === "contact"
+    ? "contact"
+    : "no_contact";
+  const positionId = responseState === "contact"
+    ? String(contract?.position?.display_label || contract?.surface?.position_id || "") || null
     : null;
-  const globalFrameQa = frame.global_frame_qa || {};
-  const peaks = globalCandidatePeaks(rawRecord);
-  const validPeaks = peaks.filter((peak) => peak?.valid !== false && Number.isFinite(candidateShiftPm(peak)));
-  const rawDominant = dominantGlobalCandidate(rawRecord);
-  const rawDominantShiftPm = rawDominant ? candidateShiftPm(rawDominant) : Number.NaN;
-  const peakAbsoluteShiftPm = Number.isFinite(rawDominantShiftPm) ? Math.abs(rawDominantShiftPm) : Number.NaN;
-  const rawTrace = Array.isArray(frame.trace) ? frame.trace : [];
-  const baselineReady =
-    peaks.length === GLOBAL_CANDIDATE_IDS.length &&
-    peaks.every((peak) => peak?.candidate_reference_status === "session_global_no_contact_baseline");
-  const sourceUsable =
-    globalFrameQa.operator_display_valid === true &&
-    globalFrameQa.source_fresh !== false;
-  const rawProxyResponseAllowed =
-    validPeaks.length === GLOBAL_CANDIDATE_IDS.length && baselineReady && sourceUsable;
-  const modelPrimaryBlocked = trainedModelExpected && !trainedModelReady;
-  const responseAllowed = trainedModelReady || (!trainedModelExpected && rawProxyResponseAllowed);
-  const responseBlockReason =
-    trainedModelReady
-      ? null
-      : modelPrimaryBlocked
-        ? frame?.model_assisted_display_block_reason ||
-          trainedModelFrame?.reason ||
-          trainedModelFrame?.status ||
-          "trained_static_model_not_ready"
-      : validPeaks.length !== GLOBAL_CANDIDATE_IDS.length
-      ? "incomplete_global_candidate_frame"
-      : !baselineReady
-        ? "global_candidate_baseline_required"
-        : !sourceUsable
-          ? "stale_source_frame"
-          : null;
-  const baselineStatsByCandidate = globalCandidateBaselineStatsMap(rawTrace);
-  const measuredSpatialProxy = globalCandidateSpatialProxy(validPeaks, rawTrace, baselineStatsByCandidate);
-  const spatialProxy = responseAllowed
-    ? measuredSpatialProxy
-    : suppressGlobalSpatialProxy(measuredSpatialProxy, responseBlockReason);
-  const normalizedEventTrace = globalEventTraceRecords(rawTrace, baselineStatsByCandidate);
-  const dominant = spatialProxy.dominantEntry?.peak || rawDominant;
-  const dominantShiftPm = dominant ? candidateShiftPm(dominant) : Number.NaN;
-  const fallbackEventResponse = globalEventResponseFromTrace(peakAbsoluteShiftPm, frame.trace || []);
-  const eventAbsoluteShiftPm = spatialProxy.entries.length
-    ? spatialProxy.eventPeakShiftPm
-    : fallbackEventResponse.eventShiftPm;
-  const responseRatio = Number.isFinite(peakAbsoluteShiftPm)
-    ? Math.max(0, Math.min(1, peakAbsoluteShiftPm / WAVELENGTH_SHIFT_FULL_SCALE_PM))
-    : Number.NaN;
-  const eventResponseRatio = Number.isFinite(eventAbsoluteShiftPm)
-    ? Math.max(0, Math.min(1, eventAbsoluteShiftPm / WAVELENGTH_SHIFT_FULL_SCALE_PM))
-    : Number.NaN;
-  const proxyResponseRatio = trainedModelReady
-    ? trainedSurface.peak
-    : spatialProxy.entries.length
-      ? spatialProxy.surfacePeak
-      : globalSpectralProxyValue(eventAbsoluteShiftPm);
-  const proxySurfaceGrid = trainedModelReady
-    ? trainedSurface.grid
-    : spatialProxy.entries.length
-      ? spatialProxy.surfaceGrid
-      : centeredGlobalProxySurfaceGrid(proxyResponseRatio);
-  const blockers = Array.isArray(globalFrameQa.blockers) ? globalFrameQa.blockers : [];
-  const respondingCandidates = trainedModelReady
-    ? []
-    : spatialProxy.respondingEntries.map((entry) => entry.candidateId);
-  const respondingChannels = trainedModelReady
-    ? trainedSurface.respondingChannels
-    : spatialProxy.respondingEntries.map((entry) => entry.channelId);
-  const spatialEntryByCandidate = new Map(
-    spatialProxy.entries.map((entry) => [entry.candidateId, entry])
+  const suppliedGrid = Array.isArray(contract?.surface?.surface_grid)
+    ? contract.surface.surface_grid
+    : [];
+  const surfaceGrid = ARRAY_DISPLAY_ROWS.map((row, rowIndex) =>
+    row.map((_channelId, columnIndex) => {
+      const value = finiteNumberOrNull(suppliedGrid?.[rowIndex]?.[columnIndex]);
+      return responseAllowed && responseState === "contact"
+        ? Math.max(0, Math.min(1, value ?? 0))
+        : 0;
+    })
   );
-  const channelSources = trainedModelReady
-    ? ARRAY_DISPLAY_ORDER.map((channelId) => ({
-        provisional_channel_id: channelId,
-        valid: true,
-        spectral_mapping_status: "model_position_proxy_no_individual_peak_assignment",
-      }))
-    : peaks;
-  const channels = channelSources.map((peak) => {
-    const shiftPm = candidateShiftPm(peak);
-    const rawAbsoluteShiftPm = Math.abs(shiftPm);
-    const spatialEntry = spatialEntryByCandidate.get(peak.candidate_id);
-    const absoluteShiftPm = spatialEntry?.eventShiftPm ?? rawAbsoluteShiftPm;
-    const channelId = peak.provisional_channel_id || peak.candidate_id;
-    const coordinate = ARRAY_CHANNEL_COORDS[channelId] || { x: null, y: null };
-    const trainedValue = trainedModelReady
-      ? Number(trainedSurface.valuesByChannel?.get(channelId) || 0)
-      : Number.NaN;
-    return {
-      ...peak,
-      channel_id: channelId,
-      candidate_id: peak.candidate_id,
-      x: coordinate.x,
-      y: coordinate.y,
-      delta_wavelength_pm: shiftPm,
-      absolute_shift_pm: absoluteShiftPm,
-      raw_absolute_shift_pm: rawAbsoluteShiftPm,
-      residual_center_pm: spatialEntry?.residualCenterPm ?? null,
-      common_mode_pm: spatialEntry?.commonModePm ?? null,
-      conditioning_sample_count: spatialEntry?.conditioningSampleCount ?? 0,
-      residual_conditioned: spatialEntry?.conditioned === true,
-      event_deadband_pm: spatialEntry?.deadbandPm ?? GLOBAL_EVENT_DEADBAND_PM,
-      wavelength_shift_response_ratio: trainedModelReady
-        ? trainedValue
-        : Number.isFinite(absoluteShiftPm)
-          ? globalSpectralProxyValue(absoluteShiftPm)
-          : null,
-      response_value: trainedModelReady
-        ? trainedValue
-        : Number.isFinite(absoluteShiftPm)
-          ? globalSpectralProxyValue(absoluteShiftPm)
-          : null,
-      qa_status: peak.valid === false ? "invalid" : trainedModelReady ? "model_position_response" : "candidate_valid",
-      enabled: true,
-      response_enabled: responseAllowed,
-    };
-  });
+  const metricSource = contract?.surface?.surface_metrics || {};
+  const flatGrid = surfaceGrid.flat();
+  const surfacePeak = responseAllowed
+    ? Math.max(0, Math.min(1, finiteNumberOrNull(metricSource.surface_peak) ?? Math.max(...flatGrid)))
+    : 0;
+  const surfaceMean = responseAllowed
+    ? Math.max(0, finiteNumberOrNull(metricSource.surface_mean) ?? (flatGrid.reduce((sum, value) => sum + value, 0) / flatGrid.length))
+    : 0;
+  const respondingChannelIds = responseAllowed
+    ? ARRAY_DISPLAY_ORDER.filter((channelId) => {
+        const coordinate = ARRAY_CHANNEL_COORDS[channelId];
+        const rowIndex = 1 - Number(coordinate?.y || 0);
+        const columnIndex = Number(coordinate?.x || 0) + 1;
+        return (surfaceGrid?.[rowIndex]?.[columnIndex] || 0) >= 0.055;
+      })
+    : [];
+  const activeArea = responseAllowed
+    ? Math.max(
+        0,
+        Math.min(
+          1,
+          finiteNumberOrNull(metricSource.surface_area_active) ??
+            (respondingChannelIds.length / ARRAY_DISPLAY_ORDER.length)
+        )
+      )
+    : 0;
+  const displayForceN = finiteNumberOrNull(contract?.force?.display_n);
   const surfaceMetrics = {
-    surface_peak: proxyResponseRatio,
-    surface_mean: trainedModelReady ? trainedSurface.mean : spatialProxy.surfaceMean,
-    surface_area_active: trainedModelReady ? trainedSurface.activeArea : spatialProxy.activeArea,
-    surface_area_active_percent: (trainedModelReady ? trainedSurface.activeArea : spatialProxy.activeArea) * 100,
-    surface_centroid_x: trainedModelReady ? trainedSurface.centroidX : spatialProxy.centroidX,
-    surface_centroid_y: trainedModelReady ? trainedSurface.centroidY : spatialProxy.centroidY,
-    surface_spread: trainedModelReady ? trainedSurface.spread : spatialProxy.spread,
-    dominant_channel: trainedModelReady ? trainedSurface.dominantChannel : null,
-    provisional_dominant_channel: !trainedModelReady && spatialProxy.contactEvidence
-      ? spatialProxy.dominantEntry?.channelId || null
-      : null,
-    dominant_candidate_id: spatialProxy.contactEvidence
-      ? spatialProxy.dominantEntry?.candidateId || dominant?.candidate_id || null
-      : null,
+    ...metricSource,
+    surface_peak: surfacePeak,
+    surface_mean: surfaceMean,
+    surface_area_active: activeArea,
+    surface_area_active_percent: activeArea * 100,
+    surface_centroid_x: responseAllowed
+      ? finiteNumberOrNull(metricSource.surface_centroid_x) ?? 0
+      : 0,
+    surface_centroid_y: responseAllowed
+      ? finiteNumberOrNull(metricSource.surface_centroid_y) ?? 0
+      : 0,
+    surface_spread: responseAllowed
+      ? finiteNumberOrNull(metricSource.surface_spread) ?? 0.24
+      : 0.24,
+    dominant_channel: positionId,
     enabled_channel_count: ARRAY_DISPLAY_ORDER.length,
-    responding_channel_count: respondingChannels.length,
-    responding_channel_ids: respondingChannels,
-    responding_candidate_ids: respondingCandidates,
-    valid_candidate_count: validPeaks.length,
-    global_peak_absolute_shift_pm: Number.isFinite(peakAbsoluteShiftPm) ? peakAbsoluteShiftPm : null,
-    global_event_absolute_shift_pm: Number.isFinite(eventAbsoluteShiftPm) ? eventAbsoluteShiftPm : null,
-    global_residual_center_pm: spatialProxy.dominantEntry?.residualCenterPm ?? null,
-    global_common_mode_pm: spatialProxy.commonModePm,
-    residual_conditioning_ready: spatialProxy.conditioningReady,
-    residual_conditioning_sample_count: spatialProxy.conditioningSampleCount,
-    contact_evidence_passed: spatialProxy.contactEvidence,
-    primary_contact_evidence_pm: spatialProxy.primaryEvidencePm,
-    secondary_contact_evidence_pm: spatialProxy.secondaryEvidencePm,
-    residual_compensated: spatialProxy.conditioningReady || fallbackEventResponse.residualCompensated,
-    global_proxy_full_scale_pm: GLOBAL_PROXY_FULL_SCALE_PM,
-    global_visual_proxy_response_ratio: proxyResponseRatio,
-    quality_status: trainedModelReady
-      ? allSourceBetaActive
-        ? "all_source_optical_force_model"
-        : temporalModelActive
-        ? "dynamic_temporal_validation_model"
-        : "trained_static_model_single_session_baseline"
-      : !responseAllowed
-      ? responseBlockReason
-      : "global_spectrum_ready",
-    coupling_status: trainedModelReady
-      ? allSourceBetaActive
-        ? "all-data optical contact, position, and continuous Fz estimate"
-        : temporalModelActive
-        ? "dynamic temporal spectral fingerprint; validation mode"
-        : "trained full-spectrum fingerprint; broad manual fingertip domain"
-      : modelPrimaryBlocked
-        ? temporalModelActive
-          ? "temporal model loaded; waiting for baseline or temporal window"
-          : "trained model waiting; raw residual proxy suppressed"
-      : "global spectral fingerprint; provisional wavelength-order spatial proxy",
-    event_interpretation: trainedModelReady
-      ? allSourceBetaActive
-        ? "optical-only contact, position, and continuous Fz estimate"
-        : temporalModelActive
-        ? "temporal model position and approximate manual response level"
-        : "model-driven manual fingertip position and approximate response level"
-      : modelPrimaryBlocked
-        ? "no active contact shown until the trained model and recovery baseline are ready"
-      : "provisional global spectral spatial proxy; labelled point-press calibration pending",
-    num_changed_peaks: trainedModelReady ? null : respondingChannels.length,
-    recognition_source: trainedModelReady
-      ? activeModelSource
-      : modelPrimaryBlocked
-        ? temporalModelActive
-          ? "dynamic_temporal_v3_validation_waiting_for_input"
-          : "trained_static_spectral_model_blocked"
-        : "spectral_proxy",
-    model_position_confidence: trainedPrediction?.position?.confidence ?? null,
-    model_force_confidence: allSourceBetaActive
-      ? null
-      : trainedPrediction?.force_level?.confidence ?? null,
-    estimated_force_fz_n: allSourceBetaActive
-      ? Number(trainedPrediction?.estimated_force_fz_n ?? trainedPrediction?.force_fz?.estimated_n)
-      : null,
+    responding_channel_count: respondingChannelIds.length,
+    responding_channel_ids: respondingChannelIds,
+    coupling_status: String(metricSource.coupling_status || "optical_model_no_contact"),
+    quality_status: responseAllowed
+      ? "current_runtime_model"
+      : String(contract.response_block_reason || "current_runtime_model_not_ready"),
+    recognition_source: CURRENT_RUNTIME_MODEL_SOURCE,
+    estimated_force_fz_n: displayForceN,
   };
-  const rawQaStatus = String(rawRecord?.qa_status || "").toLowerCase();
-  const rawQaFlags = Array.isArray(rawRecord?.qa_flags) ? rawRecord.qa_flags : [];
-  const diagnosticOnlyRawQaFlagNames = new Set(["wavelength_estimator_disagreement"]);
+  const channels = ARRAY_DISPLAY_ROWS.flatMap((row, rowIndex) =>
+    row.map((channelId, columnIndex) => {
+      const coordinate = ARRAY_CHANNEL_COORDS[channelId] || { x: null, y: null };
+      const responseValue = surfaceGrid[rowIndex][columnIndex];
+      return {
+        channel_id: channelId,
+        provisional_channel_id: channelId,
+        x: coordinate.x,
+        y: coordinate.y,
+        enabled: true,
+        valid: true,
+        response_enabled: responseAllowed,
+        wavelength_shift_response_ratio: responseValue,
+        response_value: responseValue,
+        qa_status: responseAllowed ? "current_runtime_model_response" : "current_runtime_model_waiting",
+        spectral_mapping_status: "model_position_proxy_no_individual_peak_assignment",
+      };
+    })
+  );
+  const rawQaFlags = Array.isArray(rawRecord.qa_flags) ? rawRecord.qa_flags : [];
+  const diagnosticOnlyQaFlags = new Set(["wavelength_estimator_disagreement"]);
   const diagnosticOnlyRawQaFlags = rawQaFlags.filter((flag) =>
-    diagnosticOnlyRawQaFlagNames.has(String(flag).toLowerCase())
+    diagnosticOnlyQaFlags.has(String(flag))
   );
-  const operatorRawQaFlags = rawQaFlags.filter(
-    (flag) => !diagnosticOnlyRawQaFlagNames.has(String(flag).toLowerCase())
+  const operatorRawQaFlags = rawQaFlags.filter((flag) =>
+    !diagnosticOnlyQaFlags.has(String(flag))
   );
-  const rawQaIsNominal =
-    !rawQaStatus ||
-    ["ok", "ok_with_manual_wavelength"].includes(rawQaStatus) ||
-    (rawQaStatus === "warning" && operatorRawQaFlags.length === 0);
-  const modelReviewNeeded = trainedModelReady && trainedPrediction?.uncertainty?.review_needed === true;
-  const trainedDisplayQaStatus = !rawQaIsNominal
-    ? rawRecord.qa_status
-    : modelReviewNeeded
-      ? "model_low_confidence_warning"
-      : "model_baseline_ready";
+  const blockReason = responseAllowed ? null : String(
+    contract.response_block_reason || "current_runtime_model_not_ready"
+  );
+  const qaFlags = [...new Set([
+    ...operatorRawQaFlags,
+    ...(blockReason ? [blockReason] : []),
+  ])];
   const latest = {
     ...rawRecord,
-    carrier_channel_id: frame.carrier_channel_id || "P22",
-    carrier_channel_role: "legacy_full_spectrum_transport_only",
-    channel_id: null,
-    selected_channel: null,
+    operator_visualization_frame: contract,
+    visualization_contract_version: OPERATOR_VISUALIZATION_CONTRACT_VERSION,
     recognition_scope: GLOBAL_RECOGNITION_SCOPE,
-    dominant_candidate_id: dominant?.candidate_id || null,
-    dominant_channel: trainedModelReady ? trainedSurface.dominantChannel : null,
-    provisional_dominant_channel: spatialProxy.dominantEntry?.channelId || null,
-    delta_wavelength_pm: Number.isFinite(dominantShiftPm) ? dominantShiftPm : null,
-    raw_absolute_shift_pm: Number.isFinite(peakAbsoluteShiftPm) ? peakAbsoluteShiftPm : null,
-    absolute_shift_pm: Number.isFinite(eventAbsoluteShiftPm) ? eventAbsoluteShiftPm : null,
-    global_residual_center_pm: spatialProxy.dominantEntry?.residualCenterPm ?? null,
-    global_common_mode_pm: spatialProxy.commonModePm,
-    residual_conditioning_ready: spatialProxy.conditioningReady,
-    residual_conditioning_sample_count: spatialProxy.conditioningSampleCount,
-    contact_evidence_passed: spatialProxy.contactEvidence,
-    residual_compensated: spatialProxy.conditioningReady || fallbackEventResponse.residualCompensated,
-    wavelength_shift_response_ratio: Number.isFinite(proxyResponseRatio) ? proxyResponseRatio : null,
-    raw_wavelength_shift_response_ratio: Number.isFinite(responseRatio) ? responseRatio : null,
-    event_response_ratio_legacy_500pm: Number.isFinite(eventResponseRatio) ? eventResponseRatio : null,
-    response_value: Number.isFinite(proxyResponseRatio) ? proxyResponseRatio : null,
-    response_level: trainedModelReady
-      ? trainedResponseLevel
-      : validPeaks.length !== GLOBAL_CANDIDATE_IDS.length
-        ? "uncertain"
-        : !baselineReady
-          ? "baseline_required"
-          : !sourceUsable
-            ? "stale_frame"
-            : responseLevelFromSurfaceValue(proxyResponseRatio),
     response_allowed: responseAllowed,
-    response_block_reason: responseBlockReason,
-    baseline_status: trainedModelReady
-      ? allSourceBetaActive
-        ? "all_source_optical_force_baseline_ready"
-        : temporalModelActive
-        ? "temporal_model_window_ready"
-        : "static_model_full_spectrum_baseline_ready"
-      : modelPrimaryBlocked
-        ? allSourceBetaActive
-          ? "all_source_optical_force_baseline_required"
-          : temporalModelActive
-          ? "temporal_model_window_warming_or_baseline_required"
-          : "static_model_full_spectrum_baseline_required"
-      : baselineReady
-        ? "global_candidate_baseline_ready"
-        : "global_candidate_baseline_required",
-    qa_status: trainedModelReady
-      ? trainedDisplayQaStatus
-      : modelPrimaryBlocked
-        ? temporalModelActive
-          ? "temporal_model_input_waiting"
-          : "trained_model_not_ready"
-      : validPeaks.length !== GLOBAL_CANDIDATE_IDS.length
-        ? "warning"
-        : baselineReady
-            ? sourceUsable
-              ? "ok"
-              : "stale_frame"
-          : "global_candidate_baseline_required",
-    qa_flags: [
-      ...new Set([
-        ...operatorRawQaFlags,
-        ...blockers,
-        ...(modelPrimaryBlocked && responseBlockReason ? [responseBlockReason] : []),
-      ]),
-    ],
+    response_block_reason: blockReason,
+    response_level: responseState,
+    response_value: surfacePeak,
+    wavelength_shift_response_ratio: surfacePeak,
+    dominant_channel: positionId,
+    provisional_dominant_channel: null,
+    model_position_id: positionId,
+    active_spectral_prediction: prediction,
+    active_spectral_model_source: CURRENT_RUNTIME_MODEL_SOURCE,
+    active_spectral_model_status: String(contract.prediction_status || "unavailable"),
+    active_spectral_model_loaded: frame?.runtime_model?.loaded === true,
+    active_spectral_model_progress: frame?.runtime_model?.warming || null,
+    estimated_force_fz_n: displayForceN,
+    optical_force_estimate: responseAllowed ? contract.force || null : null,
+    baseline_status: responseAllowed
+      ? "current_runtime_baseline_ready"
+      : "current_runtime_baseline_required",
+    qa_status: responseAllowed
+      ? String(contract?.quality?.raw_qa_status || "model_baseline_ready")
+      : "current_runtime_model_not_ready",
+    qa_flags: qaFlags,
+    raw_qa_flags: rawQaFlags,
     diagnostic_only_qa_flags: diagnosticOnlyRawQaFlags,
-    carrier_qa_flags: rawQaFlags,
-    global_frame_qa: globalFrameQa,
-    source_fresh: globalFrameQa.source_fresh === true,
-    operator_display_valid: sourceUsable,
-    frame_age_sec: globalFrameQa.frame_age_sec ?? frame.frame_age_sec ?? null,
-    formal_recognition_allowed: globalFrameQa.formal_recognition_allowed === true,
-    blockers,
-    carrier_qa_status: rawRecord.qa_status,
-    trained_static_spectral_prediction: trainedPrediction,
-    trained_static_spectral_model_status: trainedModelFrame?.status || "unavailable",
-    active_spectral_prediction: trainedPrediction,
-    active_spectral_model_source: activeModelSource,
-    active_spectral_model_status: frame?.active_spectral_model_status || trainedModelFrame?.status || "unavailable",
-    active_spectral_model_loaded: frame?.active_spectral_model_loaded === true,
-    active_spectral_model_progress: frame?.active_spectral_model_progress || null,
-    model_position_id: trainedModelReady ? trainedPrediction?.position?.label || null : null,
-    model_position_confidence: trainedModelReady ? trainedPrediction?.position?.confidence ?? null : null,
-    model_force_level: trainedModelReady && !allSourceBetaActive
-      ? trainedPrediction?.force_level?.label || null
-      : null,
-    model_force_confidence: trainedModelReady && !allSourceBetaActive
-      ? trainedPrediction?.force_level?.confidence ?? null
-      : null,
-    model_force_scope: trainedModelReady && !allSourceBetaActive
-      ? trainedPrediction?.force_model_scope || null
-      : null,
-    estimated_force_fz_n: trainedModelReady && allSourceBetaActive
-      ? Number(trainedPrediction?.estimated_force_fz_n ?? trainedPrediction?.force_fz?.estimated_n)
-      : null,
-    optical_force_estimate: trainedModelReady && allSourceBetaActive
-      ? trainedPrediction?.force_fz || null
-      : null,
-    model_review_needed: modelReviewNeeded,
-    model_uncertainty_reasons: trainedModelReady
-      ? trainedPrediction?.uncertainty?.reasons || []
-      : [],
+    model_review_needed: contract?.quality?.review_needed === true,
   };
+  const sync = contract.sync || {};
+  const frameId = contract.frame_id ?? frame.frame_id ?? rawRecord.frame_id ?? null;
   const arrayFrame = {
-    mode: trainedModelReady
-      ? allSourceBetaActive
-        ? "all_source_optical_force_position"
-        : temporalModelActive
-        ? "dynamic_temporal_validation_position_level"
-        : "trained_static_spectral_position_level"
-      : modelPrimaryBlocked
-        ? temporalModelActive
-          ? "dynamic_temporal_validation_waiting"
-          : "trained_static_spectral_model_waiting"
-      : validPeaks.length === GLOBAL_CANDIDATE_IDS.length
-        ? "global_spectrum_provisional_spatial_proxy"
-        : "global_spectrum_invalid",
-    frame_id: frame.frame_id,
-    timestamp: frame.timestamp,
-    surface_frame_id: frame.frame_id,
-    spectrum_frame_id: frame.frame_id,
-    trace_frame_id: frame.frame_id,
-    frame_sync_status: rawRecord.frame_sync_status || "synced",
+    mode: responseAllowed
+      ? "all_source_optical_force_position"
+      : "all_source_optical_force_waiting",
+    frame_id: frameId,
+    timestamp: contract.timestamp ?? frame.timestamp ?? rawRecord.timestamp ?? null,
+    surface_frame_id: sync.surface_frame_id ?? frameId,
+    spectrum_frame_id: sync.spectrum_frame_id ?? frameId,
+    trace_frame_id: sync.trace_frame_id ?? frameId,
+    summary_frame_id: sync.summary_frame_id ?? frameId,
+    force_frame_id: sync.force_frame_id ?? frameId,
+    frame_sync_status: String(sync.status || "synced"),
+    operator_visualization_frame: contract,
     surface_metrics: surfaceMetrics,
-    peak_wavelength_shift_pm: Number.isFinite(eventAbsoluteShiftPm) ? eventAbsoluteShiftPm : null,
-    surface_grid: proxySurfaceGrid,
+    surface_grid: surfaceGrid,
     channels,
     coupling_status: surfaceMetrics.coupling_status,
     physical_channel_mapping_final: false,
-    trained_position_label_mapping_available: trainedModelReady,
-    surface_visualization_semantics: trainedModelReady
-      ? allSourceBetaActive
-        ? "continuous_optical_fz_proxy_not_measured_force_field"
-        : "predicted_broad_fingertip_proxy_not_measured_pressure"
-      : modelPrimaryBlocked
-        ? "no_contact_until_trained_model_baseline_ready"
-      : "provisional_wavelength_order_proxy_not_measured_pressure",
-    local_response_estimate_available: trainedModelReady,
-    provisional_spatial_proxy_available: spatialProxy.entries.length === GLOBAL_CANDIDATE_IDS.length,
+    trained_position_label_mapping_available: responseAllowed,
+    surface_visualization_semantics: "current_runtime_optical_force_proxy_not_measured_force_field",
+    local_response_estimate_available: responseAllowed,
+    provisional_spatial_proxy_available: false,
     response_allowed: responseAllowed,
-    response_block_reason: responseBlockReason,
-    trained_static_spectral_prediction: trainedPrediction,
-    active_spectral_prediction: trainedPrediction,
-    active_spectral_model_source: activeModelSource,
-    estimated_force_fz_n: allSourceBetaActive
-      ? Number(trainedPrediction?.estimated_force_fz_n ?? trainedPrediction?.force_fz?.estimated_n)
-      : null,
+    response_block_reason: blockReason,
+    active_spectral_prediction: prediction,
+    active_spectral_model_source: CURRENT_RUNTIME_MODEL_SOURCE,
+    estimated_force_fz_n: displayForceN,
+    optical_force_estimate: responseAllowed ? contract.force || null : null,
   };
   return {
     ...frame,
     selected_channel: null,
+    operator_visualization_frame: contract,
+    visualization_contract_version: OPERATOR_VISUALIZATION_CONTRACT_VERSION,
+    model_assisted_display_allowed: responseAllowed,
+    model_assisted_display_block_reason: blockReason,
+    active_spectral_prediction: prediction,
+    active_spectral_model_source: CURRENT_RUNTIME_MODEL_SOURCE,
+    active_spectral_model_status: String(contract.prediction_status || "unavailable"),
     latest,
-    trace: trainedModelTrace || normalizedEventTrace,
+    trace: appendCurrentRuntimeTrace(rawRecord, contract),
     channel_grid: channels,
     array_frame: arrayFrame,
-    surface_grid: arrayFrame.surface_grid,
+    surface_grid: surfaceGrid,
     surface_metrics: surfaceMetrics,
   };
+}
+
+function normalizeGlobalSpectrumFrame(frame) {
+  if (frame?.scope !== GLOBAL_RECOGNITION_SCOPE) return frame;
+  const canonicalContract = operatorVisualizationContract(frame, frame?.latest);
+  if (canonicalContract) {
+    return normalizeCanonicalVisualizationFrame(frame, canonicalContract);
+  }
+  return atomicNeutralFrame({
+    ...frame,
+    active_spectral_model_source: CURRENT_RUNTIME_MODEL_SOURCE,
+    active_spectral_model_status:
+      frame?.runtime_model?.loaded === true
+        ? "waiting_for_canonical_frame"
+        : "current_runtime_unavailable",
+    model_assisted_display_allowed: false,
+    model_assisted_display_block_reason: "canonical_visualization_frame_required",
+  });
 }
 
 function sourceFrameRenderKey(rawFrame) {
@@ -8577,7 +8643,7 @@ async function fetchFrame({ force = false } = {}) {
           ? performance.now() + demoArrayStepIntervalMs()
           : Number.POSITIVE_INFINITY;
         setDemoStatus(
-          state.arrayDemoPlaybackMode === "loop" ? "released · baseline running" : "complete · released",
+          state.arrayDemoPlaybackMode === "loop" ? "released - baseline running" : "complete - released",
           "ready"
         );
         updateDemoControls();
@@ -8591,11 +8657,8 @@ async function fetchFrame({ force = false } = {}) {
       if (!sourceActive) return;
     }
     const traceLimit = state.demoModeActive ? DEMO_TRACE_WINDOW_POINTS : TRACE_WINDOW_POINTS;
-    const temporalValidation = !state.betaRecognitionRuntime && state.temporalValidationMode
-      ? "true"
-      : "false";
     const rawFrame = await requestJSON(
-      `/api/global_spectrum_frame?trace_limit=${traceLimit}&include_spectrum=true&include_dynamic_shadow=${temporalValidation}&temporal_validation_mode=${temporalValidation}`,
+      `/api/global_spectrum_frame?trace_limit=${traceLimit}&include_spectrum=true`,
       { cache: "no-store" },
       { timeoutMs: 7000, signal: requestController.signal }
     );
@@ -8753,30 +8816,15 @@ async function loadRuntimeCapabilities() {
       { cache: "no-store" },
       { timeoutMs: 4000 }
     );
-    state.betaForceDisplayEnabled = Boolean(
-      payload?.all_source_beta_primary === true &&
-      payload?.all_source_beta_model?.enabled === true
-    );
     const runtime = payload?.recognition_runtime || {};
-    state.betaRecognitionRuntime = Boolean(
-      payload?.all_source_beta_primary === true || runtime?.switchable === false
-    );
     state.activeRecognitionModelLabel = String(
-      runtime?.display_name ||
-      (state.betaRecognitionRuntime ? "All-data spectral model" : "Temporal validation")
+      runtime?.display_name || "Current optical model"
     );
-    legacyRecognitionRuntimeControls?.toggleAttribute("hidden", state.betaRecognitionRuntime);
-    if (state.betaRecognitionRuntime) {
-      state.temporalValidationMode = false;
-    }
     setText("recognitionModeStatus", state.activeRecognitionModelLabel);
     return payload;
   } catch (error) {
     console.warn("[runtime capabilities]", error);
-    state.betaForceDisplayEnabled = false;
-    state.betaRecognitionRuntime = false;
     state.activeRecognitionModelLabel = "Runtime unavailable";
-    legacyRecognitionRuntimeControls?.removeAttribute("hidden");
     setText("recognitionModeStatus", state.activeRecognitionModelLabel);
     return null;
   }
@@ -8985,7 +9033,7 @@ baselineButton.addEventListener("click", () => {
     busyLabel: "Setting...",
     busyMessage: "Checking stable post-release spectra and building the recovery-state baseline...",
     successMessage: (result) => {
-      const modelBaseline = result?.static_model_spectrum_baseline;
+      const modelBaseline = result?.current_runtime_spectrum_baseline;
       if (modelBaseline?.ok) {
         const sampleCount = Number(modelBaseline?.sample_count);
         return Number.isFinite(sampleCount)
@@ -8999,7 +9047,7 @@ baselineButton.addEventListener("click", () => {
     },
     action: async () => {
       leaveDemoMode();
-      resetTrainedModelTraceHistory();
+      resetRuntimeTraceHistory();
       state.dataStreamActive = true;
       const result = await requestJSON(
         "/api/global_candidate_baseline?minimum_frames=30&no_contact_attested=true&attested_by=operator_ui",
@@ -9021,7 +9069,7 @@ ingestExportButton.addEventListener("click", () => {
     successMessage: "Latest export loaded.",
     action: async () => {
       leaveDemoMode();
-      resetTrainedModelTraceHistory();
+      resetRuntimeTraceHistory();
       state.dataStreamActive = true;
       const result = await requestJSON(
         `/api/ingest_latest_export?channel_id=${encodeURIComponent(state.selectedChannel)}`,
@@ -9051,7 +9099,7 @@ exportWatchButton.addEventListener("click", () => {
       if (stopping) {
         await requestJSON("/api/export_watch/stop", { method: "POST" });
       } else {
-        resetTrainedModelTraceHistory();
+        resetRuntimeTraceHistory();
         if (state.sdkLiveActive) {
           await requestJSON("/api/sdk/stop", { method: "POST" });
         }
@@ -9086,7 +9134,7 @@ liveTwinButton.addEventListener("click", () => {
         if (stopping) {
           await requestJSON("/api/live/stop?control_sense=false", { method: "POST" }, { timeoutMs: 12000 });
         } else {
-          resetTrainedModelTraceHistory();
+          resetRuntimeTraceHistory();
           const source = inputSourceSelect.value === "export_watch" ? "export_watch" : "direct_sdk";
           const controlSense = source === "export_watch" ? "true" : "false";
           const sourceIntervalSec = source === "direct_sdk" ? 0.02 : 0.1;
@@ -9109,7 +9157,7 @@ liveTwinButton.addEventListener("click", () => {
 inputSourceSelect.addEventListener("change", async () => {
   try {
     leaveDemoMode();
-    resetTrainedModelTraceHistory();
+    resetRuntimeTraceHistory();
     state.dataStreamActive = true;
     if (inputSourceSelect.value !== "export_watch" && state.exportWatchActive) {
       await requestJSON(
@@ -9154,7 +9202,7 @@ resetButton.addEventListener("click", () => {
     successMessage: "Trace buffer cleared; baseline retained.",
     action: async () => {
       leaveDemoMode();
-      resetTrainedModelTraceHistory();
+      resetRuntimeTraceHistory();
       setPaused(false);
       const acquisitionContinues = Boolean(
         state.exportWatchActive || state.sdkLiveActive || state.liveRequested
@@ -9502,16 +9550,6 @@ spectrumClearBackgroundButton?.addEventListener("click", async () => {
   }
 });
 
-settingsTemporalValidationButton?.addEventListener("click", () => {
-  updateRecognitionValidationMode(true);
-  setSettingsPanelOpen(false);
-});
-
-settingsStaticFallbackButton?.addEventListener("click", () => {
-  updateRecognitionValidationMode(false);
-  setSettingsPanelOpen(false);
-});
-
 document.addEventListener("pointerdown", (event) => {
   const target = event.target;
   if (settingsPanel?.classList.contains("open") && !settingsPanel.contains(target) && !settingsButton?.contains(target)) {
@@ -9764,6 +9802,27 @@ px6dCaptureOutputRoot?.addEventListener("input", () => {
   updateCaptureReadiness();
 });
 
+measurementRootInput?.addEventListener("input", () => {
+  measurementRootInput.dataset.userEdited = "true";
+});
+
+measurementSessionSelect?.addEventListener("change", () => {
+  if (measurementAnalyzeButton) {
+    measurementAnalyzeButton.disabled =
+      state.measurementRequestInFlight || !measurementSessionSelect.value;
+  }
+});
+
+measurementEstimateSource?.addEventListener("change", () => {
+  state.measurementResult = null;
+  clearMeasurementMetrics();
+  drawMeasurementComparison([]);
+  setMeasurementStatus("Ready", "Analyze to load the selected evidence curve.");
+});
+
+measurementRefreshButton?.addEventListener("click", refreshMeasurementSessions);
+measurementAnalyzeButton?.addEventListener("click", analyzeSelectedMeasurementSession);
+
 px6dCapturePositionButtons.forEach((button) => {
   button.addEventListener("click", () => {
     if (button.disabled || !px6dCapturePosition) return;
@@ -9895,6 +9954,9 @@ window.addEventListener("resize", () => {
         setDiagnosticsPanelWidth(Number(diagnosticsPanelResizer?.getAttribute("aria-valuenow")), { persist: false });
       }
       resizeThree();
+      if (state.displayMode === "diagnostics" && state.diagnosticTab === "measurement") {
+        drawMeasurementComparison(state.measurementResult?.trace || []);
+      }
       state.chartsNeedRefresh = true;
       state.threeNeedsRefresh = true;
       windowResizeActive = false;
@@ -9974,10 +10036,6 @@ async function boot() {
     loadRuntimeCapabilities(),
   ]);
   setDemoPlaybackRate(state.demoPlaybackRate, { persist: false });
-  updateRecognitionValidationMode(state.temporalValidationMode, {
-    announce: false,
-    refresh: false,
-  });
   updateDisplayMode("operator");
   updateGeometryDisplayMode(state.geometryDisplayMode);
   updateSurfaceRenderMode("physical_proxy");
@@ -10010,5 +10068,3 @@ boot().catch((error) => {
     "error"
   );
 });
-
-

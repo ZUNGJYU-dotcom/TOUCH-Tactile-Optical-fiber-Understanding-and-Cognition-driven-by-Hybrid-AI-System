@@ -1484,7 +1484,8 @@ def main() -> int:
         "",
         "## Scope",
         "",
-        "- This run uses only the 2026-07-31 `new data` collection batch.",
+        "- This run uses only the force-referenced sessions selected by the "
+        "current strict-batch dataset manifest.",
         "- Historical static, temporal, blind-test, and legacy model data are "
         "not included.",
         f"- {manifest['session_count']} independent sessions and "
@@ -1494,9 +1495,9 @@ def main() -> int:
         "- Every formal fold holds out complete `session_id` values.",
         "- Candidate families evaluated: "
         f"{', '.join(candidate_model_types)}.",
-        "- P11, P12, and P21 use the latest five sessions for formal "
-        "training; earlier sessions are isolated for manual review because "
-        "their labels or physical press locations may be incorrect.",
+        "- This run uses every QA-eligible, force-referenced session selected "
+        "by the dataset manifest. Captures without Fz are excluded from this "
+        "strict track and are handled only by the fusion track.",
         f"- {manifest['release_tail_excluded_frames']} warning-tail frames were "
         "excluded from formal training.",
         "",

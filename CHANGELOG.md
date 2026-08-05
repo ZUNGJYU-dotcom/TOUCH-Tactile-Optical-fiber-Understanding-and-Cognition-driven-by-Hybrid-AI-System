@@ -2,6 +2,66 @@
 
 ## Unreleased
 
+### v0.19.7 Stable and Beta status-text hotfix
+
+- Removed the corrupted status separator that rendered as Chinese `路` in source labels such as `SDK idle`.
+- Standardized source states as `SDK | idle`, `SDK | live`, and equivalent Watch/HTTP labels.
+- Cleaned related mojibake in diagnostics units and separators without changing models, acquisition, or recognition behavior.
+
+### v0.19.6 Stable promotion
+
+- Promote the verified v0.19.6 Beta runtime to Stable without changing model
+  weights, optical-force behavior, device interfaces, or Operator UI logic.
+- Package only `ordinary_fbg_current_runtime.joblib` and the runtime-required
+  configuration files; legacy candidates and fallback models remain excluded.
+- Retain the current-session five-frame baseline, two-frame visual contact and
+  position confirmation, and post-release baseline recovery that removed the
+  observed idle activation and non-P23-to-P23 replay errors.
+- Keep the verified Beta package available locally as a rollback build.
+
+### v0.19.6 Beta current-session baseline repair
+
+- Clear cross-session optical references whenever a new live or watched
+  acquisition starts, then establish the runtime baseline from five stable
+  spectra in the current session before allowing model output to drive the
+  digital twin.
+- Require two consecutive physical spectra for low-force visual activation
+  and a new visual position, preventing an isolated spatial spike from taking
+  over the surface display.
+- Add nine-position replay regression evidence for idle false activation and
+  non-P23-to-P23 confusion without changing the deployed model weights.
+
+### v0.19.4 Beta unified Operator visualization frame
+
+- Drive Surface Summary, the 3D and 2D tactile surfaces, Response Trace, and
+  optical force from one versioned Beta inference frame.
+- Keep every Operator visualization neutral while the current Beta prediction
+  is warming or blocked instead of falling back to legacy model fields or raw
+  wavelength proxies.
+- Publish synchronized spectrum, surface, trace, summary, and force frame IDs
+  for diagnostics without changing the deployed three-date model.
+
+### Unbounded optical-force presentation
+
+- Remove the fixed 5 N runtime and UI ceiling from optical `Fz` output,
+  Response Trace, and the Operator force legend.
+- Auto-range the force axis upward while retaining 0-5 N as the current
+  validated calibration domain; estimates above it are marked unvalidated.
+- Keep digital-twin deformation bounded independently for visual stability.
+
+### Diagnostics measurement analysis
+
+- Add a Diagnostics-only `Measure` workspace for saved synchronized optical and
+  PX6D recordings; the Operator interface is unchanged.
+- Export the current optical-only `Fz` estimate and model inference latency with
+  every synchronized recording frame while retaining PX6D `Fz` as reference
+  supervision rather than a runtime model input.
+- Add offline force-consistency, lag, cycle, repeatability, recovery, acquisition
+  cadence, and inference-latency analysis with explicit optical-only handling
+  when force reference data were not recorded.
+- Keep analysis user-triggered and reject analysis of the session that is still
+  being recorded, so the feature does not poll or contend with live hardware.
+
 ### v0.18.9 Stable promotion
 
 - Promote the validated v0.18.9 Beta all-data optical model and low-latency

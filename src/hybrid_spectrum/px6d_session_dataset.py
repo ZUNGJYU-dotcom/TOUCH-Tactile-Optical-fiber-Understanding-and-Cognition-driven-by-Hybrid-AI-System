@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from .baseline_relative_features import extract_baseline_relative_features
+
 
 EPSILON = 1.0e-9
 POSITION_ORDER = (
@@ -104,6 +106,48 @@ def discover_sessions(
             )
         )
     return tuple(descriptors)
+
+
+def filter_session_descriptors(
+    descriptors: Iterable[SessionDescriptor],
+    data_config: Mapping[str, Any],
+) -> tuple[SessionDescriptor, ...]:
+    """Restrict a shared capture root to explicitly named collection batches."""
+    source = tuple(descriptors)
+    configured = data_config.get("include_session_id_prefixes")
+    if configured is None:
+        return source
+    if isinstance(configured, str):
+        prefixes = (configured.strip(),)
+    else:
+        prefixes = tuple(str(value).strip() for value in configured)
+    prefixes = tuple(value for value in prefixes if value)
+    if not prefixes:
+        raise ValueError("include_session_id_prefixes must not be empty")
+    selected = tuple(
+        descriptor
+        for descriptor in source
+        if descriptor.session_id.startswith(prefixes)
+    )
+    if not selected:
+        raise ValueError(
+            "no sessions matched include_session_id_prefixes: "
+            + ", ".join(prefixes)
+        )
+    return selected
+
+
+def session_has_force_reference(descriptor: SessionDescriptor) -> bool:
+    """Return whether a capture contains at least one finite PX6D Fz value."""
+
+    summary_path = descriptor.session_dir / "frame_summary.csv"
+    if not summary_path.is_file():
+        return False
+    force = pd.to_numeric(
+        pd.read_csv(summary_path, usecols=("force_fz_n",))["force_fz_n"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    return bool(np.any(np.isfinite(force)))
 
 
 def split_primary_and_challenge_sessions(
@@ -278,112 +322,6 @@ def assign_session_folds(
     return assignments
 
 
-def _downsample_mean(values: np.ndarray, bin_count: int) -> np.ndarray:
-    if values.ndim != 2:
-        raise ValueError("values must be a two-dimensional frame matrix")
-    if bin_count <= 0 or bin_count > values.shape[1]:
-        raise ValueError("bin_count must be within the spectrum point count")
-    edges = np.linspace(0, values.shape[1], bin_count + 1, dtype=int)
-    return np.column_stack(
-        [
-            np.mean(values[:, edges[index] : edges[index + 1]], axis=1)
-            for index in range(bin_count)
-        ]
-    )
-
-
-def extract_baseline_relative_features(
-    intensity: np.ndarray,
-    baseline: np.ndarray,
-    wavelength_nm: np.ndarray,
-    *,
-    bin_count: int,
-) -> tuple[np.ndarray, tuple[str, ...], dict[str, tuple[int, ...]]]:
-    intensity = np.asarray(intensity, dtype=float)
-    baseline = np.asarray(baseline, dtype=float)
-    wavelength_nm = np.asarray(wavelength_nm, dtype=float)
-    if intensity.ndim != 2:
-        raise ValueError("intensity must have shape [frames, spectrum_points]")
-    if baseline.shape != (intensity.shape[1],):
-        raise ValueError("baseline must match the spectrum point count")
-    if wavelength_nm.shape != baseline.shape:
-        raise ValueError("wavelength_nm must match the spectrum point count")
-
-    safe_intensity = np.maximum(intensity, 0.0)
-    safe_baseline = np.maximum(baseline, 0.0)
-    log_ratio = np.log1p(safe_intensity) - np.log1p(safe_baseline)
-    current_shape = safe_intensity / np.maximum(
-        np.mean(safe_intensity, axis=1, keepdims=True), EPSILON
-    )
-    baseline_shape = safe_baseline / max(float(np.mean(safe_baseline)), EPSILON)
-    shape_delta = current_shape - baseline_shape
-    current_log_shape = np.log1p(safe_intensity)
-    current_log_shape -= np.mean(current_log_shape, axis=1, keepdims=True)
-    derivative = np.gradient(current_log_shape, wavelength_nm, axis=1)
-
-    blocks = [
-        _downsample_mean(log_ratio, bin_count),
-        _downsample_mean(shape_delta, bin_count),
-        _downsample_mean(current_log_shape, bin_count),
-        _downsample_mean(derivative, bin_count),
-    ]
-    names: list[str] = []
-    for prefix in (
-        "spectrum_log_ratio_bin",
-        "spectrum_shape_delta_bin",
-        "spectrum_current_log_shape_bin",
-        "spectrum_current_derivative_bin",
-    ):
-        names.extend(f"{prefix}_{index:03d}" for index in range(1, bin_count + 1))
-
-    centered_current = safe_intensity - np.mean(
-        safe_intensity, axis=1, keepdims=True
-    )
-    centered_baseline = safe_baseline - float(np.mean(safe_baseline))
-    correlation_denominator = np.sqrt(
-        np.sum(centered_current**2, axis=1)
-        * float(np.sum(centered_baseline**2))
-    )
-    shape_correlation = np.sum(
-        centered_current * centered_baseline, axis=1
-    ) / np.maximum(correlation_denominator, EPSILON)
-    global_summary = np.column_stack(
-        [
-            np.mean(log_ratio, axis=1),
-            np.std(log_ratio, axis=1),
-            np.sqrt(np.mean(log_ratio**2, axis=1)),
-            np.max(np.abs(log_ratio), axis=1),
-            np.sqrt(np.mean(shape_delta**2, axis=1)),
-            np.max(np.abs(shape_delta), axis=1),
-            shape_correlation,
-            np.log(
-                np.maximum(np.mean(safe_intensity, axis=1), EPSILON)
-                / max(float(np.mean(safe_baseline)), EPSILON)
-            ),
-        ]
-    )
-    blocks.append(global_summary)
-    names.extend(
-        (
-            "global_log_ratio_mean",
-            "global_log_ratio_std",
-            "global_log_ratio_rms",
-            "global_log_ratio_max_abs",
-            "global_shape_delta_rms",
-            "global_shape_delta_max_abs",
-            "global_shape_correlation",
-            "global_intensity_log_ratio",
-        )
-    )
-    matrix = np.concatenate(blocks, axis=1)
-    first_three_count = 3 * bin_count
-    feature_sets = {
-        "baseline_relative_192": tuple(range(first_three_count)),
-        "baseline_relative_264": tuple(range(matrix.shape[1])),
-    }
-    return matrix, tuple(names), feature_sets
-
-
 def _load_session_frame_matrix(
     descriptor: SessionDescriptor,
     expected_points: int,
@@ -426,6 +364,52 @@ def _load_session_frame_matrix(
     return summary, wavelength_nm, intensity
 
 
+def _load_session_recorded_baseline(
+    descriptor: SessionDescriptor,
+    expected_points: int,
+) -> np.ndarray | None:
+    """Load the fixed baseline stored with the first complete spectrum frame.
+
+    Some recordings contain a later baseline reset.  A force estimator must not
+    follow that changing column because doing so can normalize away the applied
+    load.  The first frame is the operator-established pre-recording reference;
+    later values are intentionally ignored.
+    """
+
+    path = descriptor.session_dir / "spectrum_timeseries.csv"
+    try:
+        spectrum = pd.read_csv(
+            path,
+            usecols=(
+                "capture_index",
+                "point_index",
+                "baseline_intensity_counts",
+            ),
+        ).sort_values(["capture_index", "point_index"])
+    except (FileNotFoundError, ValueError):
+        return None
+    if spectrum.empty:
+        return None
+
+    first_capture = int(spectrum["capture_index"].iloc[0])
+    first = spectrum.loc[spectrum["capture_index"] == first_capture]
+    if len(first) != expected_points:
+        return None
+    if first["point_index"].nunique() != expected_points:
+        return None
+
+    baseline = pd.to_numeric(
+        first["baseline_intensity_counts"], errors="coerce"
+    ).to_numpy(dtype=float)
+    if baseline.shape != (expected_points,):
+        return None
+    if not np.all(np.isfinite(baseline)):
+        return None
+    if float(np.max(np.abs(baseline))) <= EPSILON:
+        return None
+    return baseline
+
+
 def build_dataset(
     capture_root: Path,
     config: Mapping[str, Any],
@@ -434,9 +418,10 @@ def build_dataset(
     selection_role: str = "primary",
 ) -> OrdinaryFbgPx6dDataset:
     all_descriptors = discover_sessions(capture_root, qa_summary_path)
+    data_config = dict(config.get("data") or {})
+    all_descriptors = filter_session_descriptors(all_descriptors, data_config)
     if not all_descriptors:
         raise ValueError(f"no sessions found below {capture_root}")
-    data_config = dict(config.get("data") or {})
     baseline_config = dict(config.get("baseline") or {})
     label_config = dict(config.get("labels") or {})
     quality_config = dict(config.get("quality") or {})
@@ -471,6 +456,18 @@ def build_dataset(
     if not descriptors:
         raise ValueError(
             f"no sessions were selected for role {selection_role!r}"
+        )
+    # This builder is the strict PX6D-supervised dataset. Captures made
+    # without the force sensor remain available to the fusion builder, but
+    # must never be interpreted here as zero-newton supervision.
+    descriptors = tuple(
+        descriptor
+        for descriptor in descriptors
+        if session_has_force_reference(descriptor)
+    )
+    if not descriptors:
+        raise ValueError(
+            f"no force-referenced sessions were selected for role {selection_role!r}"
         )
     expected_points = int(data_config.get("expected_spectrum_points", 512))
     bin_count = int(feature_config.get("downsample_bins", 64))
@@ -874,6 +871,8 @@ __all__ = [
     "build_dataset",
     "discover_sessions",
     "extract_baseline_relative_features",
+    "filter_session_descriptors",
+    "session_has_force_reference",
     "load_config",
     "save_dataset",
     "split_primary_and_challenge_sessions",

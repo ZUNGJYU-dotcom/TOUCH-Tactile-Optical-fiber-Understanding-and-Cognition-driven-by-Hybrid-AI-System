@@ -26,34 +26,33 @@ class SettingsInformationHierarchyContractTests(unittest.TestCase):
         )[0]
         self.assertIn("Recognition runtime", acquisition)
         self.assertIn('id="recognitionModeStatus"', acquisition)
-        self.assertIn('id="settingsTemporalValidationButton"', acquisition)
-        self.assertIn('id="settingsStaticFallbackButton"', acquisition)
-        self.assertIn('id="legacyRecognitionRuntimeControls"', acquisition)
+        self.assertNotIn('id="settingsTemporalValidationButton"', acquisition)
+        self.assertNotIn('id="settingsStaticFallbackButton"', acquisition)
+        self.assertNotIn('id="legacyRecognitionRuntimeControls"', acquisition)
         self.assertLess(
             acquisition.index("Recognition runtime"),
             acquisition.index("Source adapter"),
         )
 
-    def test_beta_runtime_hides_legacy_model_switches_and_disables_shadow_request(self) -> None:
-        self.assertIn('legacyRecognitionRuntimeControls?.toggleAttribute("hidden", state.betaRecognitionRuntime)', JS)
-        self.assertIn('state.betaRecognitionRuntime = false', JS)
-        self.assertIn('"All-data spectral model"', JS)
-        self.assertIn('!state.betaRecognitionRuntime && state.temporalValidationMode', JS)
+    def test_diagnostics_exposes_one_current_runtime_without_model_switches(self) -> None:
+        self.assertIn('"Current optical model"', JS)
+        self.assertIn('runtime?.display_name || "Current optical model"', JS)
+        self.assertNotIn("legacyRecognitionRuntimeControls", JS)
+        self.assertNotIn("settingsTemporalValidationButton", JS)
+        self.assertNotIn("settingsStaticFallbackButton", JS)
+        self.assertNotIn("temporalValidationMode", JS)
 
     def test_removed_workspace_controls_leave_no_dead_js_bindings(self) -> None:
         self.assertNotIn("settingsOperatorModeButton", JS)
         self.assertNotIn("settingsDiagnosticsModeButton", JS)
         self.assertNotIn("settingsSpectrumButton", JS)
+        self.assertNotIn("legacyRecognitionRuntimeControls", JS)
 
     def test_compact_settings_and_diagnostic_runtime_styles_exist(self) -> None:
         self.assertIn("width: min(320px, calc(100vw - 24px));", CSS)
         self.assertIn(".diagnostics-mode .diagnostic-runtime-content", CSS)
-        self.assertIn(".diagnostics-mode .diagnostic-runtime-buttons button.active", CSS)
-        self.assertIn(
-            ".diagnostics-mode .diagnostic-runtime-buttons[hidden]",
-            CSS,
-        )
-        self.assertIn("display: none !important;", CSS)
+        self.assertIn(".diagnostics-mode .diagnostic-runtime-status", CSS)
+        self.assertNotIn(".diagnostics-mode .diagnostic-runtime-buttons", CSS)
 
     def test_settings_focus_moves_inside_and_returns_to_its_opener(self) -> None:
         self.assertIn("let settingsPanelOpener = null", JS)

@@ -1,0 +1,139 @@
+schema_version: ordinary_fbg_all_data_fusion_v2
+
+paths:
+  latest_capture_root: "../../data/new data"
+  latest_qa_summary: "outputs/ordinary_fbg_px6d_collection_20260803_final/collection_qa_summary.json"
+  latest_training_config: "config/ordinary_fbg_px6d_training_20260803.yaml"
+  static_training_config: "config/sense_static_training.yaml"
+  dynamic_training_config: "config/sense_dynamic_sequence.yaml"
+  channel_config: "config/hybrid_spectrum_channels.yaml"
+  blind_audit_root: "../../data/盲测"
+  protected_deployed_model: "models/static_spectral_recognition_bundle.joblib"
+
+source_policy:
+  latest_primary:
+    role: formal_grouped_evaluation_and_training
+    contact_label: true
+    position_label: true
+    force_fz_label: true
+    source_weight: 1.0
+  latest_aux_no_force:
+    role: auxiliary_training_only_optical_change_pseudo_labels
+    contact_label: true
+    position_label: true
+    force_fz_label: false
+    formal_test_eligible: false
+    source_weight: 0.45
+  latest_challenge:
+    role: auxiliary_training_only_suspected_position_label_error
+    contact_label: true
+    position_label: false
+    force_fz_label: true
+    source_weight: 0.35
+  legacy_dynamic:
+    role: auxiliary_temporal_contact_and_position_training
+    contact_label: true
+    position_label: true
+    force_fz_label: false
+    source_weight: 0.70
+  legacy_static_manual:
+    role: auxiliary_static_contact_and_position_training
+    contact_label: true
+    position_label: true
+    force_fz_label: false
+    source_weight: 0.50
+  legacy_static_gauge:
+    role: auxiliary_low_force_calibration_anchor
+    contact_label: true
+    position_label: true
+    force_fz_label: true
+    source_weight: 0.50
+  legacy_static_no_contact:
+    role: auxiliary_no_contact_training
+    contact_label: true
+    position_label: false
+    force_fz_label: false
+    source_weight: 0.50
+  blind_audit:
+    role: untouched_unseen_audit
+    include_in_training: false
+
+latest_baseline:
+  strategy: initial_fixed_frames
+  fixed_initial_frames: 5
+
+unreferenced_optical_labels:
+  semantics: training_only_conservative_optical_change_pseudo_labels
+  missing_force_is_zero: false
+  formal_test_eligible: false
+  smoothing_frames: 3
+  minimum_component_scale: 1.0e-8
+  inactive_max_robust_z: 1.5
+  active_min_robust_z: 3.0
+  active_session_percentile: 65.0
+  minimum_active_run_frames: 2
+  minimum_active_frames: 3
+  minimum_session_contrast_z: 1.5
+  transition_policy: exclude_from_training
+
+force_calibration:
+  target_field: force_fz_n
+  unit: N
+  minimum_n: 0.0
+  maximum_n: 5.0
+  out_of_range_policy: exclude_from_formal_force_training
+  runtime_input_allowed: false
+  semantics: supervision_only_for_optical_force_estimation
+  final_inference_requires_force_sensor: false
+  forbidden_input_patterns: [force, fz, fx, fy, mx, my, mz]
+  optical_contact_gate:
+    enabled: true
+    probability_threshold: 0.75
+    no_contact_output_n: 0.0
+    semantics: temporal_optical_contact_gate_before_current_frame_fz_regression
+
+labels:
+  no_contact_max_force_n: 0.03
+  contact_min_force_n: 0.10
+  position_min_force_n: 0.25
+  position_order: [P11, P21, P31, P12, P22, P32, P13, P23, P33]
+  legacy_manual_force_levels_are_newton_targets: false
+
+temporal_features:
+  frame_feature_schema: nine_peak_shift_intensity_shape_40
+  trailing_window_seconds: 2.0
+  summary_blocks:
+    - mean
+    - std
+    - min
+    - max
+    - p10
+    - p90
+    - first
+    - last
+    - delta
+    - slope
+    - mean_abs_difference
+    - rms_difference
+  context_features:
+    - temporal_frame_count_log1p
+    - temporal_duration_sec
+    - temporal_context_available
+  static_snapshot_policy: repeated_frame_with_context_flag_zero
+
+evaluation:
+  formal_test_source: latest_primary
+  folds: 5
+  split_strategy: grouped_by_session_id
+  random_frame_split_allowed: false
+  auxiliary_sources_are_training_only: true
+  random_seed: 42
+
+models:
+  classifier_types: [random_forest, extra_trees, lightgbm]
+  regressor_types: [random_forest, extra_trees, lightgbm]
+  tree_estimators: 180
+  final_tree_estimators: 300
+  minimum_leaf_samples: 2
+  candidate_only: true
+  deploy_after_training: false

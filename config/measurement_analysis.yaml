@@ -1,0 +1,19 @@
+measurement_analysis:
+  # PX6D compression Fz thresholds used only for offline action segmentation.
+  contact_on_n: 0.15
+  contact_off_n: 0.08
+  minimum_active_duration_sec: 0.40
+  baseline_window_sec: 0.75
+  recovery_window_sec: 0.75
+  plateau_fraction_of_peak: 0.80
+  maximum_lag_sec: 2.0
+  minimum_paired_samples: 8
+  minimum_repeatability_cycles: 3
+  normalized_cycle_points: 101
+  # Reconstruct current-model replay from this recording's own initial stable
+  # spectra. Stored baseline_intensity_counts can predate the session and is
+  # retained only as historical diagnostic evidence.
+  replay_baseline_strategy: session_initial_stable_median
+  replay_baseline_frame_count: 10
+  replay_baseline_minimum_stable_frames: 5
+  replay_baseline_stability_mad_multiplier: 3.5

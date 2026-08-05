@@ -89,6 +89,15 @@ SUMMARY_FIELDS = [
     "model_source",
     "model_status",
     "model_ready",
+    "model_inference_latency_ms",
+    "optical_estimated_fz_n",
+    "optical_raw_estimated_fz_n",
+    "optical_force_estimate_gated",
+    "optical_force_estimate_available",
+    "optical_force_estimate_source",
+    "optical_force_estimate_unit",
+    "optical_force_review_needed",
+    "optical_force_review_reasons",
     "predicted_contact_label",
     "predicted_position_label",
     "predicted_response_level",
@@ -122,6 +131,15 @@ RESPONSE_FIELDS = [
     "model_source",
     "model_status",
     "model_ready",
+    "model_inference_latency_ms",
+    "optical_estimated_fz_n",
+    "optical_raw_estimated_fz_n",
+    "optical_force_estimate_gated",
+    "optical_force_estimate_available",
+    "optical_force_estimate_source",
+    "optical_force_estimate_unit",
+    "optical_force_review_needed",
+    "optical_force_review_reasons",
     "contact_label",
     "contact_confidence",
     "contact_probability",
@@ -220,6 +238,47 @@ def _continuous_force_fz_n(force: dict[str, Any]) -> float | None:
         if math.isfinite(value):
             return max(0.0, value)
     return None
+
+
+def _optical_force_export_fields(model: dict[str, Any]) -> dict[str, Any]:
+    """Flatten the optical-only Fz estimate without changing model semantics."""
+    force = model.get("force_fz") or {}
+    uncertainty = model.get("uncertainty") or {}
+    estimated = model.get("estimated_force_fz_n", force.get("estimated_n"))
+    raw_estimated = force.get("raw_estimated_n")
+
+    def finite_or_none(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    estimated_value = finite_or_none(estimated)
+    raw_estimated_value = finite_or_none(raw_estimated)
+    reasons = uncertainty.get("reasons") or []
+    if isinstance(reasons, str):
+        reason_text = reasons
+    else:
+        reason_text = "|".join(str(reason) for reason in reasons if reason)
+    return {
+        "model_inference_latency_ms": finite_or_none(
+            model.get("inference_latency_ms")
+        ),
+        "optical_estimated_fz_n": estimated_value,
+        "optical_raw_estimated_fz_n": raw_estimated_value,
+        "optical_force_estimate_gated": force.get("gated"),
+        "optical_force_estimate_available": estimated_value is not None,
+        "optical_force_estimate_source": (
+            force.get("runtime_input")
+            or model.get("runtime_input")
+            or model.get("recognition_source")
+            or model.get("model_source")
+        ),
+        "optical_force_estimate_unit": force.get("unit") or "N",
+        "optical_force_review_needed": uncertainty.get("review_needed"),
+        "optical_force_review_reasons": reason_text,
+    }
 
 
 def _json_default(value: Any) -> Any:
@@ -1336,6 +1395,7 @@ class OpticalForceCaptureManager:
         contact_probabilities = contact.get("probabilities") or {}
         response_probabilities = response.get("probabilities") or {}
         release_guard = model.get("release_guard") or {}
+        optical_force = _optical_force_export_fields(model)
         return {
             "capture_index": record["capture_index"],
             "timeline_timestamp_epoch_sec": record["timeline_timestamp_epoch_sec"],
@@ -1344,6 +1404,7 @@ class OpticalForceCaptureManager:
             "model_source": model.get("model_source"),
             "model_status": model.get("model_status") or model.get("status"),
             "model_ready": model.get("model_ready", model.get("ready")),
+            **optical_force,
             "contact_label": contact.get("label"),
             "contact_confidence": contact.get("confidence"),
             "contact_probability": contact_probabilities.get("contact"),
@@ -1457,6 +1518,7 @@ class OpticalForceCaptureManager:
         filtered = force.get("filtered_zeroed") or zeroed
         mechanical = force.get("mechanical") or {}
         filtered_mechanical = force.get("filtered_mechanical") or mechanical
+        optical_force = _optical_force_export_fields(model)
         return {
             "capture_index": record["capture_index"],
             "timeline_timestamp_epoch_sec": record["timeline_timestamp_epoch_sec"],
@@ -1528,6 +1590,7 @@ class OpticalForceCaptureManager:
             "model_source": model.get("model_source"),
             "model_status": model.get("model_status") or model.get("status"),
             "model_ready": model.get("model_ready", model.get("ready")),
+            **optical_force,
             "predicted_contact_label": contact.get("label"),
             "predicted_position_label": position.get("label"),
             "predicted_response_level": response.get("label"),
@@ -1736,6 +1799,20 @@ class OpticalForceCaptureManager:
                     "source": "PX6D conditioned compression Fz",
                     "categorical_bins_enabled": False,
                 },
+                "paired_measurement_contract": {
+                    "version": "touch_optical_force_measurement_v1",
+                    "reference_field": "force_fz_n",
+                    "reference_source": "PX6D conditioned compression Fz",
+                    "estimate_field": "optical_estimated_fz_n",
+                    "raw_estimate_field": "optical_raw_estimated_fz_n",
+                    "estimate_source": "optical spectrum model only",
+                    "unit": "N",
+                    "force_sensor_is_model_input": False,
+                    "intended_use": (
+                        "research calibration, repeatability, lag, recovery, and "
+                        "optical-force consistency analysis"
+                    ),
+                },
                 "selection_semantics": (
                     "Only user-selected data streams are written to their dedicated CSV files. "
                     "The JSONL manifest contains those same selected payloads plus common labels."
@@ -1774,7 +1851,8 @@ class OpticalForceCaptureManager:
                     ),
                 },
                 "tactile_response_payload": (
-                    "one model response row per canonical frame in tactile_response_timeseries.csv"
+                    "one model response row per canonical frame, including the optical-only Fz estimate, "
+                    "in tactile_response_timeseries.csv"
                     if "response" in selected
                     else "not_selected"
                 ),

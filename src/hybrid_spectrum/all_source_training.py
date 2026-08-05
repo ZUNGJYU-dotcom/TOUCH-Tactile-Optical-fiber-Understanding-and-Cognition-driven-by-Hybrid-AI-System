@@ -455,7 +455,7 @@ def apply_optical_contact_gate(
         raise ValueError("contact gate inputs must be finite")
     return np.where(
         probability >= probability_threshold,
-        np.clip(raw, 0.0, 5.0),
+        np.maximum(raw, 0.0),
         float(no_contact_output_n),
     )
 
@@ -766,8 +766,8 @@ def grouped_cross_validation(
                 if task == "force_fz":
                     base["true_value"] = targets[test].astype(float)
                     base["raw_predicted_value"] = raw_prediction.astype(float)
-                    base["predicted_value"] = np.clip(
-                        raw_prediction.astype(float), 0.0, 5.0
+                    base["predicted_value"] = np.maximum(
+                        raw_prediction.astype(float), 0.0
                     )
                     base["true_label"] = ""
                     base["predicted_label"] = ""
@@ -1000,7 +1000,10 @@ def fit_candidate_bundle(
             "force_sensor_required_at_inference": False,
             "runtime_inputs": ["optical_spectrum_time_series"],
             "prediction_output": "estimated_compression_fz_n",
-            "prediction_clip_range_n": [0.0, 5.0],
+            "prediction_clip_range_n": [0.0, None],
+            "above_training_range_semantics": (
+                "unvalidated_extrapolation_requires_higher_force_calibration"
+            ),
             "optical_contact_gate": {
                 "enabled": True,
                 "contact_task": "contact",
@@ -1025,7 +1028,8 @@ def fit_candidate_bundle(
                 "threshold"
             ),
             "step_3": (
-                "otherwise return the clipped current-frame optical Fz estimate"
+                "otherwise return the non-negative current-frame optical Fz "
+                "estimate without a fixed software upper limit"
             ),
             "force_sensor_is_runtime_input": False,
         },
@@ -1214,6 +1218,10 @@ def save_training_outputs(
     source_notes = {
         "latest_primary": "formal grouped test plus training; contact, position, Fz",
         "latest_challenge": "auxiliary training only; contact and Fz, no position",
+        "latest_aux_no_force": (
+            "auxiliary training only; conservative optical-change contact/position "
+            "pseudo-labels, no Fz and never formal test"
+        ),
         "legacy_dynamic": "auxiliary training; contact and position, no Fz",
         "legacy_static_manual": "auxiliary training; contact and position, no Fz",
         "legacy_static_gauge": "auxiliary low-force Fz anchor plus contact/position",
@@ -1254,9 +1262,9 @@ def save_training_outputs(
         "## Evaluation",
         "",
         "All formal results are grouped by synchronized acquisition session. "
-        "The formal test set contains only the latest primary sessions. Earlier "
-        "or suspected-label sessions are auxiliary training data and never enter "
-        "the formal test folds.",
+        "The formal test set contains only current force-referenced primary "
+        "sessions. Captures without Fz and all historical sources are auxiliary "
+        "training data and never enter the formal test folds.",
         "",
         "## Selected candidates",
         "",

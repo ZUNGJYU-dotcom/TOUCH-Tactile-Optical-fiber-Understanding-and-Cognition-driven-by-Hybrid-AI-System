@@ -174,7 +174,7 @@ class DemoPlaybackContractTests(unittest.TestCase):
         self.assertIn("state.arrayDemoActionCompletedAt = performance.now();", app_js)
         self.assertIn("Wait five seconds after release before repeating", html)
         self.assertIn('const frameScenario = actionFinished ? "no_contact"', app_js)
-        self.assertIn('"released · baseline running"', app_js)
+        self.assertIn('"released - baseline running"', app_js)
         self.assertIn("? performance.now() + demoArrayStepIntervalMs()", app_js)
         self.assertIn('playbackMode: "single"', app_js)
 

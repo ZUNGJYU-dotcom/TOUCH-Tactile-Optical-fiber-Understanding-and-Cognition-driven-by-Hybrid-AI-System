@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import sys
 
 import numpy as np
@@ -28,6 +29,45 @@ MODEL_PATH = (
 PEAK_CONFIG_PATH = PROJECT_ROOT / "config" / "hybrid_spectrum_channels.yaml"
 
 
+def test_beta_backend_imports_without_pandas() -> None:
+    script = f"""
+import importlib.abc
+import os
+import sys
+
+class BlockPandas(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'pandas' or fullname.startswith('pandas.'):
+            raise ModuleNotFoundError("No module named 'pandas'", name=fullname)
+        return None
+
+sys.meta_path.insert(0, BlockPandas())
+sys.path.insert(0, {str(PROJECT_ROOT)!r})
+sys.path.insert(0, {str(SRC_ROOT)!r})
+sys.path.insert(0, {str(PROJECT_ROOT / 'bayspec_wavelength_shift_app')!r})
+os.environ['TOUCH_PX6D_AUTO_START'] = 'false'
+os.environ['TOUCH_LATEST_ALL_DATA_MODEL'] = '1'
+import backend.main
+payload = backend.main.health()
+assert payload['ok'] is True
+assert payload['runtime_model']['loaded'] is True
+assert payload['runtime_model']['runtime_role'] == 'deployed_current_model_only'
+assert payload['recognition_runtime']['active_model_id'] == 'ordinary_fbg_all_data_beta_v1'
+assert payload['recognition_runtime']['model_count'] == 1
+assert payload['recognition_runtime']['switchable'] is False
+assert 'hybrid_spectrum.px6d_session_dataset' not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 class _FixedClassifier:
     def __init__(self, probabilities: dict[str, float]) -> None:
         self.classes_ = np.asarray(tuple(probabilities), dtype=object)
@@ -50,6 +90,16 @@ class _FixedRegressor:
 
     def predict(self, features: np.ndarray) -> np.ndarray:
         return np.full(len(features), self.value, dtype=float)
+
+
+class _RecordingRegressor(_FixedRegressor):
+    def __init__(self, value: float) -> None:
+        super().__init__(value)
+        self.last_feature_count: int | None = None
+
+    def predict(self, features: np.ndarray) -> np.ndarray:
+        self.last_feature_count = int(features.shape[1])
+        return super().predict(features)
 
 
 def _position_probabilities(label: str, confidence: float = 0.92) -> dict[str, float]:
@@ -86,6 +136,15 @@ def runtime_adapter() -> tuple[AllSourceOpticalForceAdapter, np.ndarray, np.ndar
             "visual_position_fallback_enabled": True,
             "visual_position_confidence_min": 0.18,
             "visual_position_margin_min": 0.015,
+            "visual_position_confirm_frames": 2,
+            "visual_contact_probability_on": 0.35,
+            "visual_contact_probability_off": 0.20,
+            "visual_force_on_n": 0.08,
+            "visual_force_off_n": 0.03,
+            "visual_force_full_scale_n": 2.5,
+            "visual_force_gamma": 0.55,
+            "visual_deformation_floor": 0.12,
+            "visual_contact_arm_frames": 2,
             "position_probability_ema_alpha": 0.55,
             "position_hold_sec": 0.75,
             "position_switch_frames": 2,
@@ -135,6 +194,151 @@ def test_small_stable_offset_cannot_activate_contact(
     assert result["contact"]["label"] == "no_contact"
     assert result["position"]["label"] is None
     assert result["estimated_force_fz_n"] == 0.0
+    assert result["continuous_force_fz_n"] == 2.0
+    assert result["force_fz"]["continuous_estimated_n"] == 2.0
+    assert result["force_fz"]["continuous_trace_before_contact_gate"] is True
+    assert result["runtime_contact_gate"]["visual_contact_active"] is False
+    assert result["digital_twin"]["active"] is False
+
+
+def test_force_output_has_no_fixed_five_newton_software_cap(
+    runtime_adapter: tuple[AllSourceOpticalForceAdapter, np.ndarray, np.ndarray],
+) -> None:
+    adapter, wavelength, baseline = runtime_adapter
+    estimate_n = adapter.force_calibrated_max_n + 1.0
+    adapter.force_model = _FixedRegressor(estimate_n)
+
+    result = adapter.update(
+        wavelength,
+        baseline * 0.98,
+        source_timestamp_sec=0.2,
+    )
+
+    assert result["contact"]["label"] == "contact"
+    assert result["estimated_force_fz_n"] == pytest.approx(estimate_n)
+    assert result["continuous_force_fz_n"] == pytest.approx(estimate_n)
+    assert result["force_fz"]["upper_limit_applied"] is False
+    assert result["force_fz"]["clip_range_n"] == [0.0, None]
+    assert result["force_fz"]["calibrated_range_n"] == [
+        adapter.force_min_n,
+        adapter.force_calibrated_max_n,
+    ]
+    assert result["force_fz"]["range_status"] == "above_calibrated_range"
+    assert result["force_fz"]["outside_calibrated_range"] is True
+
+
+def test_deployed_force_model_receives_declared_feature_view(
+    runtime_adapter: tuple[AllSourceOpticalForceAdapter, np.ndarray, np.ndarray],
+) -> None:
+    adapter, wavelength, baseline = runtime_adapter
+    recorder = _RecordingRegressor(1.0)
+    adapter.force_model = recorder
+
+    result = adapter.update(
+        wavelength,
+        baseline * 0.98,
+        source_timestamp_sec=0.2,
+    )
+
+    expected_feature_count = 328 if adapter.literature_force_enabled else len(
+        adapter.force_indices
+    )
+    assert recorder.last_feature_count == expected_feature_count
+    assert result["force_model_source"] == adapter.force_model_source
+    assert result["force_fz"]["model_source"] == adapter.force_model_source
+
+
+def test_three_date_runtime_contract_when_deployed(
+    runtime_adapter: tuple[AllSourceOpticalForceAdapter, np.ndarray, np.ndarray],
+) -> None:
+    adapter, _, _ = runtime_adapter
+    if not adapter.literature_force_enabled:
+        pytest.skip("three-date force payload is not deployed yet")
+
+    assert adapter.literature_contact_feature_view == "response_raw136"
+    assert adapter.literature_position_feature_view == "response_raw136"
+    assert adapter.literature_force_feature_view == "literature_snv_sg328"
+    assert adapter.classification_model_source == (
+        "literature_guided_three_date_response_raw_v2"
+    )
+    assert adapter.force_model_source == (
+        "literature_guided_three_date_osc_ridge_v1"
+    )
+
+
+def test_low_force_visual_gate_drives_twin_before_formal_contact(
+    runtime_adapter: tuple[AllSourceOpticalForceAdapter, np.ndarray, np.ndarray],
+) -> None:
+    adapter, wavelength, baseline = runtime_adapter
+    adapter.contact_model = _FixedClassifier(
+        {"contact": 0.55, "no_contact": 0.45}
+    )
+    adapter.position_model = _FixedClassifier(_position_probabilities("P21"))
+    adapter.force_model = _FixedRegressor(0.10)
+
+    pending = adapter.update(
+        wavelength,
+        baseline * 0.985,
+        source_timestamp_sec=0.2,
+    )
+    result = adapter.update(
+        wavelength,
+        baseline * 0.984,
+        source_timestamp_sec=0.4,
+    )
+
+    assert pending["runtime_contact_gate"]["visual_activation_evidence"] is True
+    assert pending["runtime_contact_gate"]["visual_contact_active"] is False
+    assert pending["position"]["visual_label"] is None
+    assert pending["digital_twin"]["active"] is False
+    assert result["contact"]["label"] == "no_contact"
+    assert result["estimated_force_fz_n"] == 0.0
+    assert result["continuous_force_fz_n"] == pytest.approx(0.10)
+    assert result["runtime_contact_gate"]["visual_activation_evidence"] is True
+    assert result["runtime_contact_gate"]["visual_contact_active"] is True
+    assert result["position"]["label"] is None
+    assert result["position"]["visual_label"] == "P21"
+    assert result["digital_twin"]["active"] is True
+    assert result["digital_twin"]["semantic_contact_active"] is False
+    assert result["digital_twin"]["drive_force_n"] == pytest.approx(0.10)
+    assert result["digital_twin"]["drive_full_scale_n"] == pytest.approx(2.5)
+    assert result["digital_twin"]["deformation_proxy"] > 0.20
+    assert result["digital_twin"]["drive_source"] == "low_force_visual_gate"
+
+
+def test_low_force_visual_gate_releases_at_runtime_baseline(
+    runtime_adapter: tuple[AllSourceOpticalForceAdapter, np.ndarray, np.ndarray],
+) -> None:
+    adapter, wavelength, baseline = runtime_adapter
+    adapter.contact_model = _FixedClassifier(
+        {"contact": 0.55, "no_contact": 0.45}
+    )
+    adapter.position_model = _FixedClassifier(_position_probabilities("P21"))
+    adapter.force_model = _FixedRegressor(0.35)
+
+    pending = adapter.update(
+        wavelength,
+        baseline * 0.985,
+        source_timestamp_sec=0.2,
+    )
+    pressed = adapter.update(
+        wavelength,
+        baseline * 0.984,
+        source_timestamp_sec=0.4,
+    )
+    released = adapter.update(
+        wavelength,
+        baseline,
+        source_timestamp_sec=0.6,
+    )
+
+    assert pending["digital_twin"]["active"] is False
+    assert pressed["digital_twin"]["active"] is True
+    assert released["runtime_contact_gate"]["near_runtime_baseline"] is True
+    assert released["runtime_contact_gate"]["visual_contact_active"] is False
+    assert released["position"]["visual_label"] is None
+    assert released["force_fz"]["visual_drive_n"] == 0.0
+    assert released["digital_twin"]["active"] is False
 
 
 def test_first_physical_press_is_compared_with_baseline(
@@ -142,15 +346,23 @@ def test_first_physical_press_is_compared_with_baseline(
 ) -> None:
     adapter, wavelength, baseline = runtime_adapter
     adapter.position_model = _FixedClassifier(_position_probabilities("P12"))
-    result = adapter.update(
+    first = adapter.update(
         wavelength,
         baseline * 0.985,
         source_timestamp_sec=0.2,
     )
+    result = adapter.update(
+        wavelength,
+        baseline * 0.984,
+        source_timestamp_sec=0.4,
+    )
 
+    assert first["contact"]["label"] == "contact"
+    assert first["position"]["label"] is None
+    assert first["runtime_contact_gate"]["pending_position_id"] == "P12"
+    assert first["runtime_contact_gate"]["fresh_spectral_activity"] is True
     assert result["contact"]["label"] == "contact"
     assert result["position"]["label"] == "P12"
-    assert result["runtime_contact_gate"]["fresh_spectral_activity"] is True
     assert result["runtime_contact_gate"]["baseline_separated"] is True
 
 
@@ -173,6 +385,7 @@ def test_near_baseline_release_clears_stale_model_latch(
     assert released["runtime_contact_gate"]["near_runtime_baseline"] is True
     assert released["contact"]["label"] == "no_contact"
     assert released["estimated_force_fz_n"] == 0.0
+    assert released["continuous_force_fz_n"] == 2.0
 
 
 def test_position_requires_two_frames_before_switching(
@@ -184,18 +397,25 @@ def test_position_requires_two_frames_before_switching(
         baseline * 0.98,
         source_timestamp_sec=0.2,
     )
-    assert first["position"]["label"] == "P11"
+    established = adapter.update(
+        wavelength,
+        baseline * 0.979,
+        source_timestamp_sec=0.4,
+    )
+    assert first["position"]["label"] is None
+    assert first["runtime_contact_gate"]["pending_position_id"] == "P11"
+    assert established["position"]["label"] == "P11"
 
     adapter.position_model = _FixedClassifier(_position_probabilities("P33"))
     transient = adapter.update(
         wavelength,
         baseline * 0.975,
-        source_timestamp_sec=0.4,
+        source_timestamp_sec=0.6,
     )
     switched = adapter.update(
         wavelength,
         baseline * 0.97,
-        source_timestamp_sec=0.6,
+        source_timestamp_sec=0.8,
     )
 
     assert transient["position"]["label"] == "P11"
@@ -360,7 +580,13 @@ def test_provisional_visual_position_does_not_follow_quiet_jitter(
         baseline * 0.98,
         source_timestamp_sec=0.2,
     )
-    assert first["position"]["visual_label"] == "P32"
+    confirmed = adapter.update(
+        wavelength,
+        baseline * 0.979,
+        source_timestamp_sec=0.4,
+    )
+    assert first["position"]["visual_label"] is None
+    assert confirmed["position"]["visual_label"] == "P32"
 
     adapter.position_model = _FixedClassifier(
         _position_probabilities("P11", confidence=0.22)
@@ -368,7 +594,7 @@ def test_provisional_visual_position_does_not_follow_quiet_jitter(
     quiet = adapter.update(
         wavelength,
         baseline * 0.98,
-        source_timestamp_sec=0.4,
+        source_timestamp_sec=0.6,
     )
 
     assert quiet["runtime_contact_gate"]["fresh_spectral_activity"] is False
@@ -384,12 +610,18 @@ def test_verified_contact_can_use_provisional_visual_position(
         _position_probabilities("P32", confidence=0.22)
     )
 
-    result = adapter.update(
+    pending = adapter.update(
         wavelength,
         baseline * 0.98,
         source_timestamp_sec=0.2,
     )
+    result = adapter.update(
+        wavelength,
+        baseline * 0.979,
+        source_timestamp_sec=0.4,
+    )
 
+    assert pending["position"]["visual_label"] is None
     assert result["contact"]["label"] == "contact"
     assert result["position"]["accepted"] is False
     assert result["position"]["label"] is None
@@ -401,6 +633,81 @@ def test_verified_contact_can_use_provisional_visual_position(
         result["digital_twin"]["position_source"]
         == "provisional_low_confidence_position"
     )
+
+
+def test_single_p23_spike_cannot_capture_initial_visual_position(
+    runtime_adapter: tuple[AllSourceOpticalForceAdapter, np.ndarray, np.ndarray],
+) -> None:
+    adapter, wavelength, baseline = runtime_adapter
+    adapter.contact_model = _FixedClassifier(
+        {"contact": 0.55, "no_contact": 0.45}
+    )
+    adapter.force_model = _FixedRegressor(0.12)
+    adapter.position_model = _FixedClassifier(_position_probabilities("P23"))
+
+    p23_spike = adapter.update(
+        wavelength,
+        baseline * 0.985,
+        source_timestamp_sec=0.2,
+    )
+    adapter.position_model = _FixedClassifier(_position_probabilities("P11"))
+    p11_pending = adapter.update(
+        wavelength,
+        baseline * 0.984,
+        source_timestamp_sec=0.4,
+    )
+    p11_confirmed = adapter.update(
+        wavelength,
+        baseline * 0.983,
+        source_timestamp_sec=0.6,
+    )
+
+    assert p23_spike["position"]["visual_label"] is None
+    assert p23_spike["digital_twin"]["active"] is False
+    assert p11_pending["position"]["visual_label"] is None
+    assert p11_confirmed["position"]["visual_label"] == "P11"
+    assert p11_confirmed["digital_twin"]["position_id"] == "P11"
+    assert all(
+        frame["position"]["visual_label"] != "P23"
+        for frame in (p23_spike, p11_pending, p11_confirmed)
+    )
+
+
+def test_single_p23_spike_cannot_switch_established_visual_position(
+    runtime_adapter: tuple[AllSourceOpticalForceAdapter, np.ndarray, np.ndarray],
+) -> None:
+    adapter, wavelength, baseline = runtime_adapter
+    adapter.position_model = _FixedClassifier(
+        _position_probabilities("P11", confidence=0.22)
+    )
+    adapter.update(
+        wavelength,
+        baseline * 0.985,
+        source_timestamp_sec=0.2,
+    )
+    established = adapter.update(
+        wavelength,
+        baseline * 0.984,
+        source_timestamp_sec=0.4,
+    )
+    assert established["position"]["visual_label"] == "P11"
+
+    adapter.position_model = _FixedClassifier(
+        _position_probabilities("P23", confidence=0.92)
+    )
+    transient = adapter.update(
+        wavelength,
+        baseline * 0.983,
+        source_timestamp_sec=0.6,
+    )
+
+    assert transient["position"]["visual_label"] == "P11"
+    assert transient["digital_twin"]["position_id"] == "P11"
+    assert transient["runtime_contact_gate"]["pending_visual_position_id"] in {
+        None,
+        "P23",
+    }
+    assert transient["runtime_contact_gate"]["provisional_visual_position_id"] == "P11"
 
 
 def test_runtime_recovered_baseline_is_exposed_once_for_bridge_commit(

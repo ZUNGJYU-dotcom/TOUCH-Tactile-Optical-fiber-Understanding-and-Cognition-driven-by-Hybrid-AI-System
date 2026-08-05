@@ -252,6 +252,22 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
         self.assertIn('setText("traceHistoryValue", "--")', trace_kpis)
         self.assertNotIn('setText("traceHistoryValue", "IDLE")', trace_kpis)
 
+    def test_beta_trace_uses_continuous_optical_force_before_contact_gate(self) -> None:
+        self.assertIn("function traceOpticalForceN(item)", self.app_js)
+        self.assertIn('rawValue === null || rawValue === undefined || rawValue === ""', self.app_js)
+        self.assertIn("const displayForceN = finiteNumberOrNull(contract?.force?.display_n)", self.app_js)
+        self.assertIn('trace_response_semantics: "canonical_operator_display_force_n"', self.app_js)
+        draw_trace = self.app_js.split("function drawTrace(records)", 1)[1].split(
+            "function globalEventResponseFromTrace", 1
+        )[0]
+        self.assertIn("updateOpticalForceDisplayMaximum", draw_trace)
+        self.assertIn("forceAxisMax", draw_trace)
+        self.assertNotIn("OPTICAL_FORCE_DISPLAY_MAX_N", draw_trace)
+        self.assertIn('"Optical Fz estimate (N)"', draw_trace)
+        self.assertIn('"continuous_optical_force_n"', draw_trace)
+        self.assertIn('"Collecting optical force history"', draw_trace)
+        self.assertIn("if (yMin < 0 || opticalForceTrace)", draw_trace)
+
     def test_active_state_kpis_use_compact_values_with_shared_trace_unit(self) -> None:
         for label in ("Now", "Peak", "λ · nm", "Δλ · pm", "|Δλ| · pm"):
             self.assertIn(label, self.html)
@@ -259,7 +275,7 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
         self.assertNotIn("Peak · pm", self.html)
         self.assertIn('setText("traceCurrentLabel", "Now")', self.app_js)
         self.assertIn('setText("tracePeakLabel", "Peak")', self.app_js)
-        self.assertIn('"Surface peak |Δλ| (pm)"', self.app_js)
+        self.assertIn('"Optical Fz estimate (N)"', self.app_js)
         self.assertIn("function setCompactMetric", self.app_js)
         self.assertIn('setCompactMetric(\n    "traceCurrentValue"', self.app_js)
         self.assertIn('setCompactMetric(\n    "tracePeakValue"', self.app_js)
@@ -304,6 +320,12 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
             "</button>", 1
         )[0]
         self.assertIn('data-lucide="radio-tower"', live_command)
+
+    def test_frontend_status_text_has_no_mojibake_separators(self) -> None:
+        for damaged_text in ("路", "卤"):
+            self.assertNotIn(damaged_text, self.app_js)
+        for source_label in ("SDK | idle", "Watch | idle", "HTTP | idle"):
+            self.assertIn(source_label, self.app_js)
 
     def test_operator_response_gauge_is_continuous_not_categorical(self) -> None:
         band_markup = self.html.split('<div class="operator-band-card">', 1)[1].split(

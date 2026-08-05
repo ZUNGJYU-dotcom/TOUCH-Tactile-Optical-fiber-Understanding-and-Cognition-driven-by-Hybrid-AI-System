@@ -22,8 +22,11 @@ from .features import load_peak_windows
 from .px6d_session_dataset import (
     SessionDescriptor,
     _load_session_frame_matrix,
+    _load_session_recorded_baseline,
     assign_session_folds,
     discover_sessions,
+    filter_session_descriptors,
+    session_has_force_reference,
     split_primary_and_challenge_sessions,
 )
 from .sense_static_dataset import (
@@ -198,7 +201,52 @@ def _latest_baseline(
     intensity: np.ndarray,
     baseline_config: Mapping[str, Any],
     no_contact_max_force_n: float,
+    recorded_baseline: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, str]:
+    strategy = str(
+        baseline_config.get("strategy", "force_referenced_legacy")
+    ).strip().lower()
+    if strategy == "initial_fixed_frames":
+        return _initial_fixed_frame_baseline(intensity, baseline_config)
+    if strategy in {
+        "fixed_recorded_runtime_preferred",
+        "initial_optical_stable",
+    }:
+        initial_baseline, candidates = _initial_optical_stable_baseline(
+            intensity, baseline_config
+        )
+        if strategy == "initial_optical_stable":
+            return initial_baseline, candidates, "initial_optical_stable"
+
+        if recorded_baseline is not None:
+            nrms, correlation = _baseline_similarity(
+                recorded_baseline, initial_baseline
+            )
+            if (
+                nrms
+                <= float(
+                    baseline_config.get(
+                        "maximum_recorded_vs_initial_nrms", 0.05
+                    )
+                )
+                and correlation
+                >= float(
+                    baseline_config.get(
+                        "minimum_recorded_vs_initial_correlation", 0.98
+                    )
+                )
+            ):
+                return (
+                    np.asarray(recorded_baseline, dtype=float).copy(),
+                    candidates,
+                    "fixed_recorded_runtime_baseline",
+                )
+        return (
+            initial_baseline,
+            candidates,
+            "initial_optical_stable_fallback",
+        )
+
     frame_count = len(force_fz_n)
     search_count = max(
         int(baseline_config.get("minimum_frames", 5)),
@@ -210,8 +258,17 @@ def _latest_baseline(
         ),
     )
     search_count = min(frame_count, search_count)
+    finite_force = np.isfinite(force_fz_n)
+    if not np.any(finite_force):
+        candidates = np.arange(search_count, dtype=int)
+        return (
+            np.median(intensity[candidates], axis=0),
+            candidates,
+            "initial_unreferenced_frames",
+        )
     candidates = np.flatnonzero(
         (np.arange(frame_count) < search_count)
+        & finite_force
         & (
             force_fz_n
             <= float(
@@ -228,9 +285,203 @@ def _latest_baseline(
             search_count,
             int(baseline_config.get("fallback_lowest_force_frames", 10)),
         )
-        candidates = np.argsort(force_fz_n[:search_count])[:fallback_count]
+        initial_force = np.where(
+            finite_force[:search_count],
+            force_fz_n[:search_count],
+            np.inf,
+        )
+        candidates = np.argsort(initial_force)[:fallback_count]
         mode = "initial_lowest_force_fallback"
     return np.median(intensity[candidates], axis=0), candidates, mode
+
+
+def _initial_fixed_frame_baseline(
+    intensity: np.ndarray,
+    baseline_config: Mapping[str, Any],
+) -> tuple[np.ndarray, np.ndarray, str]:
+    """Use only the acquisition's explicit pre-contact warm-up frames."""
+
+    values = np.asarray(intensity, dtype=float)
+    if values.ndim != 2 or not len(values):
+        raise ValueError("intensity must be a non-empty frame matrix")
+    frame_count = min(
+        len(values),
+        max(
+            1,
+            int(
+                baseline_config.get(
+                    "fixed_initial_frames",
+                    baseline_config.get("minimum_frames", 5),
+                )
+            ),
+        ),
+    )
+    candidates = np.arange(frame_count, dtype=int)
+    return (
+        np.median(values[candidates], axis=0),
+        candidates,
+        "initial_fixed_frames",
+    )
+
+
+def _initial_optical_stable_baseline(
+    intensity: np.ndarray,
+    baseline_config: Mapping[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Estimate a runtime-available initial baseline without force labels."""
+
+    values = np.asarray(intensity, dtype=float)
+    if values.ndim != 2 or not len(values):
+        raise ValueError("intensity must be a non-empty frame matrix")
+    frame_count = len(values)
+    minimum_frames = max(1, int(baseline_config.get("minimum_frames", 5)))
+    search_count = max(
+        minimum_frames,
+        int(
+            np.ceil(
+                frame_count
+                * float(baseline_config.get("search_fraction", 0.20))
+            )
+        ),
+    )
+    search_count = min(frame_count, search_count)
+    initial = values[:search_count]
+    center = np.median(initial, axis=0)
+    denominator = max(float(np.sqrt(np.mean(center**2))), 1.0e-12)
+    distance = np.sqrt(np.mean((initial - center) ** 2, axis=1)) / denominator
+    distance_center = float(np.median(distance))
+    distance_mad = float(np.median(np.abs(distance - distance_center)))
+    threshold = distance_center + float(
+        baseline_config.get("initial_stability_mad_multiplier", 3.5)
+    ) * max(1.4826 * distance_mad, 1.0e-12)
+    candidates = np.flatnonzero(distance <= threshold)
+    required = min(minimum_frames, search_count)
+    if len(candidates) < required:
+        candidates = np.argsort(distance)[:required]
+    candidates = np.sort(candidates.astype(int))
+    return np.median(initial[candidates], axis=0), candidates
+
+
+def _baseline_similarity(
+    recorded_baseline: np.ndarray,
+    initial_baseline: np.ndarray,
+) -> tuple[float, float]:
+    recorded = np.asarray(recorded_baseline, dtype=float)
+    initial = np.asarray(initial_baseline, dtype=float)
+    if recorded.shape != initial.shape or not np.all(np.isfinite(recorded)):
+        return float("inf"), float("-inf")
+    denominator = max(float(np.sqrt(np.mean(recorded**2))), 1.0e-12)
+    nrms = float(np.sqrt(np.mean((recorded - initial) ** 2)) / denominator)
+    recorded_centered = recorded - float(np.mean(recorded))
+    initial_centered = initial - float(np.mean(initial))
+    correlation_denominator = float(
+        np.sqrt(
+            np.sum(recorded_centered**2) * np.sum(initial_centered**2)
+        )
+    )
+    if correlation_denominator <= 1.0e-12:
+        correlation = 1.0 if np.allclose(recorded, initial) else 0.0
+    else:
+        correlation = float(
+            np.sum(recorded_centered * initial_centered)
+            / correlation_denominator
+        )
+    return nrms, correlation
+
+
+def _minimum_run_mask(mask: np.ndarray, minimum_frames: int) -> np.ndarray:
+    """Keep only contiguous true runs that satisfy a minimum duration."""
+
+    values = np.asarray(mask, dtype=bool)
+    result = np.zeros_like(values)
+    start = 0
+    while start < len(values):
+        if not values[start]:
+            start += 1
+            continue
+        stop = start + 1
+        while stop < len(values) and values[stop]:
+            stop += 1
+        if stop - start >= minimum_frames:
+            result[start:stop] = True
+        start = stop
+    return result
+
+
+def derive_unreferenced_optical_labels(
+    response_components: np.ndarray,
+    baseline_indices: np.ndarray,
+    position_label: str,
+    config: Mapping[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Create conservative training-only labels for captures without Fz.
+
+    These labels are never eligible for formal testing or force regression.
+    Stable optical changes provide positive contact/position supervision, low
+    baseline-relative changes provide no-contact supervision, and ambiguous
+    transition frames remain unlabelled.
+    """
+
+    components = np.asarray(response_components, dtype=float)
+    baseline = np.asarray(baseline_indices, dtype=int)
+    if components.ndim != 2 or not len(components):
+        raise ValueError("response_components must be a non-empty matrix")
+    if not len(baseline):
+        raise ValueError("baseline_indices must not be empty")
+
+    scaled: list[np.ndarray] = []
+    minimum_scale = float(config.get("minimum_component_scale", 1.0e-8))
+    for component in components.T:
+        center = float(np.median(component[baseline]))
+        baseline_deviation = np.abs(component[baseline] - center)
+        scale = max(
+            float(np.percentile(baseline_deviation, 95.0)),
+            float(np.median(baseline_deviation)) * 1.4826,
+            minimum_scale,
+        )
+        scaled.append(np.abs(component - center) / scale)
+    score = np.median(np.column_stack(scaled), axis=1)
+    smoothing_frames = max(1, int(config.get("smoothing_frames", 3)))
+    score = (
+        pd.Series(score)
+        .rolling(smoothing_frames, center=True, min_periods=1)
+        .median()
+        .to_numpy(dtype=float)
+    )
+
+    contact = np.full(len(score), -1, dtype=np.int8)
+    position = np.full(len(score), "", dtype="<U16")
+    inactive_threshold = float(config.get("inactive_max_robust_z", 1.5))
+    inactive = score <= inactive_threshold
+    inactive[baseline] = True
+    contact[inactive] = 0
+
+    active_threshold = float("nan")
+    if position_label != "unlabeled":
+        active_threshold = max(
+            float(config.get("active_min_robust_z", 3.0)),
+            float(
+                np.percentile(
+                    score,
+                    float(config.get("active_session_percentile", 65.0)),
+                )
+            ),
+        )
+        contrast = float(np.percentile(score, 90.0) - np.percentile(score, 30.0))
+        active = score >= active_threshold
+        active = _minimum_run_mask(
+            active,
+            max(1, int(config.get("minimum_active_run_frames", 2))),
+        )
+        if (
+            contrast < float(config.get("minimum_session_contrast_z", 1.5))
+            or int(np.sum(active))
+            < int(config.get("minimum_active_frames", 3))
+        ):
+            active[:] = False
+        contact[active] = 1
+        position[active] = position_label
+    return contact, position, score, active_threshold
 
 
 def _build_latest_rows(
@@ -242,14 +493,21 @@ def _build_latest_rows(
     fusion_config: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
     descriptors = discover_sessions(capture_root, qa_summary_path)
+    data_config = dict(latest_config.get("data") or {})
+    descriptors = filter_session_descriptors(descriptors, data_config)
     primary, challenge = split_primary_and_challenge_sessions(
         descriptors,
-        dict(latest_config.get("data", {}).get("primary_selection") or {}),
+        dict(data_config.get("primary_selection") or {}),
     )
     primary_ids = {item.session_id for item in primary}
     evaluation_config = dict(fusion_config["evaluation"])
+    force_primary = tuple(
+        descriptor
+        for descriptor in primary
+        if session_has_force_reference(descriptor)
+    )
     fold_by_session = assign_session_folds(
-        primary,
+        force_primary,
         n_splits=int(evaluation_config.get("folds", 5)),
         random_seed=int(evaluation_config.get("random_seed", 42)),
     )
@@ -260,6 +518,7 @@ def _build_latest_rows(
     labels = dict(fusion_config["labels"])
     force_config = dict(fusion_config["force_calibration"])
     baseline_config = dict(latest_config.get("baseline") or {})
+    baseline_config.update(dict(fusion_config.get("latest_baseline") or {}))
     quality_config = dict(latest_config.get("quality") or {})
     no_contact_max = float(labels["no_contact_max_force_n"])
     contact_min = float(labels["contact_min_force_n"])
@@ -277,13 +536,16 @@ def _build_latest_rows(
     trailing_seconds = float(
         fusion_config["temporal_features"]["trailing_window_seconds"]
     )
+    unreferenced_config = dict(
+        fusion_config.get("unreferenced_optical_labels") or {}
+    )
 
     rows: list[dict[str, Any]] = []
     feature_names: tuple[str, ...] | None = None
     for descriptor in descriptors:
         if descriptor.qa_status == "fail":
             continue
-        role = (
+        configured_role = (
             "latest_primary"
             if descriptor.session_id in primary_ids
             else "latest_challenge"
@@ -292,14 +554,33 @@ def _build_latest_rows(
             descriptor, expected_points
         )
         force = summary["force_fz_n"].to_numpy(dtype=float)
+        has_force_reference = bool(np.any(np.isfinite(force)))
+        role = configured_role if has_force_reference else "latest_aux_no_force"
         elapsed = summary["elapsed_time_sec"].to_numpy(dtype=float)
-        baseline, baseline_indices, baseline_mode = _latest_baseline(
-            force, intensity, baseline_config, no_contact_max
+        recorded_baseline = _load_session_recorded_baseline(
+            descriptor, expected_points
         )
+        baseline, baseline_indices, baseline_mode = _latest_baseline(
+            force,
+            intensity,
+            baseline_config,
+            no_contact_max,
+            recorded_baseline=recorded_baseline,
+        )
+        initial_baseline, _ = _initial_optical_stable_baseline(
+            intensity, baseline_config
+        )
+        recorded_baseline_nrms = float("nan")
+        recorded_baseline_correlation = float("nan")
+        if recorded_baseline is not None:
+            (
+                recorded_baseline_nrms,
+                recorded_baseline_correlation,
+            ) = _baseline_similarity(recorded_baseline, initial_baseline)
         (
             frame_features,
             current_feature_names,
-            _,
+            response_components,
             _,
         ) = extract_baseline_relative_frame_features(
             wavelength_nm,
@@ -319,31 +600,51 @@ def _build_latest_rows(
             release_count = max(1, int(np.ceil(len(force) * release_fraction)))
             release_excluded[-release_count:] = True
 
-        for index in range(len(force)):
-            finite = bool(
-                np.isfinite(force[index])
-                and np.all(np.isfinite(temporal[index]))
+        pseudo_contact = np.full(len(force), -1, dtype=np.int8)
+        pseudo_position = np.full(len(force), "", dtype="<U16")
+        pseudo_active_threshold = float("nan")
+        if not has_force_reference:
+            (
+                pseudo_contact,
+                pseudo_position,
+                _,
+                pseudo_active_threshold,
+            ) = derive_unreferenced_optical_labels(
+                response_components,
+                baseline_indices,
+                descriptor.position_label,
+                unreferenced_config,
             )
+
+        for index in range(len(force)):
+            finite_optical = bool(np.all(np.isfinite(temporal[index])))
+            finite_force = bool(np.isfinite(force[index]))
             out_of_range = bool(
-                np.isfinite(force[index])
+                finite_force
                 and not (force_min <= force[index] <= force_max)
             )
-            valid = finite and not bool(release_excluded[index])
-            contact_target = -1
-            if force[index] <= no_contact_max:
-                contact_target = 0
-            elif (
-                force[index] >= contact_min
-                and descriptor.position_label != "unlabeled"
-            ):
-                contact_target = 1
-            position_target = ""
-            if (
-                role == "latest_primary"
-                and force[index] >= position_min
-                and descriptor.position_label != "unlabeled"
-            ):
-                position_target = descriptor.position_label
+            valid = finite_optical and not bool(release_excluded[index])
+            if has_force_reference:
+                contact_target = -1
+                if force[index] <= no_contact_max:
+                    contact_target = 0
+                elif (
+                    force[index] >= contact_min
+                    and descriptor.position_label != "unlabeled"
+                ):
+                    contact_target = 1
+                position_target = ""
+                if (
+                    role == "latest_primary"
+                    and force[index] >= position_min
+                    and descriptor.position_label != "unlabeled"
+                ):
+                    position_target = descriptor.position_label
+                label_origin = "synchronized_px6d_fz"
+            else:
+                contact_target = int(pseudo_contact[index])
+                position_target = str(pseudo_position[index])
+                label_origin = "optical_change_pseudo_label_training_only"
             rows.append(
                 {
                     "features": temporal[index],
@@ -352,12 +653,19 @@ def _build_latest_rows(
                     "force_fz_n": float(force[index]),
                     "contact_mask": valid and contact_target >= 0,
                     "position_mask": valid and bool(position_target),
-                    "force_mask": valid and not out_of_range,
-                    "formal_test_eligible": role == "latest_primary",
+                    "force_mask": (
+                        valid and finite_force and not out_of_range
+                    ),
+                    "formal_test_eligible": (
+                        role == "latest_primary" and has_force_reference
+                    ),
                     "fold_id": int(
                         fold_by_session.get(descriptor.session_id, -1)
                     ),
-                    "source_id": "ordinary_fbg_px6d_20260731",
+                    "source_id": str(
+                        data_config.get("dataset_id")
+                        or "ordinary_fbg_px6d_latest"
+                    ),
                     "source_role": role,
                     "group_id": descriptor.session_id,
                     "file_id": descriptor.session_id,
@@ -369,11 +677,17 @@ def _build_latest_rows(
                     "force_out_of_range": out_of_range,
                     "baseline_mode": baseline_mode,
                     "baseline_frame_count": int(len(baseline_indices)),
+                    "recorded_baseline_available": recorded_baseline is not None,
+                    "recorded_baseline_vs_initial_nrms": recorded_baseline_nrms,
+                    "recorded_baseline_vs_initial_correlation": (
+                        recorded_baseline_correlation
+                    ),
+                    "pseudo_active_threshold": pseudo_active_threshold,
                     "source_quality": descriptor.qa_status,
                     "source_quality_flags": ";".join(
                         descriptor.finding_codes
                     ),
-                    "label_origin": "synchronized_px6d_fz",
+                    "label_origin": label_origin,
                 }
             )
     if feature_names is None:
@@ -624,6 +938,7 @@ def build_all_source_dataset(
     fusion_config: Mapping[str, Any],
 ) -> AllSourceFusionDataset:
     paths = dict(fusion_config["paths"])
+    source_inclusion = dict(fusion_config.get("source_inclusion") or {})
     latest_config_path = resolve_project_path(
         project_root, paths["latest_training_config"]
     )
@@ -644,20 +959,26 @@ def build_all_source_dataset(
         channel_config_path=channel_config_path,
         fusion_config=fusion_config,
     )
-    dynamic_rows, dynamic_names = _build_dynamic_rows(
-        dynamic_config_path=resolve_project_path(
-            project_root, paths["dynamic_training_config"]
+    dynamic_rows: list[dict[str, Any]] = []
+    dynamic_names = latest_names
+    if bool(source_inclusion.get("legacy_dynamic", True)):
+        dynamic_rows, dynamic_names = _build_dynamic_rows(
+            dynamic_config_path=resolve_project_path(
+                project_root, paths["dynamic_training_config"]
+            )
         )
-    )
     force_config = dict(fusion_config["force_calibration"])
-    static_rows, static_names = _build_static_rows(
-        static_config_path=resolve_project_path(
-            project_root, paths["static_training_config"]
-        ),
-        channel_config_path=channel_config_path,
-        force_min_n=float(force_config["minimum_n"]),
-        force_max_n=float(force_config["maximum_n"]),
-    )
+    static_rows: list[dict[str, Any]] = []
+    static_names = latest_names
+    if bool(source_inclusion.get("legacy_static", True)):
+        static_rows, static_names = _build_static_rows(
+            static_config_path=resolve_project_path(
+                project_root, paths["static_training_config"]
+            ),
+            channel_config_path=channel_config_path,
+            force_min_n=float(force_config["minimum_n"]),
+            force_max_n=float(force_config["maximum_n"]),
+        )
     if latest_names != dynamic_names or latest_names != static_names:
         raise ValueError(
             "all sources must share the same 40 optical frame feature names"

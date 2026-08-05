@@ -191,6 +191,7 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
         self.assertEqual(prediction["digital_twin"]["deformation_proxy"], 0.0)
 
     def test_backend_blocks_inference_until_runtime_baseline_exists(self) -> None:
+        backend_main._reset_current_runtime("unit_test_new_session")
         backend_main.bridge.reset(keep_baseline=False)
         baseline_frame = {
             "channel_id": "P22",
@@ -199,20 +200,20 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
             "source": "unit_test_fixture",
         }
         backend_main.bridge.ingest({**baseline_frame, "timestamp": 1000.0})
-        blocked = backend_main._predict_static_spectral_frame()
+        blocked = backend_main._predict_current_runtime()
         self.assertFalse(blocked["ok"])
-        self.assertEqual(blocked["status"], "baseline_required")
+        self.assertEqual(blocked["status"], "startup_baseline_collecting")
 
         insufficient_result = backend_main.bridge.set_baseline(
             {"channel_id": "P22", "baseline_method": "frozen_baseline"}
         )
         self.assertTrue(insufficient_result["ok"])
-        self.assertFalse(insufficient_result["static_model_spectrum_baseline_ready"])
+        self.assertFalse(insufficient_result["current_runtime_spectrum_baseline_ready"])
         self.assertEqual(
-            insufficient_result["static_model_spectrum_baseline_status"],
+            insufficient_result["current_runtime_spectrum_baseline_status"],
             "insufficient_recovery_baseline_frames",
         )
-        still_blocked = backend_main._predict_static_spectral_frame()
+        still_blocked = backend_main._predict_current_runtime()
         self.assertFalse(still_blocked["ok"])
 
         for index in range(1, 20):
@@ -222,17 +223,54 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
         baseline_result = backend_main.bridge.set_baseline(
             {"channel_id": "P22", "baseline_method": "frozen_baseline"}
         )
-        self.assertTrue(baseline_result["static_model_spectrum_baseline_ready"])
+        self.assertTrue(baseline_result["current_runtime_spectrum_baseline_ready"])
         self.assertEqual(
-            baseline_result["static_model_spectrum_baseline_status"],
+            baseline_result["current_runtime_spectrum_baseline_status"],
             "stable_post_release_recovery_baseline",
         )
-        ready = backend_main._predict_static_spectral_frame()
+        ready = backend_main._predict_current_runtime()
         self.assertTrue(ready["ok"])
-        self.assertEqual(ready["prediction"]["contact"]["label"], "no_contact")
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual(ready["runtime_role"], "deployed_current_model_only")
+        self.assertEqual(ready["contact"]["label"], "no_contact")
         self.assertEqual(
-            ready["input"]["baseline_spectrum_semantic_role"],
+            baseline_result["baseline_spectrum_semantic_role_by_channel"]["P22"],
             "post_press_release_recovery_no_contact",
+        )
+
+    def test_backend_builds_current_session_startup_baseline_automatically(self) -> None:
+        backend_main._reset_current_runtime("unit_test_startup_baseline")
+        backend_main.bridge.reset(keep_baseline=False)
+        baseline_frame = {
+            "channel_id": "P22",
+            "wavelength_nm": self.baseline_wavelength,
+            "intensity": self.baseline_intensity,
+            "source": "unit_test_startup_fixture",
+        }
+
+        result = None
+        for index in range(5):
+            backend_main.bridge.ingest(
+                {**baseline_frame, "timestamp": 2000.0 + 0.04 * index}
+            )
+            result = backend_main._predict_current_runtime()
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ready")
+        pair = backend_main.bridge.spectral_model_input(channel_id="P22")
+        self.assertTrue(pair["ok"])
+        self.assertEqual(
+            pair["baseline_spectrum_status"],
+            "stable_current_session_startup_baseline",
+        )
+        self.assertEqual(
+            pair["baseline_spectrum_semantic_role"],
+            "automatic_current_session_startup_no_contact",
+        )
+        self.assertIn(
+            "P22",
+            backend_main.bridge.trusted_baseline_anchor_spectrum_by_channel,
         )
 
     def test_global_api_contract_keeps_model_position_and_physical_map_semantics_separate(self) -> None:
@@ -252,14 +290,15 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
         baseline_result = backend_main.bridge.set_baseline(
             {"channel_id": "P22", "baseline_method": "frozen_baseline"}
         )
-        self.assertTrue(baseline_result["static_model_spectrum_baseline_ready"])
+        self.assertTrue(baseline_result["current_runtime_spectrum_baseline_ready"])
 
-        wavelength, intensity = read_spectrum(FIXTURE_ROOT / "P22_hard_manual.csv")
+        # A current-runtime integration probe must use the same wavelength grid
+        # as its frozen baseline. Legacy static fixtures use a different grid.
         backend_main.bridge.ingest(
             {
                 "channel_id": "P22",
-                "wavelength_nm": wavelength,
-                "intensity": intensity,
+                "wavelength_nm": self.baseline_wavelength,
+                "intensity": self.baseline_intensity,
                 "timestamp": 2000.0,
                 "source": "unit_test_fixture",
             }
@@ -267,66 +306,42 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
         frame = backend_main.global_spectrum_frame(
             trace_limit=20,
             include_spectrum=True,
-            include_shadow=True,
         )
-        prediction = frame["trained_static_spectral_prediction"]
-
-        self.assertTrue(frame["model_assisted_display_allowed"])
-        self.assertEqual(prediction["contact"]["label"], "contact")
-        self.assertEqual(prediction["position"]["label"], "P22")
-        self.assertEqual(prediction["force_level"]["label"], "hard")
-        self.assertTrue(prediction["digital_twin"]["active"])
         self.assertFalse(frame["physical_channel_mapping_final"])
         self.assertEqual(
             frame["scope"],
-            "global_3x3_hybrid_spectral_fingerprint",
-        )
-        model_status = frame["trained_static_spectral_model"]
-        self.assertEqual(len(model_status["observed_model_feature_windows_nm"]), 9)
-        self.assertLess(
-            model_status["observed_model_feature_window_range_nm"][0],
-            1529.0,
-        )
-        self.assertFalse(model_status["future_3x3_target_plan_active"])
-        self.assertFalse(frame["trained_static_spectral_frame"]["cache_hit"])
-        shadow = frame["trained_static_spectral_shadow"]
-        self.assertEqual(shadow["status"], "shadow_ready")
-        self.assertFalse(shadow["drives_operator_ui"])
-        self.assertFalse(shadow["drives_digital_twin"])
-        self.assertIsNotNone(frame["trained_static_spectral_shadow_prediction"])
-        self.assertEqual(
-            frame["trained_static_spectral_model"]["shadow_candidate"]["runtime_role"],
-            "shadow_only_not_driving_digital_twin",
-        )
-        cached_frame = backend_main.global_spectrum_frame(
-            trace_limit=20,
-            include_spectrum=False,
-            include_shadow=True,
-        )
-        self.assertTrue(cached_frame["trained_static_spectral_frame"]["cache_hit"])
-        self.assertEqual(
-            cached_frame["trained_static_spectral_prediction"],
-            prediction,
+            "optical_contact_position_and_continuous_fz",
         )
         self.assertEqual(
-            cached_frame["trained_static_spectral_shadow_prediction"],
-            frame["trained_static_spectral_shadow_prediction"],
-        )
-        operator_frame = backend_main.global_spectrum_frame(
-            trace_limit=20,
-            include_spectrum=False,
-            include_shadow=False,
+            frame["active_spectral_model_source"],
+            "ordinary_fbg_all_data_beta_v1",
         )
         self.assertEqual(
-            operator_frame["trained_static_spectral_shadow"]["status"],
-            "shadow_not_requested",
+            frame["runtime_model"]["runtime_role"],
+            "deployed_current_model_only",
         )
-        self.assertIsNone(
-            operator_frame["trained_static_spectral_shadow_prediction"]
+        contract = frame["operator_visualization_frame"]
+        self.assertEqual(
+            contract["contract_version"],
+            "touch_operator_visualization_v1",
         )
-        self.assertFalse(
-            operator_frame["trained_static_spectral_shadow"]["drives_operator_ui"]
-        )
+        self.assertEqual(contract["model_source"], "ordinary_fbg_all_data_beta_v1")
+        self.assertTrue(contract["prediction_ready"])
+        self.assertEqual(contract["response_state"], "no_contact")
+        self.assertFalse(contract["force"]["upper_limit_applied"])
+        sync_ids = {
+            contract["sync"][name]
+            for name in (
+                "spectrum_frame_id",
+                "surface_frame_id",
+                "trace_frame_id",
+                "summary_frame_id",
+                "force_frame_id",
+            )
+        }
+        self.assertEqual(sync_ids, {contract["frame_id"]})
+        self.assertNotIn("trained_static_spectral_prediction", frame)
+        self.assertNotIn("trained_static_spectral_shadow", frame)
         backend_main.bridge.reset(keep_baseline=False)
 
 

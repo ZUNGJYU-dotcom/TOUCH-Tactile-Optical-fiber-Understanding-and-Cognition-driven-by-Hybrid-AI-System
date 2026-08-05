@@ -313,16 +313,12 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
                 include_spectrum=True,
             )
 
-        self.assertEqual(payload["scope"], "global_3x3_hybrid_spectral_fingerprint")
+        self.assertEqual(payload["scope"], "optical_contact_position_and_continuous_fz")
         self.assertIsNone(payload["selected_channel"])
         self.assertEqual(payload["carrier_channel_id"], "P22")
         self.assertEqual(
             payload["carrier_channel_role"],
-            "legacy_full_spectrum_transport_only",
-        )
-        self.assertEqual(
-            payload["global_candidate_ids"],
-            [f"FBG{index:02d}" for index in range(1, 10)],
+            "full_spectrum_transport_for_current_runtime",
         )
         self.assertFalse(payload["physical_channel_mapping_final"])
         self.assertEqual(payload["global_candidate_summary"]["valid_candidate_count"], 9)
@@ -332,88 +328,80 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["latest"]["carrier_channel_role"],
-            "legacy_full_spectrum_transport_only",
+            "full_spectrum_transport_for_current_runtime",
         )
         self.assertEqual(
-            payload["latest"]["global_candidate_ids"],
+            [
+                peak["candidate_id"]
+                for peak in payload["latest"]["spectrum_peaks"]
+                if peak.get("candidate_mapping")
+            ],
             [f"FBG{index:02d}" for index in range(1, 10)],
         )
         self.assertTrue(payload["global_frame_qa"]["candidate_contract_complete"])
         self.assertFalse(payload["global_frame_qa"]["formal_recognition_allowed"])
         self.assertEqual(
-            payload["candidate_contract_complete"],
+            payload["global_candidate_summary"]["candidate_contract_complete"],
             payload["global_frame_qa"]["candidate_contract_complete"],
         )
-        self.assertEqual(payload["baseline_ready"], payload["global_frame_qa"]["baseline_ready"])
+        self.assertEqual(
+            payload["global_candidate_summary"]["baseline_ready"],
+            payload["global_frame_qa"]["candidate_baseline_ready"],
+        )
         self.assertEqual(payload["source_fresh"], payload["global_frame_qa"]["source_fresh"])
         self.assertEqual(
             payload["formal_recognition_allowed"],
             payload["global_frame_qa"]["formal_recognition_allowed"],
         )
         self.assertEqual(payload["blockers"], payload["global_frame_qa"]["blockers"])
+        self.assertEqual(
+            payload["active_spectral_model_source"],
+            "ordinary_fbg_all_data_beta_v1",
+        )
+        self.assertEqual(
+            payload["runtime_model"]["runtime_role"],
+            "deployed_current_model_only",
+        )
+        self.assertEqual(
+            payload["operator_visualization_frame"]["contract_version"],
+            "touch_operator_visualization_v1",
+        )
 
     def test_frontend_global_normalization_marks_stale_frames(self) -> None:
         app_js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
         styles_css = (APP_ROOT / "frontend" / "styles.css").read_text(encoding="utf-8")
         self.assertIn('status === "stale_frame"', app_js)
-        self.assertIn("globalFrameQa.source_fresh !== false", app_js)
         self.assertIn('"stale_frame"', app_js)
-        self.assertIn("Global nine-FBG fingerprint is cached or stale", app_js)
-        self.assertIn("GLOBAL_PROXY_FULL_SCALE_PM", app_js)
-        self.assertIn("globalCandidateSpatialProxy(validPeaks, rawTrace, baselineStatsByCandidate)", app_js)
-        self.assertIn("candidateTraceBaselineStats", app_js)
-        self.assertIn("globalCandidateBaselineStatsMap", app_js)
-        self.assertIn("globalEventTraceRecords", app_js)
-        self.assertIn('trace_response_semantics: "residual_compensated_global_event_peak"', app_js)
-        self.assertIn("const modelResponseTrace", app_js)
-        self.assertIn('trained_model_visual_response_percent', app_js)
-        self.assertIn('global_residual_compensated_event_peak', app_js)
-        self.assertIn('Trained model visual response (%)', app_js)
-        self.assertIn('Global event peak |Δλ| (pm)', app_js)
-        self.assertIn("GLOBAL_EVENT_MIN_CONDITIONING_FRAMES", app_js)
-        self.assertIn("contactEvidence", app_js)
-        self.assertIn("session_global_no_contact_baseline", app_js)
-        self.assertIn("Contact frames must never recenter it", app_js)
-        self.assertIn("response_allowed: responseAllowed", app_js)
+        self.assertIn(
+            'const GLOBAL_RECOGNITION_SCOPE = "optical_contact_position_and_continuous_fz"',
+            app_js,
+        )
+        self.assertIn(
+            'const CURRENT_RUNTIME_MODEL_SOURCE = "ordinary_fbg_all_data_beta_v1"',
+            app_js,
+        )
+        self.assertIn("function normalizeCanonicalVisualizationFrame(frame, contract)", app_js)
+        self.assertIn("function appendCurrentRuntimeTrace(rawRecord, contract)", app_js)
+        self.assertIn('trace_response_semantics: "canonical_operator_display_force_n"', app_js)
+        self.assertIn("contract?.force?.display_n", app_js)
+        self.assertIn("operator_visualization_frame", app_js)
         self.assertIn("frameResponseIsUsable", app_js)
         self.assertIn("requestSequence < state.lastCommittedFrameRequest", app_js)
         self.assertIn("frameRequestInFlight", app_js)
         self.assertIn("forcedFrameRequestQueued", app_js)
         self.assertIn("if (state.frameRequestInFlight)", app_js)
-        self.assertIn("provisional global spectral spatial proxy", app_js)
-        self.assertIn("global_spectrum_provisional_spatial_proxy", app_js)
-        self.assertIn("RESPONSE_BAND_THRESHOLDS", app_js)
-        self.assertIn("normalizedSurfaceResponseRatio(surfaceMetrics, record)", app_js)
-        self.assertNotIn(
-            "globalEventPeakShiftPm / WAVELENGTH_SHIFT_FULL_SCALE_PM",
-            app_js,
-        )
+        self.assertNotIn("globalCandidateSpatialProxy(validPeaks, rawTrace, baselineStatsByCandidate)", app_js)
         self.assertIn("#dfeef4 0%", styles_css)
         self.assertIn("#63b7b7 34%", styles_css)
         self.assertIn("#f0d57a 67%", styles_css)
         self.assertIn("#c8665f 100%", styles_css)
         self.assertNotIn("var(--response-no-contact-end", styles_css)
-        self.assertIn("0.5 * (RESPONSE_BAND_THRESHOLDS.noContactMax + RESPONSE_BAND_THRESHOLDS.smallMax)", app_js)
-        self.assertIn("0.5 * (RESPONSE_BAND_THRESHOLDS.smallMax + RESPONSE_BAND_THRESHOLDS.moderateMax)", app_js)
-        self.assertIn(
-            "Continuous normalized optical response from 0% to 100%",
-            app_js,
-        )
-        self.assertIn("responseLevelFromSurfaceValue(proxyResponseRatio)", app_js)
-        self.assertIn("const trainedModelTrace", app_js)
-        self.assertIn("trace: trainedModelTrace || normalizedEventTrace", app_js)
-        self.assertRegex(
-            app_js,
-            re.compile(
-                r'trainedModelDisplay\s*\?\s*"Visual response"\s*:\s*"Peak \|[^"]+\|"'
-            ),
-        )
-        self.assertIn("formatPercent(surfacePeakValue, 1)", app_js)
+        self.assertIn("function opticalForceAxisStep(maximumN)", app_js)
+        self.assertIn("function updateOpticalForceDisplayMaximum(valueN)", app_js)
+        self.assertIn('"Optical Fz estimate (N)"', app_js)
         self.assertIn("function snapDisplayedFrameToCurrentTargets()", app_js)
         self.assertIn("state.smoothSurfaceVisualPeak = state.targetSurfaceVisualPeak", app_js)
         self.assertIn("snapDisplayedFrameToCurrentTargets();", app_js)
-        self.assertIn("hasActiveSurfaceResponse && (", app_js)
-        self.assertIn("surfaceHasActiveResponse", app_js)
         self.assertIn('state.arrayDemoPlaybackMode !== "loop"', app_js)
         self.assertIn('const frameScenario = actionFinished ? "no_contact"', app_js)
 

@@ -40,7 +40,7 @@ operator_response_bands:
   no_contact_max_ratio: 0.25
   light_max_ratio: 0.80
   normal_max_ratio: 0.90
-  semantics: uncalibrated_normalized_visual_response_not_force_N
+  semantics: normalized_surface_activity_thresholds_only
 
 wavelength_shift_demodulation:
   primary_method: cross_correlation

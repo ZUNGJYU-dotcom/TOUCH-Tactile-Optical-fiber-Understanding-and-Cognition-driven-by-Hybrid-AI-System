@@ -1,42 +1,49 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 
 app_dir = Path.cwd()
 project_dir = app_dir.parent
-latest_model = (
+deployed_model = (
     project_dir
     / "models"
-    / "candidates"
-    / "ordinary_fbg_optical_only_force_candidate.joblib"
+    / "deployed"
+    / "ordinary_fbg_current_runtime.joblib"
 )
-stable_manifest = app_dir / "release_manifests" / "stable" / "VERSION.json"
+stable_version = app_dir / "release_manifests" / "stable" / "VERSION.json"
+runtime_config_names = (
+    "bayspec_wavelength_shift_channels.yaml",
+    "hybrid_spectrum_channels.yaml",
+    "runtime_contact_state.yaml",
+    "px6d_reference.yaml",
+    "measurement_analysis.yaml",
+    "mfbg_intensity_3x3.yaml",
+    "spectrum_processing.yaml",
+    "thumb_holder_scene.yaml",
+)
 
-# Stable is the promoted low-latency all-data runtime. It intentionally ships
-# the same single deployable model as the validated Beta, with no legacy model
-# fallback copied into the package.
+# Stable is an exact promotion of the validated 0.19.6 Beta runtime. Keep the
+# package latest-model-only so no legacy inference path can take over.
 datas = [
     (str(app_dir / "frontend"), "frontend"),
     (str(app_dir / "sdk_probe"), "sdk_probe"),
     (str(app_dir / "assets" / "demo"), "assets/demo"),
-    (str(app_dir / "latest_all_data_runtime.flag"), "."),
-    (str(stable_manifest), "."),
-    (str(project_dir / "config"), "config"),
-    (str(project_dir / "src"), "src"),
-    (str(latest_model), "models/candidates"),
+    (str(stable_version), "."),
+    (str(deployed_model), "models/deployed"),
+    *[
+        (str(project_dir / "config" / config_name), "config")
+        for config_name in runtime_config_names
+    ],
 ]
 
 hiddenimports = (
     collect_submodules("backend")
-    + collect_submodules("src.array_surface")
-    + collect_submodules("src.mfbg_intensity")
-    + collect_submodules("src.wavelength_shift")
-    + collect_submodules("src.hybrid_spectrum")
     + collect_submodules("uvicorn")
     + collect_submodules("websockets")
     + collect_submodules("serial")
+    + collect_submodules("lightgbm")
     + [
         "clr",
         "System",
@@ -44,9 +51,28 @@ hiddenimports = (
         "sklearn.impute._base",
         "sklearn.preprocessing._data",
         "sklearn.linear_model._logistic",
+        "sklearn.linear_model._ridge",
         "sklearn.ensemble._forest",
         "sklearn.cross_decomposition",
         "sklearn.cross_decomposition._pls",
+        "src.array_surface.surface_mapper",
+        "src.mfbg_intensity.config",
+        "src.mfbg_intensity.demodulator",
+        "src.mfbg_intensity.profiles",
+        "src.mfbg_intensity.recording",
+        "src.wavelength_shift.demodulator",
+        "src.hybrid_spectrum.all_source_runtime_adapter",
+        "src.hybrid_spectrum.baseline_relative_features",
+        "src.hybrid_spectrum.dataset",
+        "src.hybrid_spectrum.features",
+        "src.hybrid_spectrum.tracking",
+        "src.hybrid_spectrum.runtime_baseline_guard",
+        "src.hybrid_spectrum.runtime_spectral_features",
+        "src.hybrid_spectrum.runtime_temporal_features",
+        "src.hybrid_spectrum.runtime_literature_features",
+        "src.hybrid_spectrum.measurement_consistency",
+        "src.hybrid_spectrum.measurement_estimate_sources",
+        "src.hybrid_spectrum.sense_fast_dat",
     ]
 )
 
@@ -61,7 +87,7 @@ deployment_excludes = [
 a = Analysis(
     ["desktop_launcher.py"],
     pathex=[str(app_dir), str(project_dir)],
-    binaries=[],
+    binaries=collect_dynamic_libs("lightgbm"),
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

@@ -16,11 +16,25 @@ Real mFBG 3x3 mode is disabled until measured wavelengths, a real baseline,
 and new mFBG calibration data are available. The profile does not output
 calibrated force or pressure.
 
-## v0.18.9 Stable
+## v0.19.7 Stable
 
-The validated v0.18.9 Beta model and low-latency runtime have been promoted to
-Stable. The Stable package keeps the same latest all-data optical model and
-does not include the legacy static or dynamic inference fallbacks.
+The v0.19.7 Stable and Beta packages replace corrupted source-status separators
+with ASCII text such as `SDK | idle`. Model weights, acquisition logic, and
+hardware interfaces are unchanged. The Stable package
+contains one deployed model and excludes every legacy static or dynamic
+inference fallback.
+
+Each new live or watched acquisition establishes a five-frame stable baseline
+from the current session before model output can drive the tactile surface.
+Low-force contact and position changes require two consecutive physical
+spectra. The nine-position replay regression produced no idle visual
+activation and no non-P23-to-P23 display errors with this baseline policy.
+
+## Retained v0.19.7 Beta
+
+The verified Beta package remains available locally as a rollback build. Beta
+and Stable use the same model and inference logic, but retain separate release
+manifests and shortcuts.
 
 Data recording includes a compact Force Sensor `Zero` command. It shares the
 PX6D software-zero state with the Force and Diagnostics views and refreshes the
@@ -30,8 +44,10 @@ backend still blocks incomplete capture setup.
 
 The Stable package contains only the latest optical all-data model. Temporal
 optical context drives contact and nine-position recognition; a current-frame
-optical model estimates `Fz` in the current 0-5 N research range. PX6D force is
-training and validation supervision, never a runtime model feature.
+optical model estimates `Fz`. Runtime output and the force legend have no fixed
+upper ceiling, while 0-5 N remains the current validated supervision range.
+PX6D force is training and validation supervision, never a runtime model
+feature.
 
 Brief spatial uncertainty now holds the current contact instead of releasing
 it. A quiet residual is cleared only after about one second without fresh
@@ -119,7 +135,7 @@ run_desktop.bat
 
 ## Windows Portable Package
 
-Download `TOUCH-v0.18.9-stable-windows-x64.zip`, extract the complete `TOUCH` folder,
+Download `TOUCH-v0.19.7-stable-windows-x64.zip`, extract the complete `TOUCH` folder,
 and run:
 
 ```powershell
@@ -243,6 +259,8 @@ separate optical estimate and does not use PX6D as a runtime feature.
   generalization result.
 - The optical `Fz` estimate is a research calibration against synchronized
   PX6D labels, not a certified force measurement.
+- Values above 5 N are shown without software clipping but remain unvalidated
+  until higher-force synchronized PX6D data are collected and evaluated.
 - The optical model does not produce calibrated strain, displacement, or
   pressure. Diagnostics retains PX6D as an independent reference when present.
 - The visual surface is model-driven and is not a measured pressure map.
