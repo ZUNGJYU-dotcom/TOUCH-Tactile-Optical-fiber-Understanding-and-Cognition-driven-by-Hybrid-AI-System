@@ -14,6 +14,26 @@ synchronized training and validation supervision and is not required for
 optical-force inference. The retained PD-voltage and earlier optical-intensity
 applications remain separate.
 
+## Public Windows Downloads
+
+This repository is publicly readable. The current Windows x64 Stable package
+and the separate BaySpec USB driver bundle are available directly from
+[`release_packages/`](release_packages/). The application archive contains the
+deployed optical model, Python runtime, frontend, 3D assets, configuration, and
+BaySpec SDK bridge; no separate model download is required.
+
+| Package | Purpose | SHA-256 |
+| --- | --- | --- |
+| [TOUCH Stable v0.19.7 full portable package](release_packages/TOUCH_Stable_v0.19.7_Full_Portable_OneFile_20260829.zip?raw=1) | Extract and run `TOUCH Stable.exe` on Windows x64 | `1D920589DCB8B581424C5AE64094AAA50496C0583422E062E6D6DACD42A94B31` |
+| [BaySpec BS2BASE USB driver bundle](release_packages/BaySpec_BS2BASE_USB_Driver_WIN64_20260829.zip?raw=1) | Driver installer and verification tools for `USB\VID_BA8C&PID_1688` | `4FA86011C6A6E34ADB926D9CEDDBB3D037F0C249D0149C41FA06CD4514F08BAA` |
+
+Both archives are stored with Git LFS. Browser downloads return the complete
+archives; source clones should install Git LFS and run `git lfs pull`. See the
+[package notes](release_packages/README.md) for contents and verification
+details. The driver is distributed separately because Windows installation
+requires administrator privileges and depends on the target computer's
+hardware and driver state.
+
 ## mFBG Expansion Contract
 
 The retained ordinary-FBG model remains the active runtime. A separate
@@ -243,12 +263,14 @@ cd bayspec_wavelength_shift_app
 run_desktop.bat
 ```
 
-For the packaged Windows build, download
-`TOUCH-v0.19.7-stable-windows-x64.zip` from the release, extract the complete
-`TOUCH` folder, and run `TOUCH\TOUCH.exe`. Do not move only the executable out
-of the extracted folder because its bundled runtime and assets are required.
-The promoted model is bundled in that release package; the 118 MB joblib is
-not stored as an ordinary Git blob because it exceeds GitHub's per-file limit.
+For the packaged Windows build, download the
+[v0.19.7 full portable archive](release_packages/TOUCH_Stable_v0.19.7_Full_Portable_OneFile_20260829.zip?raw=1),
+extract the complete folder, and run `TOUCH Stable.exe`. The executable embeds
+the promoted model, runtime libraries, frontend, 3D assets, configuration, and
+BaySpec SDK bridge. Keep `SHA256SUMS.txt`, `embedded_components.json`, and the
+migration notes beside it for deployment auditing. Install the separate
+[BaySpec driver bundle](release_packages/BaySpec_BS2BASE_USB_Driver_WIN64_20260829.zip?raw=1)
+on a target computer only when its BS2BASE USB device requires that driver.
 
 Generate the full guided validation plan without touching hardware:
 
