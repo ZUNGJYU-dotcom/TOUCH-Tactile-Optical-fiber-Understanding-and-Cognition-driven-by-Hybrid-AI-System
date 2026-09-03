@@ -25,7 +25,8 @@ class SpectrumProcessingContractTests(unittest.TestCase):
 
     def test_settings_controls_and_api_routes_are_connected(self) -> None:
         for control_id in (
-            "spectrumIntegrationSelect",
+            "spectrumSensorModeSelect",
+            "spectrumIntegrationInput",
             "spectrumOverlayToggle",
             "spectrumBackgroundToggle",
             "spectrumBaselineToggle",
@@ -52,7 +53,17 @@ class SpectrumProcessingContractTests(unittest.TestCase):
             self.frontend,
         )
         self.assertIn("integration=${integration}", self.frontend)
-        self.assertIn("DEFAULT_INTEGRATION_US = 5000", self.sdk_live)
+        self.assertIn("DEFAULT_INTEGRATION_US = 300", self.sdk_live)
+        self.assertIn("DEFAULT_SENSOR_MODE = SENSOR_MODE_HIGH_SENSITIVITY", self.sdk_live)
+        self.assertIn("sensor_mode=${sensorMode}", self.frontend)
+
+    def test_high_sensitivity_and_microsecond_exposure_are_operator_adjustable(self) -> None:
+        self.assertIn('<option value="0" selected>High sensitivity</option>', self.index)
+        self.assertIn('id="spectrumIntegrationInput"', self.index)
+        self.assertIn('type="number"', self.index)
+        self.assertIn('value="300"', self.index)
+        self.assertIn('min="1"', self.index)
+        self.assertIn('max="10000000"', self.index)
 
     def test_display_processing_does_not_replace_raw_model_input(self) -> None:
         self.assertIn('"intensity": intensity', self.sdk_live)

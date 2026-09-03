@@ -87,6 +87,18 @@ class RuntimeBaselineRecoveryGuard:
         self.stationary_rest_max_baseline_distance = float(
             values.get("stationary_rest_max_baseline_distance", 0.0050)
         )
+        self.rest_unlock_position_confidence_min = float(
+            values.get("rest_unlock_position_confidence_min", 0.35)
+        )
+        self.rest_unlock_strong_baseline_distance = float(
+            values.get("rest_unlock_strong_baseline_distance", 0.0140)
+        )
+        self.locked_rest_reanchor_min_distance = float(
+            values.get("locked_rest_reanchor_min_distance", 0.0040)
+        )
+        self.locked_rest_reanchor_max_distance = float(
+            values.get("locked_rest_reanchor_max_distance", 0.0250)
+        )
         self.fallback_requires_new_contact_after_reanchor = bool(
             values.get("fallback_requires_new_contact_after_reanchor", True)
         )
@@ -101,6 +113,24 @@ class RuntimeBaselineRecoveryGuard:
         )
         self.auto_update_runtime_baseline = bool(
             values.get("auto_update_runtime_baseline", True)
+        )
+        self.residual_release_enabled = bool(
+            values.get("residual_release_enabled", False)
+        )
+        self.residual_release_minimum_recovery_fraction = float(
+            values.get("residual_release_minimum_recovery_fraction", 0.60)
+        )
+        self.residual_release_max_position_confidence = float(
+            values.get("residual_release_max_position_confidence", 0.35)
+        )
+        self.residual_release_max_baseline_distance = float(
+            values.get("residual_release_max_baseline_distance", 0.0250)
+        )
+        self.residual_release_minimum_physical_frames = int(
+            values.get("residual_release_minimum_physical_frames", 2)
+        )
+        self.residual_release_hold_sec = float(
+            values.get("residual_release_hold_sec", 0.18)
         )
 
         # Backward-compatible frame mode is kept for older unit/config callers.
@@ -127,6 +157,18 @@ class RuntimeBaselineRecoveryGuard:
             or self.release_candidate_timeout_sec <= 0.0
             or self.minimum_contact_distance_growth < 0.0
             or self.stationary_rest_max_baseline_distance < 0.0
+            or not 0.0 <= self.rest_unlock_position_confidence_min <= 1.0
+            or self.rest_unlock_strong_baseline_distance < 0.0
+            or self.locked_rest_reanchor_min_distance < 0.0
+            or self.locked_rest_reanchor_max_distance
+            < self.locked_rest_reanchor_min_distance
+            or not 0.0
+            <= self.residual_release_minimum_recovery_fraction
+            <= 1.0
+            or not 0.0 <= self.residual_release_max_position_confidence <= 1.0
+            or self.residual_release_max_baseline_distance < 0.0
+            or self.residual_release_minimum_physical_frames < 1
+            or self.residual_release_hold_sec < 0.0
         ):
             raise ValueError("runtime baseline recovery configuration is invalid")
 
@@ -160,6 +202,9 @@ class RuntimeBaselineRecoveryGuard:
         self._release_candidate_started_at_sec: float | None = None
         self._release_evidence: tuple[str, ...] = ()
         self._candidate_min_baseline_distance: float | None = None
+        self._residual_release_frames = 0
+        self._residual_release_started_at_sec: float | None = None
+        self._residual_release_elapsed_sec = 0.0
         self._fallback_locked_until_contact = fallback_locked
         self._locked_recontact_evidence: tuple[str, ...] = ()
         if not keep_reanchor_count:
@@ -174,6 +219,17 @@ class RuntimeBaselineRecoveryGuard:
         if not np.all(np.isfinite(reference)):
             raise ValueError("runtime motion reference contains non-finite values")
         self._last_physical_spectrum = reference.copy()
+
+    def confirm_rest(self) -> None:
+        """Latch a newly accepted baseline as trusted no-contact state."""
+
+        self._clear_release_candidate()
+        self._active_contact_frames = 0
+        self._contact_armed = False
+        self._contact_peak_baseline_distance = 0.0
+        self._contact_peak_probability = 0.0
+        self._fallback_locked_until_contact = True
+        self._locked_recontact_evidence = ()
 
     @staticmethod
     def _motion(
@@ -209,6 +265,12 @@ class RuntimeBaselineRecoveryGuard:
         self._quiet_started_at_sec = None
         self._quiet_elapsed_sec = 0.0
         self._spectra.clear()
+        self._clear_residual_release_evidence()
+
+    def _clear_residual_release_evidence(self) -> None:
+        self._residual_release_frames = 0
+        self._residual_release_started_at_sec = None
+        self._residual_release_elapsed_sec = 0.0
 
     def snapshot(
         self,
@@ -227,6 +289,9 @@ class RuntimeBaselineRecoveryGuard:
         spatial_contact_support: bool = False,
         slow_release_transition: bool = False,
         stationary_rest_baseline_safe: bool = False,
+        locked_rest_drift_safe: bool = False,
+        rest_unlock_spatial_support: bool = False,
+        rest_unlock_strong_spectral_support: bool = False,
         suppress_contact: bool = False,
         reanchored: bool = False,
     ) -> dict[str, Any]:
@@ -261,13 +326,47 @@ class RuntimeBaselineRecoveryGuard:
             "stationary_rest_max_baseline_distance": (
                 self.stationary_rest_max_baseline_distance
             ),
+            "locked_rest_drift_safe": bool(locked_rest_drift_safe),
+            "locked_rest_reanchor_distance_range": [
+                self.locked_rest_reanchor_min_distance,
+                self.locked_rest_reanchor_max_distance,
+            ],
+            "rest_unlock_spatial_support": bool(
+                rest_unlock_spatial_support
+            ),
+            "rest_unlock_position_confidence_min": (
+                self.rest_unlock_position_confidence_min
+            ),
+            "rest_unlock_strong_spectral_support": bool(
+                rest_unlock_strong_spectral_support
+            ),
+            "rest_unlock_strong_baseline_distance": (
+                self.rest_unlock_strong_baseline_distance
+            ),
             "contact_armed": self._contact_armed,
             "active_contact_physical_frames": self._active_contact_frames,
             "release_transition_detected": bool(
-                self._release_candidate and self._candidate_kind == "post_release"
+                self._release_candidate
+                and self._candidate_kind in {"post_release", "residual_recovery"}
             ),
             "recovery_candidate_kind": self._candidate_kind,
             "release_evidence": list(self._release_evidence),
+            "residual_release_enabled": self.residual_release_enabled,
+            "residual_release_physical_frames": self._residual_release_frames,
+            "residual_release_elapsed_sec": self._residual_release_elapsed_sec,
+            "residual_release_minimum_recovery_fraction": (
+                self.residual_release_minimum_recovery_fraction
+            ),
+            "residual_release_max_position_confidence": (
+                self.residual_release_max_position_confidence
+            ),
+            "residual_release_max_baseline_distance": (
+                self.residual_release_max_baseline_distance
+            ),
+            "residual_release_minimum_physical_frames": (
+                self.residual_release_minimum_physical_frames
+            ),
+            "residual_release_hold_sec": self.residual_release_hold_sec,
             "stable_release_candidate": self._release_candidate,
             "stable_release_physical_frames": self._stable_release_frames,
             "quiet_elapsed_sec": self._quiet_elapsed_sec,
@@ -366,6 +465,15 @@ class RuntimeBaselineRecoveryGuard:
             and float(position_confidence)
             >= self.minimum_spatial_contact_confidence
         )
+        rest_unlock_spatial_support = bool(
+            position_confidence is not None
+            and float(position_confidence)
+            >= self.rest_unlock_position_confidence_min
+        )
+        rest_unlock_strong_spectral_support = bool(
+            baseline_distance is not None
+            and baseline_distance >= self.rest_unlock_strong_baseline_distance
+        )
         separated_from_baseline = bool(
             baseline_distance is None
             or baseline_distance >= self.minimum_contact_baseline_distance
@@ -389,6 +497,8 @@ class RuntimeBaselineRecoveryGuard:
             locked_recontact_evidence.append("slow_baseline_departure")
         if model_contact:
             locked_recontact_evidence.append("contact_model_support")
+        if spatial_contact_support:
+            locked_recontact_evidence.append("spatial_contact_support")
         self._locked_recontact_evidence = tuple(locked_recontact_evidence)
 
         # Once a quiet spectrum has been accepted as the runtime rest state,
@@ -400,12 +510,26 @@ class RuntimeBaselineRecoveryGuard:
         # classifier is trained on contact samples and always has to choose a
         # location, even for a no-contact spectrum.
         credible_contact = bool(
-            model_contact
+            (
+                model_contact
+                or (
+                    normalized_label == "contact"
+                    and rest_unlock_strong_spectral_support
+                )
+            )
             and separated_from_baseline
             and (
                 not self._fallback_locked_until_contact
-                or activity_recent_for_recontact
-                or slow_baseline_departure
+                or (
+                    (
+                        rest_unlock_spatial_support
+                        or rest_unlock_strong_spectral_support
+                    )
+                    and (
+                        activity_recent_for_recontact
+                        or slow_baseline_departure
+                    )
+                )
             )
         )
         if not self._release_candidate:
@@ -484,6 +608,43 @@ class RuntimeBaselineRecoveryGuard:
             <= self.release_activity_memory_sec
         )
 
+        # The contact classifier can stay saturated after a physical release.
+        # Treat recovery of the complete spectrum as an independent release
+        # signal, but only after a real contact peak and only while the spectrum
+        # is quiet and spatially ambiguous. A held plateau has near-zero
+        # recovery, so low position confidence alone cannot clear it.
+        residual_release_frame_evidence = bool(
+            self.residual_release_enabled
+            and self._contact_armed
+            and stable
+            and not activity_recent
+            and recovery_fraction is not None
+            and recovery_fraction
+            >= self.residual_release_minimum_recovery_fraction
+            and position_confidence is not None
+            and float(position_confidence)
+            <= self.residual_release_max_position_confidence
+            and baseline_distance is not None
+            and baseline_distance <= self.residual_release_max_baseline_distance
+        )
+        if not self._release_candidate and residual_release_frame_evidence:
+            if self._residual_release_started_at_sec is None:
+                self._residual_release_started_at_sec = now_sec
+            self._residual_release_frames += 1
+            self._residual_release_elapsed_sec = max(
+                0.0,
+                now_sec - self._residual_release_started_at_sec,
+            )
+        elif not self._release_candidate:
+            self._clear_residual_release_evidence()
+        residual_release_confirmed = bool(
+            residual_release_frame_evidence
+            and self._residual_release_frames
+            >= self.residual_release_minimum_physical_frames
+            and self._residual_release_elapsed_sec
+            >= self.residual_release_hold_sec
+        )
+
         evidence: list[str] = []
         if release_like:
             evidence.append("learned_release_event")
@@ -501,6 +662,9 @@ class RuntimeBaselineRecoveryGuard:
             evidence.append("slow_release_after_contact_peak")
 
         stationary_rest_fallback = False
+        locked_rest_drift_fallback = False
+        stationary_rest_baseline_safe = False
+        locked_rest_drift_safe = False
         if self._legacy_frame_mode:
             release_transition = bool(
                 external_no_contact_hint is True
@@ -513,8 +677,18 @@ class RuntimeBaselineRecoveryGuard:
             # press, so probability drop + no-contact label must never arm a
             # baseline update unless the spectrum also recovers or the learned
             # release detector observes a release event.
+            # A stationary held press can relax slightly after its force peak,
+            # and the contact classifier can briefly dip at the same time. Only
+            # the stronger configured recovery fraction may support an automatic
+            # release; the lower threshold remains diagnostic evidence only.
+            recovery_supported_release = bool(
+                recovery_fraction is not None
+                and recovery_fraction
+                >= self.minimum_slow_release_recovery_fraction
+                and model_no_contact
+            )
             primary_release_evidence = bool(
-                release_like or recovered_toward_baseline
+                release_like or recovery_supported_release
             )
             release_transition = bool(
                 self._contact_armed
@@ -525,6 +699,7 @@ class RuntimeBaselineRecoveryGuard:
                         and len(evidence) >= 2
                     )
                     or slow_release_transition
+                    or residual_release_confirmed
                 )
             )
             quiet_since_activity = bool(
@@ -537,7 +712,16 @@ class RuntimeBaselineRecoveryGuard:
                 and baseline_distance
                 <= self.stationary_rest_max_baseline_distance
             )
-            stationary_rest_fallback = bool(
+            locked_rest_drift_safe = bool(
+                self._fallback_locked_until_contact
+                and baseline_distance is not None
+                and self.locked_rest_reanchor_min_distance
+                <= baseline_distance
+                <= self.locked_rest_reanchor_max_distance
+                and not rest_unlock_spatial_support
+                and not rest_unlock_strong_spectral_support
+            )
+            near_baseline_rest_fallback = bool(
                 self.stationary_rest_fallback_enabled
                 and not self._fallback_locked_until_contact
                 and stable
@@ -545,21 +729,57 @@ class RuntimeBaselineRecoveryGuard:
                 and (external_no_contact_hint is True or model_no_contact)
                 and quiet_since_activity
             )
+            locked_rest_drift_fallback = bool(
+                self.stationary_rest_fallback_enabled
+                and self.auto_update_runtime_baseline
+                and locked_rest_drift_safe
+                and stable
+                and quiet_since_activity
+            )
+            stationary_rest_fallback = bool(
+                near_baseline_rest_fallback or locked_rest_drift_fallback
+            )
             if stationary_rest_fallback and not release_transition:
                 release_transition = True
+                if locked_rest_drift_fallback:
+                    evidence.extend(
+                        [
+                            "locked_rest_drift_recovery",
+                            "full_spectrum_stationary",
+                            "position_below_rest_unlock_threshold",
+                        ]
+                    )
+                else:
+                    evidence.extend(
+                        [
+                            "stationary_rest_fallback",
+                            "full_spectrum_stationary",
+                            "near_existing_runtime_baseline",
+                        ]
+                    )
+            if residual_release_confirmed:
                 evidence.extend(
                     [
-                        "stationary_rest_fallback",
+                        "residual_spectral_recovery",
                         "full_spectrum_stationary",
-                        "near_existing_runtime_baseline",
+                        "no_recent_spectral_activity",
+                        "position_confidence_low",
                     ]
                 )
         if release_transition and not self._release_candidate:
             self._release_candidate = True
             self._candidate_kind = (
-                "stationary_rest_recovery"
-                if stationary_rest_fallback
-                else "post_release"
+                "residual_recovery"
+                if residual_release_confirmed
+                else (
+                    "locked_rest_drift_recovery"
+                    if locked_rest_drift_fallback
+                    else (
+                        "stationary_rest_recovery"
+                        if stationary_rest_fallback
+                        else "post_release"
+                    )
+                )
             )
             self._release_candidate_started_at_sec = now_sec
             self._release_evidence = tuple(evidence)
@@ -585,16 +805,26 @@ class RuntimeBaselineRecoveryGuard:
                     >= self._candidate_min_baseline_distance
                     * (1.0 + self.recontact_distance_growth_fraction)
                 )
+            slow_joint_signature_recontact = bool(
+                slow_baseline_departure
+                and spatial_contact_support
+                and model_contact
+            )
             strong_recontact = bool(
-                activity
+                (activity or slow_joint_signature_recontact)
                 and normalized_label == "contact"
                 and probability is not None
                 and probability >= self.recontact_probability_threshold
+                and (
+                    self._candidate_kind != "locked_rest_drift_recovery"
+                    or rest_unlock_spatial_support
+                )
                 and not release_like
                 and distance_growth
             )
             if strong_recontact:
                 self._clear_release_candidate()
+                self._clear_residual_release_evidence()
             elif stable:
                 if self._quiet_started_at_sec is None:
                     self._quiet_started_at_sec = now_sec
@@ -666,6 +896,19 @@ class RuntimeBaselineRecoveryGuard:
                 baseline_distance is not None
                 and baseline_distance
                 <= self.stationary_rest_max_baseline_distance
+            ),
+            locked_rest_drift_safe=(
+                self._fallback_locked_until_contact
+                and baseline_distance is not None
+                and self.locked_rest_reanchor_min_distance
+                <= baseline_distance
+                <= self.locked_rest_reanchor_max_distance
+                and not rest_unlock_spatial_support
+                and not rest_unlock_strong_spectral_support
+            ),
+            rest_unlock_spatial_support=rest_unlock_spatial_support,
+            rest_unlock_strong_spectral_support=(
+                rest_unlock_strong_spectral_support
             ),
             suppress_contact=suppress_contact,
             reanchored=reanchored,

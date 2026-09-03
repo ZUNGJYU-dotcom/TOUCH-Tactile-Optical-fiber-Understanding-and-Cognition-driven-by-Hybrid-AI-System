@@ -1,0 +1,79 @@
+schema_version: ordinary_fbg_same_day_joint_training_v2
+
+data:
+  dataset_id: ordinary_fbg_20260902_same_day_joint_fingerprint_v2
+  source_policy: regular_v01916_plus_regular_v01919_plus_blind1_blind3_blind4
+  excluded_source_batches: [blind2]
+  formal_group_field: session_id
+  split_strategy: leave_complete_acquisition_batch_out
+  random_frame_split_allowed: false
+  historical_data_policy: same_day_high_sensitivity_300us_only
+
+acquisition:
+  sensor_mode_code: 0
+  sensor_mode_label: High Sensitivity
+  integration_us: 300
+
+baseline:
+  mode: session_initial_force_confirmed_quiet_median
+  frame_count: 16
+  search_first_frames: 96
+  minimum_frame_count: 3
+  runtime_equivalent: multi_frame_set_baseline_while_unloaded
+  require_all_512_points: true
+
+labels:
+  idle_session_policy: force_all_frames_to_no_contact_and_zero_force
+  active_force_zeroing: subtract_initial_20th_percentile
+  no_contact_max_force_n: 0.04
+  contact_min_force_n: 0.08
+  position_min_force_n: 0.12
+  position_order: [P11, P21, P31, P12, P22, P32, P13, P23, P33]
+
+features:
+  downsample_bins: 64
+  required_joint_channel_count: 9
+  full_spectrum_feature_count: 264
+  nine_fbg_joint_feature_count: 75
+  combined_feature_count: 339
+  contact_evidence_policy: all_nine_fbg_joint_fingerprint_required
+  position_evidence_policy: all_nine_fbg_joint_fingerprint_required
+
+evaluation:
+  folds: 5
+  fold_semantics:
+    0: regular_v01916
+    1: regular_v01919
+    2: blind1
+    3: blind3
+    4: blind4
+  random_seed: 20260902
+  session_level_position_voting: true
+  training_weight_strategy: equal_session_mass
+  classification_class_weight: balanced
+  mixed_position_sessions: frame_metrics_only_excluded_from_session_majority_vote
+
+compute:
+  preferred_accelerators: [cuda, directml, npu]
+  cpu_threads: 16
+  note: sklearn tree candidates are CPU-bound; complete acquisition blocks are held out
+
+models:
+  candidate_model_types_by_task:
+    contact: [extra_trees, random_forest, hist_gradient_boosting, lightgbm]
+    position: [extra_trees, random_forest, hist_gradient_boosting, lightgbm]
+    force: [extra_trees, hist_gradient_boosting, lightgbm]
+  candidate_feature_sets_by_task:
+    contact:
+      - nine_fbg_joint_75
+      - baseline_relative_264_plus_nine_fbg_joint_339
+    position:
+      - nine_fbg_joint_75
+      - baseline_relative_264_plus_nine_fbg_joint_339
+    force:
+      - baseline_relative_264_plus_nine_fbg_joint_339
+  cross_validation_tree_estimators: 120
+  final_tree_estimators: 320
+  minimum_leaf_samples: 2
+  candidate_only: true
+  deployment_status: candidate_not_deployed_pending_leave_batch_out_and_runtime_replay

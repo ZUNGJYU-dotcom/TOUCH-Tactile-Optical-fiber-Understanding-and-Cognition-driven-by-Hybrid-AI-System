@@ -31,6 +31,7 @@ from src.hybrid_spectrum.px6d_session_dataset import (  # noqa: E402
     _load_session_frame_matrix,
     _load_session_recorded_baseline,
     discover_sessions,
+    filter_session_descriptors,
 )
 
 
@@ -63,6 +64,24 @@ def parse_args() -> argparse.Namespace:
         default=ROOT / "outputs/runtime_position_replay_audit",
     )
     parser.add_argument("--sessions-per-position", type=int, default=2)
+    parser.add_argument(
+        "--software-version",
+        action="append",
+        default=[],
+        help="Only replay sessions recorded by this software version.",
+    )
+    parser.add_argument(
+        "--software-build-id",
+        action="append",
+        default=[],
+        help="Only replay sessions recorded by this exact build ID.",
+    )
+    parser.add_argument(
+        "--baseline-mode",
+        choices=("both", "recorded", "first5_median"),
+        default="both",
+        help="Select the baseline reference used by the replay audit.",
+    )
     parser.add_argument("--idle-force-max-n", type=float, default=0.03)
     parser.add_argument("--active-force-min-n", type=float, default=0.25)
     return parser.parse_args()
@@ -76,9 +95,23 @@ def _runtime_sections(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     )
 
 
-def _latest_sessions(capture_root: Path, count: int) -> tuple[Any, ...]:
+def _latest_sessions(
+    capture_root: Path,
+    count: int,
+    *,
+    software_versions: tuple[str, ...] = (),
+    software_build_ids: tuple[str, ...] = (),
+) -> tuple[Any, ...]:
     by_position: dict[str, list[Any]] = defaultdict(list)
-    for descriptor in discover_sessions(capture_root):
+    descriptors = discover_sessions(capture_root)
+    filters: dict[str, Any] = {}
+    if software_versions:
+        filters["include_software_versions"] = software_versions
+    if software_build_ids:
+        filters["include_software_build_ids"] = software_build_ids
+    if filters:
+        descriptors = filter_session_descriptors(descriptors, filters)
+    for descriptor in descriptors:
         if descriptor.position_label in POSITION_ORDER:
             by_position[descriptor.position_label].append(descriptor)
     selected: list[Any] = []
@@ -106,7 +139,12 @@ def main() -> int:
         runtime_recovery_config=recovery_config,
         runtime_gate_config=gate_config,
     )
-    sessions = _latest_sessions(args.capture_root.resolve(), args.sessions_per_position)
+    sessions = _latest_sessions(
+        args.capture_root.resolve(),
+        args.sessions_per_position,
+        software_versions=tuple(args.software_version),
+        software_build_ids=tuple(args.software_build_id),
+    )
     if len(sessions) != len(POSITION_ORDER) * args.sessions_per_position:
         raise RuntimeError("not every position has the requested number of sessions")
 
@@ -115,7 +153,12 @@ def main() -> int:
     confusion: dict[str, dict[str, Counter[str]]] = defaultdict(
         lambda: defaultdict(Counter)
     )
-    for baseline_mode in ("recorded", "first5_median"):
+    baseline_modes = (
+        ("recorded", "first5_median")
+        if args.baseline_mode == "both"
+        else (args.baseline_mode,)
+    )
+    for baseline_mode in baseline_modes:
         for descriptor in sessions:
             summary, wavelength, intensity = _load_session_frame_matrix(
                 descriptor, expected_points=512
@@ -157,14 +200,38 @@ def main() -> int:
                 raw_position = str(result["position"].get("raw_label") or "none")
                 formal_position = str(result["position"].get("label") or "none")
                 visual_position = str(result["position"].get("visual_label") or "none")
-                visual_active = bool(result["digital_twin"].get("visual_active"))
+                digital_twin = dict(result.get("digital_twin") or {})
+                visual_active = bool(digital_twin.get("visual_active"))
+                surface_metrics = dict(digital_twin.get("surface_metrics") or {})
+                observed_response = dict(
+                    result.get("observed_coupled_spectral_response") or {}
+                )
+                surface_grid = np.asarray(
+                    digital_twin.get("surface_grid") or np.zeros((3, 3)),
+                    dtype=float,
+                )
+                inferred_dominant = str(
+                    digital_twin.get("inferred_dominant_channel") or "none"
+                )
+                observed_dominant = str(
+                    observed_response.get("dominant_channel") or "none"
+                )
+                map_source = str(digital_twin.get("map_source") or "missing")
                 formal_contact = result["contact"].get("label") == "contact"
-                raw_contact = bool(result["runtime_contact_gate"].get("raw_contact_active"))
+                contact_gate = dict(result.get("runtime_contact_gate") or {})
+                coupled_signature = dict(
+                    contact_gate.get("coupled_contact_signature") or {}
+                )
+                baseline_recovery = dict(contact_gate.get("baseline_recovery") or {})
+                raw_contact = bool(contact_gate.get("raw_contact_active"))
                 counts[f"{truth_state}_frames"] += 1
                 if truth_state == "idle":
                     counts["idle_raw_contact"] += int(raw_contact)
                     counts["idle_formal_contact"] += int(formal_contact)
                     counts["idle_visual_active"] += int(visual_active)
+                    counts["idle_nonzero_surface"] += int(
+                        float(np.max(np.abs(surface_grid))) > 1.0e-9
+                    )
                 elif truth_state == "active":
                     counts["active_raw_correct"] += int(
                         raw_position == descriptor.position_label
@@ -178,6 +245,10 @@ def main() -> int:
                     counts["active_visual_covered"] += int(visual_active)
                     counts["active_visual_p23"] += int(
                         visual_position == "P23" and visual_active
+                    )
+                    counts["active_inferred_correct"] += int(
+                        inferred_dominant == descriptor.position_label
+                        and visual_active
                     )
                     predicted[visual_position if visual_active else "none"] += 1
                     confusion[baseline_mode][descriptor.position_label][
@@ -199,15 +270,162 @@ def main() -> int:
                         "raw_position_confidence": float(
                             result["position"]["raw_confidence"]
                         ),
+                        "visual_position_confidence": float(
+                            result["position"].get("visual_confidence") or 0.0
+                        ),
+                        "visual_position_margin": float(
+                            result["position"].get("visual_margin") or 0.0
+                        ),
                         "formal_position": formal_position,
                         "visual_position": visual_position,
                         "visual_active": visual_active,
+                        "map_source": map_source,
+                        "map_semantics": str(
+                            digital_twin.get("map_semantics") or "missing"
+                        ),
+                        "inferred_dominant_channel": inferred_dominant,
+                        "observed_dominant_channel": observed_dominant,
+                        "observed_response_present": bool(observed_response),
+                        "surface_peak": float(
+                            surface_metrics.get("surface_peak") or 0.0
+                        ),
+                        "surface_grid_max": float(
+                            np.max(np.abs(surface_grid))
+                        ),
+                        "observed_peak_response": float(
+                            observed_response.get("peak_response") or 0.0
+                        ),
                         "baseline_distance": float(
-                            result["runtime_contact_gate"]["baseline_distance"]
+                            contact_gate["baseline_distance"]
                         ),
                         "fresh_spectral_activity": bool(
-                            result["runtime_contact_gate"]["fresh_spectral_activity"]
+                            contact_gate.get("fresh_spectral_activity")
                         ),
+                        "spectral_activity_recent": bool(
+                            contact_gate.get("spectral_activity_recent")
+                        ),
+                        "visual_position_credible": bool(
+                            contact_gate.get("visual_position_credible")
+                        ),
+                        "visual_candidate_position": str(
+                            contact_gate.get("visual_candidate_position") or "none"
+                        ),
+                        "visual_candidate_confidence": float(
+                            contact_gate.get("visual_candidate_confidence") or 0.0
+                        ),
+                        "visual_candidate_margin": float(
+                            contact_gate.get("visual_candidate_margin") or 0.0
+                        ),
+                        "visual_signal_evidence": bool(
+                            contact_gate.get("visual_signal_evidence")
+                        ),
+                        "visual_activation_evidence": bool(
+                            contact_gate.get("visual_activation_evidence")
+                        ),
+                        "visual_activation_frames": int(
+                            contact_gate.get("visual_activation_frames") or 0
+                        ),
+                        "visual_contact_latched": bool(
+                            contact_gate.get("visual_contact_latched")
+                        ),
+                        "model_consensus_contact_probability_on": float(
+                            contact_gate.get(
+                                "model_consensus_contact_probability_on"
+                            )
+                            or 0.0
+                        ),
+                        "model_consensus_minimum_baseline_distance": float(
+                            contact_gate.get(
+                                "model_consensus_minimum_baseline_distance"
+                            )
+                            or 0.0
+                        ),
+                        "model_consensus_contact_arm_frames": int(
+                            contact_gate.get(
+                                "model_consensus_contact_arm_frames"
+                            )
+                            or 0
+                        ),
+                        "model_consensus_contact_frames": int(
+                            contact_gate.get("model_consensus_contact_frames")
+                            or 0
+                        ),
+                        "model_consensus_baseline_separated": bool(
+                            contact_gate.get(
+                                "model_consensus_baseline_separated"
+                            )
+                        ),
+                        "model_consensus_frame_evidence": bool(
+                            contact_gate.get("model_consensus_frame_evidence")
+                        ),
+                        "model_consensus_contact_evidence": bool(
+                            contact_gate.get("model_consensus_contact_evidence")
+                        ),
+                        "coupled_contact_signature_credible": bool(
+                            contact_gate.get(
+                                "coupled_contact_signature_credible"
+                            )
+                        ),
+                        "coupled_contact_measured_pattern": bool(
+                            contact_gate.get(
+                                "coupled_contact_measured_pattern"
+                            )
+                        ),
+                        "coupled_contact_model_supported_pattern": bool(
+                            contact_gate.get(
+                                "coupled_contact_model_supported_pattern"
+                            )
+                        ),
+                        "coupled_low_response_channel_count": int(
+                            coupled_signature.get(
+                                "low_response_channel_count"
+                            )
+                            or 0
+                        ),
+                        "coupled_nominal_response_channel_count": int(
+                            coupled_signature.get(
+                                "nominal_response_channel_count"
+                            )
+                            or 0
+                        ),
+                        "coupled_second_response": float(
+                            coupled_signature.get("second_response") or 0.0
+                        ),
+                        "coupled_third_response": float(
+                            coupled_signature.get("third_response") or 0.0
+                        ),
+                        "coupled_rms_response": float(
+                            coupled_signature.get("rms_response") or 0.0
+                        ),
+                        "baseline_separated": bool(
+                            contact_gate.get("baseline_separated")
+                        ),
+                        "near_runtime_baseline": bool(
+                            contact_gate.get("near_runtime_baseline")
+                        ),
+                        "slow_baseline_departure": bool(
+                            contact_gate.get("slow_baseline_departure")
+                        ),
+                        "baseline_distance_growth": float(
+                            contact_gate.get("baseline_distance_growth") or 0.0
+                        ),
+                        "shape_motion_rms": float(
+                            contact_gate.get("shape_motion_rms") or 0.0
+                        ),
+                        "common_gain_motion": float(
+                            contact_gate.get("common_gain_motion") or 0.0
+                        ),
+                        "activity_shape_motion_rms": float(
+                            contact_gate.get("activity_shape_motion_rms") or 0.0
+                        ),
+                        "activity_common_gain_motion": float(
+                            contact_gate.get("activity_common_gain_motion") or 0.0
+                        ),
+                        "recovery_suppress_contact": bool(
+                            baseline_recovery.get("suppress_contact")
+                        ),
+                        "raw_contact_active": raw_contact,
+                        "formal_contact_active": formal_contact,
                     }
                 )
 
@@ -229,6 +447,9 @@ def main() -> int:
                     "idle_visual_false_activation_rate": _safe_ratio(
                         counts["idle_visual_active"], idle_frames
                     ),
+                    "idle_nonzero_surface_rate": _safe_ratio(
+                        counts["idle_nonzero_surface"], idle_frames
+                    ),
                     "active_raw_position_accuracy": _safe_ratio(
                         counts["active_raw_correct"], active_frames
                     ),
@@ -237,6 +458,9 @@ def main() -> int:
                     ),
                     "active_visual_position_accuracy": _safe_ratio(
                         counts["active_visual_correct"], active_frames
+                    ),
+                    "active_inferred_dominant_accuracy": _safe_ratio(
+                        counts["active_inferred_correct"], active_frames
                     ),
                     "active_visual_coverage": _safe_ratio(
                         counts["active_visual_covered"], active_frames
@@ -257,7 +481,7 @@ def main() -> int:
             writer.writerows(rows)
 
     aggregate: dict[str, Any] = {}
-    for baseline_mode in ("recorded", "first5_median"):
+    for baseline_mode in baseline_modes:
         current = [row for row in frame_rows if row["baseline_mode"] == baseline_mode]
         idle = [row for row in current if row["truth_state"] == "idle"]
         active = [row for row in current if row["truth_state"] == "active"]
@@ -273,8 +497,27 @@ def main() -> int:
             "idle_visual_false_activation_rate": float(
                 np.mean([row["visual_active"] for row in idle])
             ),
+            "idle_nonzero_surface_rate": float(
+                np.mean([row["surface_grid_max"] > 1.0e-9 for row in idle])
+            ),
             "active_visual_coverage": float(
                 np.mean([row["visual_active"] for row in active])
+            ),
+            "idle_coupled_signature_credible_rate": float(
+                np.mean(
+                    [
+                        row["coupled_contact_signature_credible"]
+                        for row in idle
+                    ]
+                )
+            ),
+            "active_coupled_signature_credible_rate": float(
+                np.mean(
+                    [
+                        row["coupled_contact_signature_credible"]
+                        for row in active
+                    ]
+                )
             ),
             "active_visual_position_accuracy": float(
                 np.mean(
@@ -284,6 +527,28 @@ def main() -> int:
                         for row in active
                     ]
                 )
+            ),
+            "active_inferred_dominant_accuracy": float(
+                np.mean(
+                    [
+                        row["visual_active"]
+                        and row["inferred_dominant_channel"]
+                        == row["true_position"]
+                        for row in active
+                    ]
+                )
+            ),
+            "map_sources": dict(
+                Counter(row["map_source"] for row in current)
+            ),
+            "legacy_gaussian_map_count": sum(
+                "gaussian" in str(row["map_source"]).lower()
+                or "gaussian" in str(row["map_semantics"]).lower()
+                for row in current
+            ),
+            "missing_observed_response_count": sum(
+                not row["observed_response_present"]
+                for row in current
             ),
             "active_visual_p23_rate": float(
                 np.mean(
@@ -311,7 +576,10 @@ def main() -> int:
         "schema_version": "touch_deployed_runtime_position_replay_audit_v1",
         "model_path": str(args.model.resolve()),
         "capture_root": str(args.capture_root.resolve()),
+        "software_versions": list(args.software_version),
+        "software_build_ids": list(args.software_build_id),
         "sessions_per_position": args.sessions_per_position,
+        "baseline_modes": list(baseline_modes),
         "gate_config": gate_config,
         "aggregate": aggregate,
     }

@@ -1,0 +1,84 @@
+schema_version: ordinary_fbg_px6d_training_v2
+
+data:
+  dataset_id: ordinary_fbg_px6d_20260831_high_sensitivity_300us_v1
+  source_policy: strict_single_capture_root
+  required_capture_root_name: "new data"
+  include_session_id_prefixes: ["20260831_"]
+  required_session_id_prefix: "20260831_"
+  required_software_version: "0.19.12-beta"
+  required_software_build_id: "beta-bayspec-high-sensitivity-300us-v19-12-20260831"
+  required_optical_source: "direct_bayspec_usb20bs_sdk_helper"
+  required_integration_us: 300
+  require_qa_for_every_session: true
+  provenance_hash_algorithm: sha256
+  provenance_files:
+    - session_metadata.json
+    - frame_summary.csv
+    - spectrum_timeseries.csv
+  expected_spectrum_points: 512
+  force_target_field: force_fz_n
+  position_source: session_metadata.position_label
+  formal_group_field: session_id
+  split_strategy: grouped_by_session_id
+  random_frame_split_allowed: false
+  historical_data_policy: reference_only_not_used_for_fit_or_selection
+  primary_selection:
+    mode: all_sessions
+
+acquisition:
+  sensor_mode_code: 0
+  sensor_mode_label: High Sensitivity
+  integration_us: 300
+  software_build_id: beta-bayspec-high-sensitivity-300us-v19-12-20260831
+  note: >-
+    This acquisition domain is trained and validated independently. Earlier
+    exposure modes and acquisition dates are reference-only and must not enter
+    fitting, threshold selection, or candidate selection.
+
+baseline:
+  search_fraction: 0.20
+  maximum_force_n: 0.03
+  minimum_frames: 5
+  fallback_lowest_force_frames: 10
+
+labels:
+  no_contact_max_force_n: 0.03
+  contact_min_force_n: 0.10
+  position_min_force_n: 0.25
+  position_order: [P11, P21, P31, P12, P22, P32, P13, P23, P33]
+
+quality:
+  release_tail_warning_code: release_recovery_residual
+  release_tail_exclusion_fraction: 0.15
+  minimum_frames_per_session: 20
+  maximum_sync_offset_ms: 250.0
+
+features:
+  downsample_bins: 64
+  feature_sets:
+    baseline_relative_192:
+      include_derivative: false
+      include_global_summary: false
+    baseline_relative_264:
+      include_derivative: true
+      include_global_summary: true
+
+evaluation:
+  folds: 5
+  random_seed: 42
+  session_level_position_voting: true
+  training_weight_strategy: equal_session_mass
+  classification_class_weight: balanced
+
+models:
+  candidate_model_types:
+    - extra_trees
+    - random_forest
+    - lightgbm
+    - hist_gradient_boosting
+  cross_validation_tree_estimators: 160
+  final_tree_estimators: 320
+  minimum_leaf_samples: 2
+  candidate_only: true
+  deployment_status: candidate_not_deployed_pending_live_validation

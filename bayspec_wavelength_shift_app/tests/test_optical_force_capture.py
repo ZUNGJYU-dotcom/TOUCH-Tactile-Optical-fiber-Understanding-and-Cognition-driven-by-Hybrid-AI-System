@@ -118,7 +118,14 @@ def model_response(record: dict) -> dict:
             "confidence": 0.91,
             "probabilities": {"no_contact": 0.09, "contact": 0.91},
         },
-        "position": {"label": "P22", "confidence": 0.82},
+        "position": {
+            "label": "P21",
+            "confidence": 0.62,
+            "visual_label": "P22",
+            "visual_confidence": 0.82,
+            "visual_margin": 0.41,
+            "raw_label": "P13",
+        },
         "response_level": {
             "label": "normal",
             "confidence": 0.75,
@@ -133,6 +140,7 @@ def model_response(record: dict) -> dict:
         "force_fz": {
             "estimated_n": 0.73,
             "raw_estimated_n": 0.77,
+            "visual_drive_n": 0.71,
             "unit": "N",
             "gated": False,
             "runtime_input": "optical_spectrum_time_series",
@@ -143,6 +151,12 @@ def model_response(record: dict) -> dict:
             "reasons": ["position_confidence_low"],
         },
         "inference_latency_ms": 3.4,
+        "digital_twin": {
+            "visual_active": True,
+            "position_id": "P22",
+            "drive_force_n": 0.71,
+            "position_source": "contact_episode_position_lock",
+        },
     }
 
 
@@ -159,6 +173,109 @@ def unique_timeline(path: Path) -> dict[int, tuple[float, float]]:
 
 
 class OpticalForceCaptureTests(unittest.TestCase):
+    def test_nondurable_transaction_defers_flush_until_batch_commit(self) -> None:
+        class TrackingBuffer(io.StringIO):
+            def __init__(self) -> None:
+                super().__init__()
+                self.flush_count = 0
+
+            def flush(self) -> None:
+                self.flush_count += 1
+                super().flush()
+
+        handle = TrackingBuffer()
+        _write_text_transaction([(handle, "frame-one\n")], durable=False)
+        self.assertEqual(handle.getvalue(), "frame-one\n")
+        self.assertEqual(handle.flush_count, 0)
+
+        _write_text_transaction([(handle, "frame-two\n")], durable=True)
+        self.assertEqual(handle.getvalue(), "frame-one\nframe-two\n")
+        self.assertEqual(handle.flush_count, 1)
+
+    def test_deferred_response_rows_preserve_raw_capture_rate_and_audit_state(
+        self,
+    ) -> None:
+        def deferred_response(_record: dict) -> dict:
+            return {
+                "model_source": "deployed_test_model",
+                "model_status": "capture_response_deferred",
+                "model_ready": False,
+                "capture_response_source": "deferred_for_high_rate_capture",
+                "capture_response_frame_match": False,
+                "capture_response_deferred_reason": (
+                    "same_frame_runtime_prediction_not_cached"
+                ),
+                "raw_spectrum_authoritative": True,
+                "offline_reconstruction_supported": True,
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = OpticalForceCaptureManager(
+                output_root=Path(temporary),
+                frame_provider=FakeSpectrumSource().frame,
+                force_provider=aligned_force,
+                force_status_provider=lambda: {"connected": True, "tare_ready": True},
+                model_provider=deferred_response,
+                poll_interval_sec=0.01,
+                durable_flush_interval_sec=0.25,
+                durable_flush_frame_count=10,
+            )
+            self.assertTrue(manager.start()["ok"])
+            time.sleep(0.08)
+            stopped = manager.stop()
+
+            frame_count = int(stopped["captured_timeline_frames"])
+            self.assertGreater(frame_count, 0)
+            self.assertEqual(stopped["response_deferred_rows"], frame_count)
+            self.assertEqual(stopped["response_same_frame_cache_rows"], 0)
+            self.assertIsNotNone(stopped["captured_frame_rate_hz"])
+            self.assertEqual(stopped["last_durable_capture_index"], frame_count - 1)
+            self.assertGreaterEqual(stopped["durable_flush_count"], 1)
+
+            output_dir = Path(stopped["output_directory"])
+            with (output_dir / "tactile_response_timeseries.csv").open(
+                encoding="utf-8-sig",
+                newline="",
+            ) as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(
+                row["capture_response_source"],
+                "deferred_for_high_rate_capture",
+            )
+            self.assertEqual(row["capture_response_frame_match"], "False")
+            self.assertEqual(row["raw_spectrum_authoritative"], "True")
+            self.assertEqual(row["offline_reconstruction_supported"], "True")
+            self.assertEqual(row["model_timestamp_epoch_sec"], "")
+
+    def test_response_only_retains_raw_spectrum_in_lossless_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = OpticalForceCaptureManager(
+                output_root=Path(temporary),
+                frame_provider=FakeSpectrumSource().frame,
+                force_provider=aligned_force,
+                force_status_provider=lambda: {"connected": True, "tare_ready": True},
+                model_provider=lambda _record: {
+                    "model_status": "capture_response_deferred",
+                    "model_ready": False,
+                    "capture_response_source": "deferred_for_high_rate_capture",
+                    "raw_spectrum_authoritative": True,
+                    "offline_reconstruction_supported": True,
+                },
+                poll_interval_sec=0.01,
+            )
+            self.assertTrue(manager.start(selected_outputs=["response"])["ok"])
+            time.sleep(0.04)
+            stopped = manager.stop()
+
+            output_dir = Path(stopped["output_directory"])
+            self.assertFalse((output_dir / "spectrum_timeseries.csv").exists())
+            with (output_dir / "synchronized_frames.jsonl").open(
+                encoding="utf-8"
+            ) as handle:
+                first = json.loads(handle.readline())
+            self.assertEqual(first["spectrum"]["wavelength_nm"], [1546.8, 1546.9, 1547.0])
+            self.assertEqual(first["spectrum"]["intensity_counts"], [100.0, 140.0, 105.0])
+
     def test_force_target_preserves_continuous_fz_without_class_binning(self) -> None:
         self.assertAlmostEqual(
             _continuous_force_fz_n({"conditioned_reference_fz_n": 0.347}),
@@ -790,6 +907,11 @@ class OpticalForceCaptureTests(unittest.TestCase):
             self.assertEqual(float(row["fx_filtered_n"]), 0.04)
             self.assertEqual(float(row["filtered_force_resultant_n"]), 0.795)
             self.assertEqual(row["predicted_position_label"], "P22")
+            self.assertEqual(row["display_contact_active"], "True")
+            self.assertEqual(row["display_position_label"], "P22")
+            self.assertEqual(row["formal_position_label"], "P21")
+            self.assertEqual(row["raw_position_label"], "P13")
+            self.assertAlmostEqual(float(row["display_optical_force_n"]), 0.71)
             self.assertEqual(row["predicted_response_level"], "normal")
             self.assertAlmostEqual(float(row["optical_estimated_fz_n"]), 0.73)
             self.assertAlmostEqual(float(row["optical_raw_estimated_fz_n"]), 0.77)
@@ -827,6 +949,13 @@ class OpticalForceCaptureTests(unittest.TestCase):
             )
             self.assertAlmostEqual(
                 float(response_row["optical_raw_estimated_fz_n"]), 0.77
+            )
+            self.assertEqual(response_row["predicted_position_label"], "P22")
+            self.assertEqual(response_row["display_position_label"], "P22")
+            self.assertEqual(response_row["formal_position_label"], "P21")
+            self.assertEqual(response_row["raw_position_label"], "P13")
+            self.assertAlmostEqual(
+                float(response_row["display_optical_force_n"]), 0.71
             )
 
             with force_path.open(encoding="utf-8-sig", newline="") as handle:

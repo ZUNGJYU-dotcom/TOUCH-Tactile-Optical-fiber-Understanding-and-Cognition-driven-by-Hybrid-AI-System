@@ -4166,15 +4166,25 @@ button.active-watch,
   font-weight: 700;
 }
 
-.settings-select-row select {
+.settings-select-row select,
+.settings-select-row input[type="number"] {
   min-width: 96px;
   height: 32px;
-  padding: 0 30px 0 10px;
+  padding: 0 10px;
   border: 1px solid #c9dbe8;
   border-radius: 6px;
   background: #ffffff;
   color: #24465e;
   font: inherit;
+}
+
+.settings-select-row select {
+  padding-right: 30px;
+}
+
+.settings-select-row input[type="number"] {
+  width: 118px;
+  text-align: right;
 }
 
 .settings-toggle-row {
@@ -4217,7 +4227,8 @@ button.active-watch,
 }
 
 .settings-toggle-row input[type="checkbox"]:focus-visible,
-.settings-select-row select:focus-visible {
+.settings-select-row select:focus-visible,
+.settings-select-row input[type="number"]:focus-visible {
   outline: 3px solid rgba(22, 143, 189, 0.15);
   outline-offset: 2px;
 }

@@ -96,6 +96,15 @@ all_source_runtime_gate:
   # accuracy at confidence >= 0.45. A margin check rejects tied corner guesses.
   position_confidence_min: 0.45
   position_margin_min: 0.08
+
+  # Slow low-force presses can be nearly stationary from one BaySpec frame to
+  # the next, so per-frame motion alone misses them. A second path admits
+  # contact only when the contact model, the formal position model, and a
+  # small but measurable departure from the current-session baseline agree for
+  # two consecutive physical spectra. No individual signal can activate it.
+  model_consensus_contact_probability_on: 0.70
+  model_consensus_minimum_baseline_distance: 0.0025
+  model_consensus_contact_arm_frames: 2
   # A verified contact may still animate at the best low-confidence location.
   # Formal position output remains unaccepted until the stricter thresholds pass.
   visual_position_fallback_enabled: true

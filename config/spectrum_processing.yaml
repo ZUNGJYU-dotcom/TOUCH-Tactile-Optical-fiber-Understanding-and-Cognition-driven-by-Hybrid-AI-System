@@ -1,5 +1,6 @@
 spectrum_processing:
-  integration_us: 5000
+  integration_us: 300
+  sensor_mode: 0
   update_overlay_data: true
   subtract_background: false
   baseline_correction: true
@@ -11,6 +12,7 @@ spectrum_processing:
   model_input_source: raw_intensity
 
 notes:
+  acquisition_default: "Beta starts BaySpec in High Sensitivity mode (sensor mode 0) at 300 us exposure; both settings remain operator-adjustable."
   raw_data_policy: "Raw BaySpec intensity is retained for recognition and recording."
   display_policy: "When an accepted no-contact reference exists, the chart can display wavelength-aligned I/I0; otherwise it falls back to display_intensity."
   normalization_policy: "Normalization is I(lambda,t)/I0(lambda) against a stable no-contact spectrum. Per-frame min-max normalization is forbidden."

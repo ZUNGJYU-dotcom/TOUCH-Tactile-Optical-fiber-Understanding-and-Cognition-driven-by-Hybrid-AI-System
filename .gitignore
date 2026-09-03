@@ -34,10 +34,12 @@ data collection/
 # Delivery archives are published separately when needed
 *.zip
 bayspec_wavelength_shift_app/release_artifacts/
+bayspec_wavelength_shift_app/release_packages/
 
 # Generated reports and experimental model candidates stay local until promoted
 outputs/
 models/archive/
+models/rollback/
 models/candidates/archive/
 models/candidates/*.joblib
 models/candidates/*.json

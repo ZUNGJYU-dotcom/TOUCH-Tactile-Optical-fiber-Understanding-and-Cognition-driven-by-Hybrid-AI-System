@@ -57,9 +57,42 @@ def test_frozen_beta_bundle_carries_only_the_current_runtime_model() -> None:
     assert "ordinary_fbg_optical_only_force_candidate.joblib" not in beta_spec
     assert "beta_all_data_runtime.flag" not in beta_spec
     assert 'EXPECTED_BACKEND_APP = "TOUCH"' in launcher
-    assert 'EXPECTED_BACKEND_MODE = "standalone_touch_all_data_spectral_runtime"' in launcher
+    assert 'EXPECTED_BACKEND_MODE = "standalone_touch_high_sensitivity_300us_spectral_runtime"' in launcher
     assert 'EXPECTED_BACKEND_CONTRACT_VERSION = "touch_current_runtime_api_v1"' in launcher
-    assert 'EXPECTED_RUNTIME_MODEL = "ordinary_fbg_all_data_beta_v1"' in launcher
+    assert 'EXPECTED_RUNTIME_MODEL = "ordinary_fbg_same_day_joint_nine_fbg_beta_v4"' in launcher
+
+
+def test_portable_beta_is_a_true_one_file_release() -> None:
+    portable_spec = (
+        APP_ROOT / "desktop_launcher_beta_portable_onefile.spec"
+    ).read_text(encoding="utf-8")
+
+    assert "ordinary_fbg_current_runtime.joblib" in portable_spec
+    assert "ordinary_fbg_current_runtime.deployment.json" not in portable_spec
+    assert 'with_suffix(".deployment.json")' in portable_spec
+    assert '(str(app_dir / "sdk_probe"), "sdk_probe")' in portable_spec
+    assert 'release_manifests" / "beta" / "VERSION.json"' in portable_spec
+    assert "a.binaries" in portable_spec
+    assert "a.datas" in portable_spec
+    assert "COLLECT(" not in portable_spec
+    assert '"pandas"' in portable_spec
+    assert "ordinary_fbg_optical_only_force_candidate.joblib" not in portable_spec
+
+
+def test_portable_installer_is_current_user_scoped() -> None:
+    project_root = APP_ROOT.parent
+    installer = (project_root / "scripts" / "install_touch_beta.ps1").read_text(
+        encoding="utf-8"
+    )
+    uninstaller = (
+        project_root / "scripts" / "uninstall_touch_beta.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert '$env:LOCALAPPDATA "Programs\\TOUCH Beta"' in installer
+    assert "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall" in installer
+    assert "TOUCH Beta.lnk" in installer
+    assert "ordinary_fbg" not in installer
+    assert "Refusing unsafe uninstall root" in uninstaller
 
 
 def test_stable_package_remains_a_separate_release_channel() -> None:
@@ -69,6 +102,11 @@ def test_stable_package_remains_a_separate_release_channel() -> None:
 
     assert 'release_manifests" / "stable" / "VERSION.json"' in stable_spec
     assert 'release_manifests" / "beta" / "VERSION.json"' not in stable_spec
+    assert "ordinary_fbg_current_runtime.joblib" in stable_spec
+    assert "deployment_metadata" in stable_spec
+    assert '"runtime_contact_state_stable.yaml"' in stable_spec
+    assert "src.hybrid_spectrum.joint_nine_fbg_features" in stable_spec
+    assert "src.hybrid_spectrum.runtime_channel_response" in stable_spec
 
 
 def test_borderless_window_restores_native_taskbar_toggle_contract() -> None:

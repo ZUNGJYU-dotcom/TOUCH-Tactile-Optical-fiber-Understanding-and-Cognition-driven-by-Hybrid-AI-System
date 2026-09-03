@@ -44,7 +44,7 @@ CURRENT_CARRIER_ROLE = "full_spectrum_transport_for_current_runtime"
 CURRENT_GLOBAL_BASELINE_SCOPE = "current_runtime_global_spectrum_baseline"
 DEFAULT_CHANNEL_CONFIG = {
     "app": {
-        "mode": "standalone_touch_all_data_spectral_runtime",
+        "mode": "standalone_touch_high_sensitivity_300us_spectral_runtime",
         "edition": "current_all_data_spectral_runtime",
         "recognition_scope": CURRENT_RECOGNITION_SCOPE,
         "array_mode": ARRAY_MODE,
@@ -830,7 +830,8 @@ class BaySpecWavelengthShiftBridge:
                     "shift_response_ratio = absolute_shift_pm / visualization_full_scale_pm",
                 ],
                 "response_output": (
-                    "continuous optical Fz estimate from the deployed all-data runtime; "
+                    "continuous optical Fz estimate from the deployed same-day joint "
+                    "nine-FBG runtime; "
                     "PX6D is training supervision and diagnostics only"
                 ),
                 "wavelength_shift_config": dict(WAVELENGTH_SHIFT_CONFIG),
@@ -1706,6 +1707,8 @@ class BaySpecWavelengthShiftBridge:
         self,
         channel_id: str,
         records: list[dict[str, Any]],
+        *,
+        replace_trusted_session_anchor: bool = False,
     ) -> bool:
         wavelengths: list[float] = []
         for record in records:
@@ -1782,11 +1785,29 @@ class BaySpecWavelengthShiftBridge:
                 "stable_post_release_recovery_baseline",
                 "stable_post_release_recovery_baseline_with_warning",
             }
+            had_trusted_anchor = (
+                channel_id in self.trusted_baseline_anchor_spectrum_by_channel
+            )
             anchor_assessment = self._assess_recovery_baseline_against_anchor(
                 channel_id,
                 reference_x,
                 median_spectrum,
             )
+            if (
+                replace_trusted_session_anchor
+                and had_trusted_anchor
+                and spectrum_status in accepted_internal_statuses
+            ):
+                previous_status = str(anchor_assessment.get("status") or "unknown")
+                self.trusted_baseline_anchor_spectrum_by_channel[channel_id] = {
+                    "wavelength_nm": reference_x.astype(float).tolist(),
+                    "intensity": median_spectrum.astype(float).tolist(),
+                }
+                anchor_assessment = {
+                    **anchor_assessment,
+                    "status": "trusted_anchor_replaced_by_operator_attestation",
+                    "previous_status": previous_status,
+                }
             self.baseline_anchor_comparison_by_channel[channel_id] = anchor_assessment
             if spectrum_status in accepted_internal_statuses and anchor_assessment[
                 "status"
@@ -2983,6 +3004,9 @@ class BaySpecWavelengthShiftBridge:
     def set_baseline(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
         spectrum_attempted_channels: set[str] = set()
+        replace_trusted_session_anchor = (
+            payload.get("replace_trusted_session_anchor") is True
+        )
         minimum_recent_samples_raw = payload.get("minimum_recent_samples")
         try:
             minimum_recent_samples = (
@@ -3025,7 +3049,9 @@ class BaySpecWavelengthShiftBridge:
                 if recent_records:
                     spectrum_attempted_channels.add(channel)
                     wavelength_baseline_accepted = self._set_wavelength_baseline_from_records(
-                        channel, recent_records
+                        channel,
+                        recent_records,
+                        replace_trusted_session_anchor=replace_trusted_session_anchor,
                     )
                 if intensity is not None and wavelength_baseline_accepted:
                     self._set_baseline_from_values(channel, [float(intensity)], method=requested_method)
@@ -3053,7 +3079,9 @@ class BaySpecWavelengthShiftBridge:
                     )
                     spectrum_attempted_channels.add(channel)
                     wavelength_baseline_accepted = self._set_wavelength_baseline_from_records(
-                        channel, recent_records
+                        channel,
+                        recent_records,
+                        replace_trusted_session_anchor=replace_trusted_session_anchor,
                     )
                     values = [
                         value
@@ -3134,6 +3162,11 @@ class BaySpecWavelengthShiftBridge:
             ),
             "baseline_spectrum_semantic_role_by_channel": dict(
                 sorted(self.baseline_spectrum_semantic_role_by_channel.items())
+            ),
+            "trusted_session_anchor_replaced": any(
+                str(item.get("status") or "")
+                == "trusted_anchor_replaced_by_operator_attestation"
+                for item in self.baseline_anchor_comparison_by_channel.values()
             ),
             "baseline_anchor_comparison_by_channel": dict(
                 sorted(self.baseline_anchor_comparison_by_channel.items())

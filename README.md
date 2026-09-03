@@ -1,13 +1,13 @@
 # TOUCH
 
 Research software for optical-fiber tactile sensing. The current Stable Operator
-runtime uses a trained ordinary-FBG 512-point BaySpec/Sense all-data model to
-estimate:
+runtime uses a trained ordinary-FBG 512-point BaySpec/Sense High Sensitivity /
+300 us joint nine-FBG model to estimate:
 
 - contact or no contact;
 - approximate manual contact position `P11`-`P33`;
 - continuous optical `Fz` with no fixed software display/output ceiling; the
-  current model has only been validated on 0-5 N supervision.
+  current model was trained with approximately 0-6.98 N supervision.
 
 The model consumes optical features only at runtime. PX6D `Fz` was used as
 synchronized training and validation supervision and is not required for
@@ -30,71 +30,78 @@ optical-response proxy rather than calibrated force or pressure. See
 [docs/mfbg_intensity_profile.md](docs/mfbg_intensity_profile.md) for the
 demodulation, frame, recording, and activation contracts.
 
-## Latest Update - v0.19.7 Stable
+## Latest Update - v0.19.25 Stable
 
-The v0.19.7 Stable and Beta packages remove a corrupted source-status separator
-that could render as a Chinese character in labels such as `SDK idle`. Source
-states now use ASCII text such as `SDK | idle`; models, acquisition, and
-recognition behavior are unchanged. Stable uses the
-same three-date optical model, continuous optical `Fz` estimator, interface,
-and device contracts as Beta. Its portable package contains only the current
-deployed model and has no legacy inference fallback.
+Stable v0.19.25 promotes the user-tested v0.19.25 Beta runtime without changing
+the deployed model artifact. Contact uses LightGBM over the complete
+baseline-relative spectrum plus the joint nine-FBG fingerprint, position uses
+a random forest over the joint fingerprint, and optical `Fz` uses histogram
+gradient boosting. Runtime inference remains optical-only; PX6D is supervision
+and diagnostics, never an inference input.
 
-Every new live or watched acquisition now clears cross-session optical
-references and establishes its baseline from five stable spectra in the
-current session. Two consecutive physical spectra are required before a
-low-force visual response or a new position can drive the digital twin. In the
-nine-position replay audit this removed idle visual activation and eliminated
-non-P23 inputs being displayed as P23 without changing model weights.
+The model contains 49,853 same-day High Sensitivity / 300 us frames from 161
+complete sessions. Blind2 is excluded. The formerly blind Blind1, Blind3, and
+Blind4 batches were used during model development and are therefore not
+claimed as independent blind evidence.
 
-Data recording now exposes a local `Zero` command beside the Force Sensor
-value. It uses the same PX6D software zero as the Force and Diagnostics views,
-then immediately refreshes recording readiness. Start remains clickable while
-setup is incomplete and reports the exact missing requirement; it still
-refuses to record until the selected position, requested streams, live optical
-frame, force zero, and destination folder are valid.
+The exact runtime replay produced zero activations in 10,589 dedicated-idle
+frames, 99.85% active-contact coverage, and no emitted wrong-position frame.
+Every emitted position was correct in this answer-known replay; 44 uncertain
+frames were withheld during confirmation. Grouped out-of-file evaluation
+reported 98.06% raw position accuracy and 0.310 N force MAE.
 
-The Stable runtime deploys the latest all-data optical bundle: temporal optical
-context supports contact and nine-position inference, while the current-frame
-optical head estimates `Fz`. Grouped evaluation is by `session_id`; force-sensor
-measurements are never model inputs.
+The release-latch repair ignores late concurrent SDK frames instead of
+rewinding temporal state. If the contact classifier remains saturated after
+release, contact can also clear only after the complete nine-FBG spectrum has
+recovered at least 60% from an armed contact peak and remained quiet with low
+spatial confidence for two physical frames spanning at least 180 ms. The
+trained clean-session baseline remains fixed.
 
-The live runtime now requires fresh full-spectrum activity or credible spatial
-evidence before accepting a learned contact prediction. Stable residual drift
-is therefore returned to `no_contact`, with optical force reset to zero and no
-position emitted. Position probabilities are smoothed and checked for
-confidence and margin before the digital twin moves to another array location.
-After a stationary release, the runtime reference can be re-anchored without
-changing the trained model.
-
-Low position confidence is no longer an immediate release signal. Brief
-uncertainty preserves a real contact, while a stationary residual with no new
-spectral activity and no credible spatial fingerprint returns to `no_contact`
-after about one second. Slow baseline drift alone cannot re-arm contact. A
-provisional visual location is established only around real spectral activity
-and held through quiet classifier jitter; the formal position result remains
-unaccepted and no unknown contact is forced to P22.
-
-The built-in demonstration now replays synchronized real 512-point BaySpec
-spectra. Its nine spectral peaks are discovered automatically from the robust
-no-contact median and tracked locally in every frame. The provisional spectral
-assignment follows ascending wavelength order:
-
-```text
-P11, P12, P13, P21, P22, P23, P31, P32, P33
-```
-
-This wavelength-order assignment is separate from the 3x3 screen layout and is
-not a final measured physical channel map. The complete automated suite passes
-with 490 tests and 172 subtests.
+Stable has an isolated copy of the validated contact-state configuration and a
+separate High Sensitivity / 300 us user-settings file. Old Stable preferences
+and future Beta experiments cannot silently change its acquisition behavior.
+The promotion capture ended released after 54 live frames and then produced
+zero false activation across 31 additional idle frames.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete release summary.
 
-## Retained Beta - v0.19.7-beta
+## Download Stable v0.19.25
 
-The validated Beta package is retained locally as a rollback build. Stable and
-Beta use the same model and runtime logic; their release manifests and desktop
-shortcuts remain separate.
+Download the single-file Windows x64 application from the
+[v0.19.25 GitHub release](https://github.com/ZUNGJYU-dotcom/TOUCH-Tactile-Optical-fiber-Understanding-and-Cognition-driven-by-Hybrid-AI-System/releases/tag/v0.19.25):
+
+```text
+TOUCH-Stable-v0.19.25-Windows-x64.exe
+```
+
+Published artifact:
+
+| Property | Value |
+| --- | --- |
+| Size | 103,285,538 bytes (98.50 MiB) |
+| SHA-256 | `7963470D59CDA9541EDC7120F66B342D2A451190EB2EE0AC0182D8B139B4EF94` |
+
+The EXE embeds the current model, deployment metadata, Python runtime, frontend
+and 3D assets, runtime configuration, BaySpec x86 acquisition helper, and the
+vendor user-mode SDK DLL. No neighboring `_internal` directory or Python
+installation is required. Run the offline package check before connecting
+hardware:
+
+```powershell
+& '.\TOUCH-Stable-v0.19.25-Windows-x64.exe' --self-test
+```
+
+The matching BaySpec Windows USB driver and the PX6D serial/USB driver remain
+system-level prerequisites. See [docs/PORTABLE_RELEASE.md](docs/PORTABLE_RELEASE.md)
+for the transfer checklist and
+[the v0.19.7-to-v0.19.25 iteration report](docs/TOUCH_STABLE_V0197_TO_V01925_ITERATION_REPORT_20260903.md)
+for the evidence-bounded comparison.
+
+## Retained Beta - v0.19.25-beta
+
+The validated Beta package remains installed as a separate release channel.
+The v0.19.23 executable and its prior model are also retained as the immediate
+rollback path.
 
 ## Diagnostics Measurement Analysis
 
@@ -135,11 +142,13 @@ demodulation contract.
 
 ```text
 current 512-point full spectrum
-  + trailing optical context
-  + stable current-session post-release recovery baseline
-  -> optical contact detector
-  -> optical 9-position classifier
-  -> optical Fz estimator (unbounded display; 0-5 N validated range)
+  + fixed current-session settled baseline
+  + 264 baseline-relative complete-spectrum features
+  + 75 joint features from all nine FBG candidates
+  -> LightGBM optical contact detector
+  -> random-forest 9-position classifier
+  -> histogram-gradient-boosting optical Fz estimator
+     (unbounded display; approximately 0-6.98 N training range)
   -> continuous digital-twin response
 ```
 
@@ -153,65 +162,29 @@ released and the sensor recovered. They are therefore recovery-state
 baselines, not ideal cold-start baselines. Live inference requires the user to
 release contact, wait for a stable spectrum, and set a multi-frame baseline.
 
-## Current Baseline Results
+## Current Stable Results
 
-Evaluation uses leave-one-repeat-index-out groups over independent static CSV
-files. Random snapshot splitting is not used.
+Evaluation groups complete acquisition sessions; random adjacent-frame splits
+are not used. Stable v0.19.25 contains exactly one hash-bound current model.
 
 | Output | Selected Stable model | Grouped result |
 | --- | --- | ---: |
-| contact | temporal Extra Trees | 94.13% macro-F1 |
-| position | temporal Extra Trees | 98.85% macro-F1 |
-| optical Fz | current-frame Extra Trees | 0.268 N MAE |
+| contact | LightGBM, full spectrum + joint nine-FBG | 96.29% macro-F1 |
+| position | random forest, joint nine-FBG | 98.06% accuracy / 98.05% macro-F1 |
+| optical Fz | histogram gradient boosting | 0.310 N MAE / 0.929 R2 |
 
-These are single-session baseline results. They are not a final cross-session
-generalization claim. The position model was stable across the available early
-and late recovery-baseline fixtures; force-level inference remains more
-baseline-sensitive and needs a fresh stable baseline in each session.
-
-## V7 Fused-Shift Agreement Candidate
-
-The deployed bundle remains unchanged. A separate v7 candidate runs beside it
-in shadow mode and cannot control the Operator UI or digital-twin deformation.
-Its position head uses only the nine signed, per-frame-normalized fused
-common-mode-corrected FBG shifts. Logistic Regression, shrinkage LDA, and a
-linear SVM vote on the position. Reported position confidence is the
-uncalibrated member vote fraction, not a probability.
-
-Strict old-to-new capture evaluation produced 0.908 position macro-F1; the
-reverse new-to-old challenge produced 0.902. Unanimous position votes covered
-81.1% of challenge spectra and were 95.4% accurate. Response-level macro-F1
-was 0.792, with hard-response recall 1.000; cross-session light/normal scaling
-is still unresolved. The candidate therefore requires labeled live validation
-and has not been promoted.
-
-For auditable live comparison:
-
-```powershell
-.\.venv\Scripts\python.exe scripts\record_live_shadow_comparison.py `
-  --base-url http://127.0.0.1:8640 `
-  --duration-sec 10 `
-  --expected-position P22 `
-  --expected-force normal
-```
-
-Baseline capture is never implicit. The optional `--set-baseline-first` flag
-also requires `--confirm-sensor-released`.
-
-The Operator UI uses the default `GET /api/global_spectrum_frame` request,
-which does not run the candidate. Shadow inference is opt-in through
-`include_shadow=true`; the validation script sets this flag automatically.
-This keeps candidate evaluation from adding latency to the deployed display.
-The shadow result also includes a five-unique-frame diagnostic vote, with
-three contact frames required and two release frames required. It remains
-diagnostic-only and cannot drive the UI or deformation.
+The exact same-day runtime replay produced zero activations in 10,589 dedicated
+idle frames, 99.85% active-contact coverage, and zero emitted wrong-position
+frames. Blind1, Blind3, and Blind4 are answer-known development data in this
+release, so these replay figures are deployment verification rather than
+independent blind evidence. A new-date external validation remains required.
 
 ## Scientific Boundary
 
 - The Stable optical model outputs an experimental `Fz` estimate learned from
   synchronized PX6D supervision; it is not a certified force measurement.
-- Runtime output and the force legend have no fixed 5 N ceiling. Values above
-  5 N are explicitly outside the current validated range and require higher
+- Runtime output and the force legend have no fixed upper ceiling. Values above
+  approximately 6.98 N are outside the current training range and require higher
   force PX6D data before they can be treated as quantitatively reliable.
 - The optical model does not output calibrated pressure or displacement.
 - `PX6D Reference Fz` is an independently measured ground-truth label in N;
@@ -219,8 +192,8 @@ diagnostic-only and cannot drive the UI or deformation.
 - Static snapshots do not support tap, slide, or release-dynamics recognition.
 - The visual surface is a digital-twin proxy driven by model output, not a
   measured pressure field.
-- The current trained model is a single-session baseline pending multi-session
-  validation.
+- The current trained model covers 161 same-day sessions and remains pending
+  new-date independent validation.
 
 ## Layout
 
@@ -243,12 +216,9 @@ cd bayspec_wavelength_shift_app
 run_desktop.bat
 ```
 
-For the packaged Windows build, download
-`TOUCH-v0.19.7-stable-windows-x64.zip` from the release, extract the complete
-`TOUCH` folder, and run `TOUCH\TOUCH.exe`. Do not move only the executable out
-of the extracted folder because its bundled runtime and assets are required.
-The promoted model is bundled in that release package; the 118 MB joblib is
-not stored as an ordinary Git blob because it exceeds GitHub's per-file limit.
+For the packaged Windows build, download and run the single file
+`TOUCH-Stable-v0.19.25-Windows-x64.exe` from the v0.19.25 release. The model,
+frontend, configuration, SDK helper, and user-mode SDK DLL are embedded.
 
 Generate the full guided validation plan without touching hardware:
 
@@ -267,7 +237,7 @@ wavelength-shift application.
 ## Validate
 
 ```powershell
-D:\anaconda\miniconda3\python.exe -m unittest discover -s tests -p "test_*.py" -v
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 ## PX6D Optical-Force Synchronization

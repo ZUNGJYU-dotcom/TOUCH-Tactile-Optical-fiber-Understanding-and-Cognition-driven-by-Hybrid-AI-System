@@ -462,6 +462,41 @@ def discover_sessions(path: Path) -> list[Path]:
     )
 
 
+def filter_sessions_by_software(
+    sessions: Iterable[Path],
+    *,
+    software_version: str | None = None,
+    software_build_id: str | None = None,
+) -> list[Path]:
+    """Select one immutable acquisition build from a shared capture root."""
+
+    expected_version = str(software_version or "").strip()
+    expected_build = str(software_build_id or "").strip()
+    if not expected_version and not expected_build:
+        return list(sessions)
+
+    selected: list[Path] = []
+    for session in sessions:
+        try:
+            metadata = json.loads(
+                (session / "session_metadata.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            continue
+        software = dict(
+            ((metadata.get("provenance") or {}).get("start") or {}).get(
+                "software"
+            )
+            or {}
+        )
+        if expected_version and str(software.get("version") or "") != expected_version:
+            continue
+        if expected_build and str(software.get("build_id") or "") != expected_build:
+            continue
+        selected.append(session)
+    return selected
+
+
 def write_reports(results: list[dict[str, Any]], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     trial_counts = Counter(
@@ -596,10 +631,17 @@ def main() -> int:
     parser.add_argument("--minimum-frames", type=int, default=20)
     parser.add_argument("--maximum-sync-offset-ms", type=float, default=250.0)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--software-version", default=None)
+    parser.add_argument("--software-build-id", default=None)
     args = parser.parse_args()
 
     capture_path = args.capture_path.expanduser().resolve()
-    sessions = discover_sessions(capture_path)
+    discovered_sessions = discover_sessions(capture_path)
+    sessions = filter_sessions_by_software(
+        discovered_sessions,
+        software_version=args.software_version,
+        software_build_id=args.software_build_id,
+    )
     if not sessions:
         print(
             json.dumps(
@@ -607,6 +649,9 @@ def main() -> int:
                     "ok": False,
                     "reason": "no_session_metadata_found",
                     "capture_path": str(capture_path),
+                    "discovered_session_count": len(discovered_sessions),
+                    "software_version": args.software_version,
+                    "software_build_id": args.software_build_id,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -637,6 +682,8 @@ def main() -> int:
             result["qa_status"] == "usable_with_warning" for result in results
         ),
         "fail_count": sum(result["qa_status"] == "fail" for result in results),
+        "software_version": args.software_version,
+        "software_build_id": args.software_build_id,
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload["ok"] else 1

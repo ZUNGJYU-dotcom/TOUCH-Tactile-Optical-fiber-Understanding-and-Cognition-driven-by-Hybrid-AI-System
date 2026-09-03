@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import json
 import os
 import socket
@@ -30,7 +31,13 @@ from desktop_launcher import (
     stop_owned_backend,
     wait_until_ready,
 )
+from process_lifecycle import (
+    attach_process_to_kill_on_close_job,
+    close_windows_handle,
+)
 from sdk_live import DEFAULT_INTERVAL_MS, BaySpecSdkLiveReader
+
+
 class _AliveThread:
     def is_alive(self) -> bool:
         return True
@@ -512,7 +519,7 @@ class SdkLiveReaderStateTests(unittest.TestCase):
     def test_default_interval_uses_low_latency_idle_budget(self) -> None:
         reader = self._reader()
 
-        self.assertEqual(DEFAULT_INTERVAL_MS, 20)
+        self.assertEqual(DEFAULT_INTERVAL_MS, 10)
         self.assertEqual(reader.interval_ms, DEFAULT_INTERVAL_MS)
 
     def test_one_frame_helper_does_not_sleep_after_final_frame(self) -> None:
@@ -544,6 +551,36 @@ class SdkLiveReaderStateTests(unittest.TestCase):
         status = reader.status()
 
         self.assertEqual(status["freshness"], "error")
+
+    def test_frame_freshness_tracks_measured_acquisition_cycle(self) -> None:
+        reader = self._reader()
+        reader.desired_active = True
+        reader.thread = _JoinForbiddenThread()
+        reader.interval_ms = 20
+        reader.last_acquisition_duration_ms = 320.0
+        reader.last_frame_time = 100.0
+
+        with patch("sdk_live.time.time", return_value=101.0):
+            live = reader.status()
+        with patch("sdk_live.time.time", return_value=101.3):
+            stale = reader.status()
+
+        self.assertAlmostEqual(live["frame_freshness_limit_sec"], 1.25)
+        self.assertEqual(live["freshness"], "live")
+        self.assertEqual(stale["freshness"], "stale")
+
+    def test_frame_freshness_expands_for_intentionally_slow_sampling(self) -> None:
+        reader = self._reader()
+        reader.desired_active = True
+        reader.thread = _JoinForbiddenThread()
+        reader.interval_ms = 2000
+        reader.last_frame_time = 100.0
+
+        with patch("sdk_live.time.time", return_value=106.0):
+            status = reader.status()
+
+        self.assertAlmostEqual(status["frame_freshness_limit_sec"], 7.0)
+        self.assertEqual(status["freshness"], "live")
 
     def test_missing_helper_fails_without_fake_active_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -815,6 +852,30 @@ class SdkLiveReaderStateTests(unittest.TestCase):
         self.assertIsNone(state["overflow_stream"])
         self.assertIsNotNone(process.poll())
 
+    @unittest.skipUnless(os.name == "nt", "Windows job objects are Windows-only")
+    def test_kill_on_close_job_reaps_native_helper_if_parent_cleanup_is_forced(
+        self,
+    ) -> None:
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        handle = None
+        try:
+            handle = attach_process_to_kill_on_close_job(process.pid)
+            self.assertIsNotNone(handle)
+
+            close_windows_handle(handle)
+            handle = None
+            process.wait(timeout=3.0)
+
+            self.assertIsNotNone(process.poll())
+        finally:
+            close_windows_handle(handle)
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=3.0)
+
     def test_supervisor_rejects_helper_message_and_spectrum_floods(self) -> None:
         for name, lines in {
             "too_many_messages": [
@@ -1022,6 +1083,23 @@ class ModelDisplaySourceGateTests(unittest.TestCase):
         self.assertTrue(gate["wavelength_axis_valid"])
         self.assertTrue(gate["formal_spectrum_input_allowed"])
         self.assertTrue(gate["operator_display_valid"])
+
+    def test_invalid_spectrum_qa_is_diagnostics_only(self) -> None:
+        gate = _model_display_source_gate(
+            {
+                "source": "static_http_ingest",
+                "peak_axis_type": "wavelength_nm",
+                "qa_status": "invalid",
+                "qa_flags": ["spectrum_length_mismatch"],
+            },
+            {"active": False, "freshness": "stopped"},
+            {"active": False, "freshness": "stopped"},
+        )
+        self.assertTrue(gate["model_input_source_allowed"])
+        self.assertTrue(gate["wavelength_axis_valid"])
+        self.assertFalse(gate["qa_valid"])
+        self.assertFalse(gate["formal_spectrum_input_allowed"])
+        self.assertFalse(gate["operator_display_valid"])
 
 
 class ExportWatcherSessionTests(unittest.TestCase):
@@ -1398,14 +1476,20 @@ class FrontendRequestLifecycleContractTests(unittest.TestCase):
         self.assertIn("state.px6dCapturePollInFlight = false", self.source)
 
     def test_live_frame_delivery_uses_low_latency_nonoverlapping_polling(self) -> None:
-        self.assertIn("const LIVE_MODEL_POLL_INTERVAL_MS = 50;", self.source)
+        self.assertIn("const LIVE_MODEL_POLL_INTERVAL_MS = 25;", self.source)
         self.assertIn(
-            'const sourceIntervalSec = source === "direct_sdk" ? 0.02 : 0.1;',
+            'const sourceIntervalSec = source === "direct_sdk" ? 0.01 : 0.1;',
             self.source,
         )
         self.assertIn("frameRequestInFlight: false", self.source)
         self.assertIn("if (state.frameRequestInFlight) {", self.source)
         self.assertIn("if (force) state.forcedFrameRequestQueued = true;", self.source)
+
+    def test_stopping_live_input_clears_the_committed_visual_frame(self) -> None:
+        self.assertIn("function clearStoppedLivePresentation()", self.source)
+        self.assertIn("state.frame = idleFrame;", self.source)
+        self.assertIn("snapDisplayedFrameToCurrentTargets();", self.source)
+        self.assertIn("if (!stopping) await fetchFrame({ force: true });", self.source)
 
     def test_contact_animation_has_fast_attack_and_stable_release(self) -> None:
         self.assertIn("const THREE_ATTENUATION_EASING = 28.0;", self.source)
@@ -1798,6 +1882,7 @@ class AcquisitionSourceMutualExclusionTests(unittest.TestCase):
             "channel_id": "P22",
             "interval_ms": 100,
             "integration": 40000,
+            "sensor_mode": backend_main.DEFAULT_SENSOR_MODE,
         }
         with patch.object(
             backend_main.sdk_live_reader, "status", return_value=sdk_status
@@ -1824,6 +1909,7 @@ class AcquisitionSourceMutualExclusionTests(unittest.TestCase):
             "channel_id": "P22",
             "interval_ms": 2000,
             "integration": backend_main.DEFAULT_INTEGRATION_US,
+            "sensor_mode": backend_main.DEFAULT_SENSOR_MODE,
         }
         with patch.object(
             backend_main.sdk_live_reader, "status", return_value=sdk_status
@@ -1895,6 +1981,7 @@ class AcquisitionSourceMutualExclusionTests(unittest.TestCase):
             channel_id="P22",
             interval_ms=20,
             integration=backend_main.DEFAULT_INTEGRATION_US,
+            sensor_mode=backend_main.DEFAULT_SENSOR_MODE,
         )
 
     def test_export_watch_start_is_blocked_when_sdk_does_not_stop(self) -> None:
@@ -2351,6 +2438,43 @@ class BridgeResetTests(unittest.TestCase):
         self.assertNotEqual(comparison["status"], "recovery_residual_detected")
         self.assertAlmostEqual(comparison["common_gain_ratio"], 1.06, places=3)
 
+    def test_explicit_operator_baseline_can_replace_a_stale_session_anchor(self) -> None:
+        test_bridge = BaySpecWavelengthShiftBridge(max_records_per_channel=100)
+        x = np.linspace(-1.0, 1.0, 128)
+        clean = 9000.0 + 3200.0 * np.exp(-0.5 * (x / 0.24) ** 2)
+        test_bridge.records_by_channel["P22"] = self._stable_spectrum_records(clean)
+        test_bridge.set_baseline(
+            {"channel_id": "P22", "minimum_recent_samples": 30}
+        )
+
+        new_released_state = clean.copy()
+        new_released_state[48:78] -= 2600.0
+        test_bridge.records_by_channel["P22"] = self._stable_spectrum_records(
+            new_released_state
+        )
+        accepted = test_bridge.set_baseline(
+            {
+                "channel_id": "P22",
+                "minimum_recent_samples": 30,
+                "replace_trusted_session_anchor": True,
+            }
+        )
+
+        self.assertTrue(accepted["current_runtime_spectrum_baseline_ready"])
+        self.assertTrue(accepted["trusted_session_anchor_replaced"])
+        comparison = accepted["baseline_anchor_comparison_by_channel"]["P22"]
+        self.assertEqual(
+            comparison["status"],
+            "trusted_anchor_replaced_by_operator_attestation",
+        )
+        self.assertEqual(comparison["previous_status"], "recovery_residual_detected")
+        np.testing.assert_allclose(
+            test_bridge.trusted_baseline_anchor_spectrum_by_channel["P22"][
+                "intensity"
+            ],
+            test_bridge.baseline_spectrum_by_channel["P22"]["intensity"],
+        )
+
     def test_new_acquisition_session_clears_trusted_baseline_anchor(self) -> None:
         test_bridge = BaySpecWavelengthShiftBridge(max_records_per_channel=100)
         x = np.linspace(-1.0, 1.0, 128)
@@ -2442,6 +2566,76 @@ class BridgeResetTests(unittest.TestCase):
 
 
 class UnifiedBaselineEndpointTests(unittest.TestCase):
+    def test_new_acquisition_session_invalidates_previous_attestation(self) -> None:
+        previous_attestation = {
+            "confirmed": True,
+            "attested_at_epoch_sec": 123.0,
+            "attested_by": "operator",
+            "force_evidence": {"force_fz_n": 0.0},
+            "status": "operator_and_force_reference_confirmed",
+        }
+        with patch.object(
+            backend_main,
+            "GLOBAL_BASELINE_ATTESTATION",
+            previous_attestation,
+        ), patch.object(
+            backend_main,
+            "_reset_current_runtime",
+            return_value={"ok": True},
+        ), patch.object(
+            backend_main.bridge,
+            "reset",
+            return_value={"ok": True},
+        ):
+            result = backend_main._begin_acquisition_session()
+
+            self.assertFalse(
+                backend_main.GLOBAL_BASELINE_ATTESTATION["confirmed"]
+            )
+            self.assertIsNone(
+                backend_main.GLOBAL_BASELINE_ATTESTATION["attested_by"]
+            )
+            self.assertEqual(
+                result["baseline_attestation"]["invalidation_reason"],
+                "new_acquisition_session",
+            )
+
+    def test_api_reset_invalidates_attestation_only_when_baseline_is_cleared(self) -> None:
+        previous_attestation = {
+            "confirmed": True,
+            "attested_at_epoch_sec": 123.0,
+            "attested_by": "operator",
+            "force_evidence": None,
+            "status": "operator_confirmed_force_reference_unavailable",
+        }
+        with patch.object(
+            backend_main,
+            "GLOBAL_BASELINE_ATTESTATION",
+            previous_attestation.copy(),
+        ), patch.object(
+            backend_main,
+            "_reset_current_runtime",
+            return_value={"ok": True},
+        ), patch.object(
+            backend_main.bridge,
+            "reset",
+            return_value={"ok": True},
+        ):
+            kept = backend_main.reset(keep_baseline=True)
+            self.assertNotIn("baseline_attestation", kept)
+            self.assertTrue(
+                backend_main.GLOBAL_BASELINE_ATTESTATION["confirmed"]
+            )
+
+            cleared = backend_main.reset(keep_baseline=False)
+            self.assertFalse(
+                backend_main.GLOBAL_BASELINE_ATTESTATION["confirmed"]
+            )
+            self.assertEqual(
+                cleared["baseline_attestation"]["invalidation_reason"],
+                "api_reset_without_baseline",
+            )
+
     def test_global_baseline_requires_explicit_no_contact_attestation(self) -> None:
         with patch.object(
             backend_main.bridge,
@@ -2537,6 +2731,7 @@ class UnifiedBaselineEndpointTests(unittest.TestCase):
                 "channel_id": "P22",
                 "baseline_method": "frozen_baseline",
                 "minimum_recent_samples": 30,
+                "replace_trusted_session_anchor": True,
             }
         )
         self.assertTrue(result["ok"])
@@ -2620,15 +2815,19 @@ class DesktopLauncherIdentityTests(unittest.TestCase):
                 {
                     "ok": True,
                     "app": "TOUCH",
-                    "mode": "standalone_touch_all_data_spectral_runtime",
+                    "mode": "standalone_touch_high_sensitivity_300us_spectral_runtime",
                     "backend_contract_version": "touch_current_runtime_api_v1",
-                    "default_operator_recognition": "ordinary_fbg_all_data_beta_v1",
+                    "default_operator_recognition": "ordinary_fbg_same_day_joint_nine_fbg_beta_v4",
                     "runtime_model": {
                         "loaded": True,
                         "runtime_role": "deployed_current_model_only",
+                        "active_runtime_schema": "same_day_joint_nine_fbg_v4",
+                        "active_dataset_id": "ordinary_fbg_20260902_same_day_joint_fingerprint_v2",
+                        "current_only_bundle": True,
+                        "legacy_fallback_enabled": False,
                     },
                     "recognition_runtime": {
-                        "active_model_id": "ordinary_fbg_all_data_beta_v1",
+                        "active_model_id": "ordinary_fbg_same_day_joint_nine_fbg_beta_v4",
                         "switchable": False,
                         "model_count": 1,
                     },
@@ -2642,8 +2841,8 @@ class DesktopLauncherIdentityTests(unittest.TestCase):
                 {
                     "ok": True,
                     "app": "TOUCH",
-                    "mode": "standalone_touch_all_data_spectral_runtime",
-                    "default_operator_recognition": "ordinary_fbg_all_data_beta_v1",
+                    "mode": "standalone_touch_high_sensitivity_300us_spectral_runtime",
+                    "default_operator_recognition": "ordinary_fbg_same_day_joint_nine_fbg_beta_v4",
                 }
             )
         )
@@ -2654,9 +2853,9 @@ class DesktopLauncherIdentityTests(unittest.TestCase):
                 {
                     "ok": True,
                     "app": "TOUCH",
-                    "mode": "standalone_touch_all_data_spectral_runtime",
+                    "mode": "standalone_touch_high_sensitivity_300us_spectral_runtime",
                     "backend_contract_version": "touch_current_runtime_api_v0",
-                    "default_operator_recognition": "ordinary_fbg_all_data_beta_v1",
+                    "default_operator_recognition": "ordinary_fbg_same_day_joint_nine_fbg_beta_v4",
                 }
             )
         )
@@ -2690,6 +2889,126 @@ class OperatorQaProjectionTests(unittest.TestCase):
 
 
 class CaptureProvenanceContractTests(unittest.TestCase):
+    @staticmethod
+    def _capture_runtime_frame() -> dict:
+        return {
+            "frame_id": 77,
+            "timestamp": 1788315000.125,
+            "ingested_at": 1788315000.125,
+            "source": "bayspec_sdk_live",
+            "wavelength_nm": [1540.0, 1540.1, 1540.2],
+            "intensity": [1000.0, 1040.0, 1010.0],
+        }
+
+    def test_capture_response_uses_only_an_exact_same_frame_runtime_cache(
+        self,
+    ) -> None:
+        latest = self._capture_runtime_frame()
+        frame_key = backend_main._current_runtime_frame_key(latest)
+        cached_prediction = {
+            "ok": True,
+            "status": "ready",
+            "classification_model_source": "deployed_test_model",
+            "force_model_source": "deployed_test_force_model",
+            "position": {"label": "P11", "confidence": 0.91},
+        }
+        with (
+            patch.object(
+                backend_main,
+                "_model_display_source_gate",
+                return_value={"formal_spectrum_input_allowed": True},
+            ),
+            patch.object(backend_main, "CURRENT_RUNTIME_LAST_FRAME_KEY", frame_key),
+            patch.object(
+                backend_main,
+                "CURRENT_RUNTIME_LAST_PAYLOAD",
+                cached_prediction,
+            ),
+            patch.object(backend_main, "_predict_current_runtime") as predict,
+        ):
+            payload = backend_main._capture_temporal_response(latest)
+
+        predict.assert_not_called()
+        self.assertTrue(payload["model_ready"])
+        self.assertTrue(payload["capture_response_frame_match"])
+        self.assertEqual(
+            payload["capture_response_source"],
+            "same_frame_runtime_cache",
+        )
+        self.assertEqual(payload["position"]["label"], "P11")
+
+    def test_capture_response_defers_instead_of_blocking_on_model_inference(
+        self,
+    ) -> None:
+        latest = self._capture_runtime_frame()
+        with (
+            patch.object(
+                backend_main,
+                "_model_display_source_gate",
+                return_value={"formal_spectrum_input_allowed": True},
+            ),
+            patch.object(
+                backend_main,
+                "CURRENT_RUNTIME_LAST_FRAME_KEY",
+                ("different-frame",),
+            ),
+            patch.object(backend_main, "CURRENT_RUNTIME_LAST_PAYLOAD", None),
+            patch.object(backend_main, "_predict_current_runtime") as predict,
+            patch.object(backend_main, "_current_runtime_status") as full_status,
+        ):
+            started = time.perf_counter()
+            payload = backend_main._capture_temporal_response(latest)
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+        predict.assert_not_called()
+        full_status.assert_not_called()
+        self.assertLess(elapsed_ms, 50.0)
+        self.assertFalse(payload["model_ready"])
+        self.assertFalse(payload["capture_response_frame_match"])
+        self.assertEqual(payload["status"], "capture_response_deferred")
+        self.assertEqual(
+            payload["capture_response_source"],
+            "deferred_for_high_rate_capture",
+        )
+        self.assertTrue(payload["raw_spectrum_authoritative"])
+        self.assertTrue(payload["offline_reconstruction_supported"])
+
+    def test_capture_response_rejects_qa_invalid_frame_without_model_state_change(
+        self,
+    ) -> None:
+        latest = {
+            "frame_id": 55,
+            "source": "static_http_ingest",
+            "peak_axis_type": "wavelength_nm",
+            "qa_status": "invalid",
+            "qa_flags": ["spectrum_length_mismatch"],
+        }
+        stopped = {"active": False, "freshness": "stopped"}
+
+        with (
+            patch.object(
+                backend_main.export_watcher,
+                "status",
+                return_value=stopped,
+            ),
+            patch.object(
+                backend_main.sdk_live_reader,
+                "status",
+                return_value=stopped,
+            ),
+            patch.object(backend_main, "_predict_current_runtime") as predict,
+        ):
+            payload = backend_main._capture_temporal_response(latest)
+
+        predict.assert_not_called()
+        self.assertFalse(payload["formal_spectrum_input_allowed"])
+        self.assertFalse(payload["model_ready"])
+        self.assertEqual(payload["status"], "current_runtime_source_blocked")
+        self.assertEqual(
+            payload["reason"],
+            "spectrum_qa_invalid_for_formal_recognition",
+        )
+
     def test_optical_device_identity_uses_bridge_module_resolvers(self) -> None:
         with (
             patch.object(
@@ -2740,6 +3059,183 @@ class CaptureProvenanceContractTests(unittest.TestCase):
         self.assertEqual(
             payload["optical_device"]["configured_sense_export_root"],
             "C:\\Sense\\Spectrum_Data",
+        )
+
+
+class CurrentRuntimeStatusSnapshotTests(unittest.TestCase):
+    def test_runtime_status_reads_mutable_state_under_one_lock(self) -> None:
+        lock_state = {"held": False}
+
+        class TrackingLock:
+            def __enter__(self):
+                self.assert_not_held()
+                lock_state["held"] = True
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                lock_state["held"] = False
+
+            @staticmethod
+            def assert_not_held() -> None:
+                if lock_state["held"]:
+                    raise AssertionError("runtime status lock entered recursively")
+
+        class GuardedAdapter:
+            @staticmethod
+            def _require_lock() -> None:
+                if not lock_state["held"]:
+                    raise AssertionError("runtime adapter read outside status snapshot lock")
+
+            @property
+            def bundle(self):
+                self._require_lock()
+                return {
+                    "schema_version": "snapshot-test-v1",
+                    "feature_schema": {"fields": ["spectrum"]},
+                }
+
+            @property
+            def force_min_n(self):
+                self._require_lock()
+                return 0.0
+
+            @property
+            def force_calibrated_max_n(self):
+                self._require_lock()
+                return 5.0
+
+            @property
+            def classification_model_source(self):
+                self._require_lock()
+                return "snapshot_classifier"
+
+            @property
+            def force_model_source(self):
+                self._require_lock()
+                return "snapshot_force_model"
+
+        with (
+            patch.object(backend_main, "CURRENT_RUNTIME_LOCK", TrackingLock()),
+            patch.object(
+                backend_main,
+                "CURRENT_RUNTIME_ADAPTER",
+                GuardedAdapter(),
+            ),
+            patch.object(backend_main, "CURRENT_RUNTIME_UNIQUE_FRAME_COUNT", 17),
+            patch.object(
+                backend_main,
+                "CURRENT_RUNTIME_STARTUP_BASELINE_STATUS",
+                {"status": "ready", "ready": True, "frame_count": 5},
+            ),
+        ):
+            status = backend_main._current_runtime_status()
+
+        self.assertFalse(lock_state["held"])
+        self.assertTrue(status["loaded"])
+        self.assertEqual(status["schema_version"], "snapshot-test-v1")
+        self.assertEqual(status["unique_frame_count"], 17)
+        self.assertEqual(
+            status["runtime_startup_baseline"]["state"]["frame_count"],
+            5,
+        )
+        self.assertEqual(
+            status["classification_model_source"],
+            "snapshot_classifier",
+        )
+
+
+class SpectrumFrameIdentityTests(unittest.TestCase):
+    def test_distinct_spectra_with_same_scalar_summary_have_distinct_keys(self) -> None:
+        wavelength = [1540.0, 1541.0, 1542.0, 1543.0, 1544.0]
+        first = [1.0, 2.0, 3.0, 4.0, 5.0]
+        second = [1.0, 3.0, 3.0, 3.0, 5.0]
+
+        self.assertEqual(sum(first), sum(second))
+        self.assertEqual(first[0], second[0])
+        self.assertEqual(first[len(first) // 2], second[len(second) // 2])
+        self.assertEqual(first[-1], second[-1])
+        self.assertNotEqual(
+            backend_main._spectrum_fingerprint(wavelength, first),
+            backend_main._spectrum_fingerprint(wavelength, second),
+        )
+
+    def test_late_concurrent_frame_cannot_rewind_runtime_state(self) -> None:
+        wavelength = [1540.0 + 0.1 * index for index in range(32)]
+        baseline_intensity = [1000.0 + index for index in range(32)]
+        newer = {
+            "frame_id": 102,
+            "timestamp": 200.2,
+            "source": "bayspec_direct_usb20bs_sdk",
+            "wavelength_nm": wavelength,
+            "intensity": [value * 0.98 for value in baseline_intensity],
+        }
+        late = {
+            "frame_id": 101,
+            "timestamp": 200.1,
+            "source": "bayspec_direct_usb20bs_sdk",
+            "wavelength_nm": wavelength,
+            "intensity": [value * 0.99 for value in baseline_intensity],
+        }
+        baseline = {
+            "wavelength_nm": wavelength,
+            "intensity": baseline_intensity,
+        }
+        baseline_token = backend_main._spectrum_token(
+            wavelength,
+            baseline_intensity,
+        )
+
+        class RecordingAdapter:
+            def __init__(self) -> None:
+                self.timestamps: list[float | None] = []
+
+            def update(self, _wavelength, _intensity, *, source_timestamp_sec):
+                self.timestamps.append(source_timestamp_sec)
+                return {"ok": True, "status": "ready", "sequence": len(self.timestamps)}
+
+            @staticmethod
+            def consume_pending_runtime_baseline_update():
+                return None
+
+        adapter = RecordingAdapter()
+        pair = {"ok": True, "latest": newer, "baseline": baseline}
+        with (
+            patch.object(backend_main, "CURRENT_RUNTIME_ADAPTER", adapter),
+            patch.object(
+                backend_main,
+                "_ensure_current_runtime_startup_baseline",
+                return_value=pair,
+            ),
+            patch.object(
+                backend_main,
+                "CURRENT_RUNTIME_BASELINE_TOKEN",
+                baseline_token,
+            ),
+            patch.object(backend_main, "CURRENT_RUNTIME_LAST_FRAME_KEY", None),
+            patch.object(
+                backend_main,
+                "CURRENT_RUNTIME_LAST_SOURCE_TIMESTAMP_SEC",
+                None,
+            ),
+            patch.object(backend_main, "CURRENT_RUNTIME_UNIQUE_FRAME_COUNT", 0),
+            patch.object(backend_main, "CURRENT_RUNTIME_LAST_PAYLOAD", None),
+            patch.object(
+                backend_main,
+                "CURRENT_RUNTIME_PREDICTION_CACHE",
+                OrderedDict(),
+            ),
+        ):
+            first = backend_main._predict_current_runtime(newer)
+            second = backend_main._predict_current_runtime(late)
+
+        self.assertEqual(adapter.timestamps, [200.2])
+        self.assertEqual(first["unique_frame_count"], 1)
+        self.assertEqual(second["unique_frame_count"], 1)
+        self.assertTrue(second["out_of_order_frame_ignored"])
+        self.assertEqual(second["ignored_source_timestamp_sec"], 200.1)
+        self.assertEqual(
+            second["latest_processed_source_timestamp_sec"],
+            200.2,
         )
 
 

@@ -65,7 +65,9 @@ synchronization:
 
 capture:
   output_directory: data/px6d_synchronized
-  poll_interval_sec: 0.05
+  poll_interval_sec: 0.01
+  durable_flush_interval_sec: 0.25
+  durable_flush_frame_count: 10
   require_software_tare: true
   require_valid_spectrum: true
   default_selected_outputs:

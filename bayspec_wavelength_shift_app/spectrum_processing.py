@@ -22,7 +22,8 @@ except Exception:  # pragma: no cover - packaged runtime always includes yaml
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "integration_us": 5000,
+    "integration_us": 300,
+    "sensor_mode": 0,
     "update_overlay_data": True,
     "subtract_background": False,
     "baseline_correction": True,
@@ -70,7 +71,14 @@ class SpectrumDisplayProcessor:
             os.environ.get("LOCALAPPDATA")
             or (Path.home() / "AppData" / "Local")
         )
-        return local_root / "TOUCH" / "spectrum_processing.json"
+        release_channel = (
+            os.environ.get("TOUCH_RELEASE_CHANNEL", "").strip().lower()
+        )
+        filename = {
+            "beta": "spectrum_processing_beta.json",
+            "stable": "spectrum_processing_stable.json",
+        }.get(release_channel, "spectrum_processing.json")
+        return local_root / "TOUCH" / filename
 
     def _load_defaults(self) -> None:
         if self.config_path is None or not self.config_path.exists() or yaml is None:
@@ -102,8 +110,10 @@ class SpectrumDisplayProcessor:
         validated = dict(DEFAULT_SETTINGS)
         validated.update(settings)
         validated["integration_us"] = max(
-            1000, min(int(validated.get("integration_us", 5000)), 1_000_000)
+            1, min(int(validated.get("integration_us", 300)), 10_000_000)
         )
+        sensor_mode = int(validated.get("sensor_mode", 0))
+        validated["sensor_mode"] = sensor_mode if sensor_mode in (0, 1) else 0
         for name in (
             "update_overlay_data",
             "subtract_background",

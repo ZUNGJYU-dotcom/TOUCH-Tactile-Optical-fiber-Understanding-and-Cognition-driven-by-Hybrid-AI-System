@@ -1,0 +1,48 @@
+{
+  "schema_version": "touch_beta_model_deployment_record_v1",
+  "runtime_payload_schema": "same_day_joint_nine_fbg_v4",
+  "release_version": "0.19.24-beta",
+  "build_id": "beta-20260903-same-day-joint-nine-fbg-v4-fast",
+  "deployed_at_local": "2026-09-03T08:52:00+08:00",
+  "deployed_model_path": "E:\\重要文档\\实验\\柔性传感\\光纤\\Micro-FBG\\普通FBG\\算法\\touch_static_spectral_twin_edition\\models\\deployed\\ordinary_fbg_current_runtime.joblib",
+  "deployed_model_sha256": "3c34886ee2bdc1bb0b375c09bc5a5eae805783555df5414ae5930285e2aa962f",
+  "candidate_model_path": "E:\\重要文档\\实验\\柔性传感\\光纤\\Micro-FBG\\普通FBG\\算法\\touch_static_spectral_twin_edition\\outputs\\ordinary_fbg_runtime_stage_20260902_same_day_joint_v4_fast\\ordinary_fbg_runtime_candidate_v4_fast.joblib",
+  "candidate_model_sha256": "febaecb119b880c515ab2f66510a37654f1798b18afd24e2e41f3544b522fe5e",
+  "dataset_id": "ordinary_fbg_20260902_same_day_joint_fingerprint_v2",
+  "historical_data_included": false,
+  "source_batches": [
+    "regular_v01916",
+    "regular_v01919",
+    "blind1",
+    "blind3",
+    "blind4"
+  ],
+  "acquisition_contract": {
+    "sensor_mode": "High Sensitivity",
+    "integration_us": 300
+  },
+  "feature_contract": {
+    "contact": "complete-spectrum baseline-relative 264 plus joint nine-FBG 75 = 339",
+    "position": "joint nine-FBG fingerprint 75",
+    "force": "complete-spectrum baseline-relative 264 plus joint nine-FBG 75 = 339",
+    "single_channel_evidence_sufficient": false
+  },
+  "validation_scope": "same_day_exact_replay_plus_leave_complete_acquisition_batch_out",
+  "independent_blind_evidence": false,
+  "exact_runtime_validation": {
+    "session_count": 161,
+    "frame_count": 49853,
+    "dedicated_idle_frames": 10589,
+    "dedicated_idle_false_positive_rate": 0.0,
+    "active_contact_recall": 0.9985462960215978,
+    "wrong_emitted_position_frames": 0,
+    "emitted_position_accuracy": 1.0,
+    "contact_p90_delay_ms": 0.0,
+    "position_p90_delay_ms": 117.7147626876831
+  },
+  "rollback_model_path": "E:\\重要文档\\实验\\柔性传感\\光纤\\Micro-FBG\\普通FBG\\算法\\touch_static_spectral_twin_edition\\models\\rollback\\ordinary_fbg_runtime_before_same_day_joint_v4_c5511cbe17e3.joblib",
+  "rollback_model_sha256": "c5511cbe17e3c20b9b83d30a13315b3cae5dea9a48b709c5505ad2ba423f7925",
+  "rollback_deployment_record_path": "E:\\重要文档\\实验\\柔性传感\\光纤\\Micro-FBG\\普通FBG\\算法\\touch_static_spectral_twin_edition\\models\\rollback\\ordinary_fbg_runtime_before_same_day_joint_v4_c5511cbe17e3.deployment.json",
+  "rollback_command": "\"E:\\重要文档\\实验\\柔性传感\\光纤\\Micro-FBG\\普通FBG\\算法\\touch_static_spectral_twin_edition\\.venv\\Scripts\\python.exe\" \"E:\\重要文档\\实验\\柔性传感\\光纤\\Micro-FBG\\普通FBG\\算法\\touch_static_spectral_twin_edition\\scripts\\deploy_same_day_joint_beta_model.py\" rollback",
+  "live_validation_required": true
+}

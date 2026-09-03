@@ -226,15 +226,25 @@
         </section>
 
         <section class="settings-section spectrum-processing-settings">
-          <div class="section-label">SPECTRUM DISPLAY</div>
-          <label class="settings-select-row" for="spectrumIntegrationSelect">
-            <span>Exposure</span>
-            <select id="spectrumIntegrationSelect">
-              <option value="5000">5 ms</option>
-              <option value="10000">10 ms</option>
-              <option value="20000">20 ms</option>
-              <option value="40000">40 ms</option>
+          <div class="section-label">BAYSPEC ACQUISITION &amp; DISPLAY</div>
+          <label class="settings-select-row" for="spectrumSensorModeSelect">
+            <span>Sensor mode</span>
+            <select id="spectrumSensorModeSelect">
+              <option value="0" selected>High sensitivity</option>
+              <option value="1">High dynamic range</option>
             </select>
+          </label>
+          <label class="settings-select-row" for="spectrumIntegrationInput">
+            <span>Exposure (µs)</span>
+            <input
+              id="spectrumIntegrationInput"
+              type="number"
+              min="1"
+              max="10000000"
+              step="1"
+              value="300"
+              inputmode="numeric"
+            />
           </label>
           <label class="settings-toggle-row">
             <span>Update overlay</span>
@@ -781,7 +791,7 @@
               <div class="diagnostic-capture-progress">
                 <div><span>Status</span><strong id="px6dCaptureStatus">idle</strong></div>
                 <div><span>Time</span><strong id="px6dCaptureDuration">00:00</strong></div>
-                <div><span>Frames</span><strong id="px6dCaptureFrames">0</strong></div>
+                <div><span>Frames / rate</span><strong id="px6dCaptureFrames">0</strong></div>
                 <div><span>Sync</span><strong id="px6dCaptureRatio">--</strong></div>
               </div>
               <p id="px6dCaptureOutput" class="diagnostic-capture-output" title="">Ready.</p>

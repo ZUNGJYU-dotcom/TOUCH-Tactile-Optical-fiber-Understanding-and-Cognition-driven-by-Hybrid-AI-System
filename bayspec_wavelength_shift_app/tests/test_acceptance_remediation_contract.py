@@ -107,7 +107,11 @@ class AcceptanceRemediationContractTests(unittest.TestCase):
 
     def test_current_all_data_model_is_the_only_operator_runtime(self) -> None:
         self.assertIn(
-            '"active_model_id": "ordinary_fbg_all_data_beta_v1"',
+            'CURRENT_RUNTIME_LOGICAL_MODEL_ID = "ordinary_fbg_same_day_joint_nine_fbg_beta_v4"',
+            self.backend,
+        )
+        self.assertIn(
+            '"active_model_id": CURRENT_RUNTIME_LOGICAL_MODEL_ID',
             self.backend,
         )
         self.assertIn(

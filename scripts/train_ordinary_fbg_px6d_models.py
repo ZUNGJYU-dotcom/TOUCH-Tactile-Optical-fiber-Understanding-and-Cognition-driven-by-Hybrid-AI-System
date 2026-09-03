@@ -101,13 +101,14 @@ def _classifier_factory(
     estimator_count: int,
     minimum_leaf_samples: int,
     seed: int,
+    n_jobs: int,
 ) -> Any:
     common = {
         "n_estimators": estimator_count,
         "min_samples_leaf": minimum_leaf_samples,
         "class_weight": "balanced",
         "random_state": seed,
-        "n_jobs": -1,
+        "n_jobs": n_jobs,
     }
     if model_type == "extra_trees":
         return ExtraTreesClassifier(**common)
@@ -138,7 +139,7 @@ def _classifier_factory(
             reg_lambda=1.0,
             class_weight="balanced",
             random_state=seed,
-            n_jobs=-1,
+            n_jobs=n_jobs,
             verbosity=-1,
             deterministic=True,
             force_col_wise=True,
@@ -152,12 +153,13 @@ def _regressor_factory(
     estimator_count: int,
     minimum_leaf_samples: int,
     seed: int,
+    n_jobs: int,
 ) -> Any:
     common = {
         "n_estimators": estimator_count,
         "min_samples_leaf": minimum_leaf_samples,
         "random_state": seed,
-        "n_jobs": -1,
+        "n_jobs": n_jobs,
     }
     if model_type == "extra_trees":
         return ExtraTreesRegressor(**common)
@@ -188,7 +190,7 @@ def _regressor_factory(
             colsample_bytree=0.85,
             reg_lambda=1.0,
             random_state=seed,
-            n_jobs=-1,
+            n_jobs=n_jobs,
             verbosity=-1,
             deterministic=True,
             force_col_wise=True,
@@ -304,6 +306,22 @@ def _classification_metrics(
     }
 
 
+def _contact_rates_from_confusion(
+    matrix: list[list[int]] | np.ndarray,
+) -> tuple[float, float]:
+    values = np.asarray(matrix, dtype=float)
+    if values.shape != (2, 2):
+        raise ValueError(
+            "contact confusion matrix must be 2x2, "
+            f"received {values.shape}"
+        )
+    no_contact_total = float(np.sum(values[0]))
+    active_total = float(np.sum(values[1]))
+    false_positive_rate = float(values[0, 1] / max(no_contact_total, 1.0))
+    active_recall = float(values[1, 1] / max(active_total, 1.0))
+    return false_positive_rate, active_recall
+
+
 def _session_majority_vote(
     truth: np.ndarray,
     predicted: np.ndarray,
@@ -312,9 +330,21 @@ def _session_majority_vote(
 ) -> dict[str, Any]:
     rank = {label: index for index, label in enumerate(label_order)}
     rows: list[dict[str, str]] = []
+    excluded_mixed_label_sessions: list[dict[str, Any]] = []
     for session_id in sorted(np.unique(session_ids)):
         selected = session_ids == session_id
         true_values = Counter(truth[selected].tolist())
+        if len(true_values) != 1:
+            excluded_mixed_label_sessions.append(
+                {
+                    "session_id": str(session_id),
+                    "true_label_counts": {
+                        str(label): int(count)
+                        for label, count in sorted(true_values.items())
+                    },
+                }
+            )
+            continue
         predicted_values = Counter(predicted[selected].tolist())
         true_label = sorted(
             true_values,
@@ -356,6 +386,11 @@ def _session_majority_vote(
             labels=label_order,
         ).tolist(),
         "rows": rows,
+        "evaluated_single_label_session_count": len(rows),
+        "excluded_mixed_label_session_count": len(
+            excluded_mixed_label_sessions
+        ),
+        "excluded_mixed_label_sessions": excluded_mixed_label_sessions,
     }
 
 
@@ -419,6 +454,8 @@ def _plot_force_scatter(
 def _plot_comparison(
     rows: list[dict[str, Any]],
     output_path: Path,
+    *,
+    dataset_id: str,
 ) -> None:
     fig, axes = plt.subplots(1, 3, figsize=(21.0, 6.8))
     display_names = {
@@ -467,7 +504,7 @@ def _plot_comparison(
                 va="bottom",
                 fontsize=8,
             )
-    fig.suptitle("Strict 20260731 New-Data-Only Candidate Comparison")
+    fig.suptitle(f"Grouped Candidate Comparison\n{dataset_id}")
     fig.tight_layout()
     fig.savefig(output_path, dpi=190)
     plt.close(fig)
@@ -489,6 +526,7 @@ def _fit_grouped_classification(
     estimator_count: int,
     minimum_leaf_samples: int,
     seed: int,
+    n_jobs: int,
 ) -> tuple[dict[str, Any], np.ndarray]:
     if np.issubdtype(target.dtype, np.number):
         predictions = np.full(len(target), -999, dtype=target.dtype)
@@ -505,6 +543,7 @@ def _fit_grouped_classification(
             estimator_count=estimator_count,
             minimum_leaf_samples=minimum_leaf_samples,
             seed=seed + int(fold_id),
+            n_jobs=n_jobs,
         )
         sample_weight = _equal_session_weights(session_ids, train_mask)
         start = time.perf_counter()
@@ -558,15 +597,38 @@ def _fit_grouped_classification(
             "session_count": int(len(np.unique(session_ids[mask]))),
         }
     )
+    metrics["worst_fold_macro_f1"] = float(
+        min(fold["macro_f1"] for fold in fold_metrics)
+    )
+    metrics["worst_fold_accuracy"] = float(
+        min(fold["accuracy"] for fold in fold_metrics)
+    )
     if task == "contact":
-        metrics["active_contact_recall"] = float(
-            recall_score(truth, predicted, pos_label=1, zero_division=0)
+        false_positive_rate, active_recall = _contact_rates_from_confusion(
+            metrics["confusion_matrix"]
         )
-        contact_matrix = np.asarray(metrics["confusion_matrix"], dtype=float)
-        false_positive = contact_matrix[0, 1]
-        no_contact_total = float(np.sum(contact_matrix[0]))
-        metrics["no_contact_false_positive_rate"] = float(
-            false_positive / max(no_contact_total, 1.0)
+        metrics["active_contact_recall"] = active_recall
+        metrics["no_contact_false_positive_rate"] = false_positive_rate
+        fold_false_positive_rates: list[float] = []
+        fold_active_recalls: list[float] = []
+        for fold in fold_metrics:
+            fold_false_positive_rate, fold_active_recall = (
+                _contact_rates_from_confusion(fold["confusion_matrix"])
+            )
+            fold["no_contact_false_positive_rate"] = (
+                fold_false_positive_rate
+            )
+            fold["active_contact_recall"] = fold_active_recall
+            fold_false_positive_rates.append(fold_false_positive_rate)
+            fold_active_recalls.append(fold_active_recall)
+        metrics["worst_fold_no_contact_false_positive_rate"] = float(
+            max(fold_false_positive_rates)
+        )
+        metrics["worst_fold_active_contact_recall"] = float(
+            min(fold_active_recalls)
+        )
+        metrics["zero_false_positive_fold_count"] = int(
+            sum(rate <= 1e-12 for rate in fold_false_positive_rates)
         )
     if task == "position":
         metrics["session_majority_voting"] = _session_majority_vote(
@@ -592,6 +654,7 @@ def _fit_grouped_force(
     estimator_count: int,
     minimum_leaf_samples: int,
     seed: int,
+    n_jobs: int,
 ) -> tuple[dict[str, Any], np.ndarray]:
     predictions = np.full(len(force), np.nan, dtype=float)
     latencies: list[float] = []
@@ -605,6 +668,7 @@ def _fit_grouped_force(
             estimator_count=estimator_count,
             minimum_leaf_samples=minimum_leaf_samples,
             seed=seed + int(fold_id),
+            n_jobs=n_jobs,
         )
         sample_weight = _equal_session_weights(session_ids, train_mask)
         start = time.perf_counter()
@@ -693,18 +757,49 @@ def _fit_grouped_force(
 def _select_best(rows: list[dict[str, Any]], task: str) -> dict[str, Any]:
     selected = [row for row in rows if row["task"] == task]
     if task == "contact":
-        return max(
-            selected,
+        best_global_recall = max(
+            float(row["active_contact_recall"]) for row in selected
+        )
+        best_worst_fold_recall = max(
+            float(row["worst_fold_active_contact_recall"])
+            for row in selected
+        )
+        global_recall_floor = (
+            0.95
+            if best_global_recall >= 0.95
+            else max(0.0, best_global_recall - 0.01)
+        )
+        worst_fold_recall_floor = (
+            0.80
+            if best_worst_fold_recall >= 0.80
+            else max(0.0, best_worst_fold_recall - 0.01)
+        )
+        eligible = [
+            row
+            for row in selected
+            if float(row["active_contact_recall"]) >= global_recall_floor
+            and float(row["worst_fold_active_contact_recall"])
+            >= worst_fold_recall_floor
+        ]
+        if not eligible:
+            eligible = selected
+        return min(
+            eligible,
             key=lambda row: (
-                float(row["macro_f1"]),
-                float(row["active_contact_recall"]),
-                -float(row["inference_latency_ms_per_frame"]),
+                float(row["worst_fold_no_contact_false_positive_rate"]),
+                float(row["no_contact_false_positive_rate"]),
+                -float(row["worst_fold_macro_f1"]),
+                -float(row["macro_f1"]),
+                -float(row["active_contact_recall"]),
+                float(row["inference_latency_ms_per_frame"]),
             ),
         )
     if task == "position":
         return max(
             selected,
             key=lambda row: (
+                float(row["worst_fold_macro_f1"]),
+                float(row["worst_fold_accuracy"]),
                 float(row["macro_f1"]),
                 float(row["session_majority_voting"]["accuracy"]),
                 -float(row["inference_latency_ms_per_frame"]),
@@ -732,6 +827,7 @@ def _fit_final_model(
     estimator_count: int,
     minimum_leaf_samples: int,
     seed: int,
+    n_jobs: int,
 ) -> Any:
     if task == "force":
         estimator = _regressor_factory(
@@ -739,6 +835,7 @@ def _fit_final_model(
             estimator_count=estimator_count,
             minimum_leaf_samples=minimum_leaf_samples,
             seed=seed,
+            n_jobs=n_jobs,
         )
     else:
         estimator = _classifier_factory(
@@ -746,6 +843,7 @@ def _fit_final_model(
             estimator_count=estimator_count,
             minimum_leaf_samples=minimum_leaf_samples,
             seed=seed,
+            n_jobs=n_jobs,
         )
     estimator.fit(
         features[mask][:, feature_indices],
@@ -1083,6 +1181,8 @@ def main() -> int:
     config = load_config(config_path)
     model_config = dict(config.get("models") or {})
     evaluation_config = dict(config.get("evaluation") or {})
+    compute_config = dict(config.get("compute") or {})
+    cpu_threads = max(1, int(compute_config.get("cpu_threads", 1)))
     seed = int(evaluation_config.get("random_seed", 42))
     cross_validation_estimator_count = int(
         model_config.get(
@@ -1096,13 +1196,42 @@ def main() -> int:
             cross_validation_estimator_count,
         )
     )
-    requested_candidate_model_types = tuple(
+    default_requested_candidate_model_types = tuple(
         str(model_type)
         for model_type in model_config.get("candidate_model_types")
         or ("extra_trees", "random_forest")
     )
-    candidate_model_types, skipped_candidate_models = (
-        _resolve_candidate_model_types(requested_candidate_model_types)
+    configured_by_task = dict(
+        model_config.get("candidate_model_types_by_task") or {}
+    )
+    requested_candidate_models_by_task: dict[str, tuple[str, ...]] = {}
+    candidate_models_by_task: dict[str, tuple[str, ...]] = {}
+    skipped_candidate_models: dict[str, str] = {}
+    for task in TASK_ORDER:
+        requested = tuple(
+            str(model_type)
+            for model_type in configured_by_task.get(task)
+            or default_requested_candidate_model_types
+        )
+        available, skipped = _resolve_candidate_model_types(requested)
+        requested_candidate_models_by_task[task] = requested
+        candidate_models_by_task[task] = available
+        skipped_candidate_models.update(
+            {f"{task}:{name}": reason for name, reason in skipped.items()}
+        )
+    requested_candidate_model_types = tuple(
+        dict.fromkeys(
+            model_type
+            for task in TASK_ORDER
+            for model_type in requested_candidate_models_by_task[task]
+        )
+    )
+    candidate_model_types = tuple(
+        dict.fromkeys(
+            model_type
+            for task in TASK_ORDER
+            for model_type in candidate_models_by_task[task]
+        )
     )
     minimum_leaf_samples = int(
         model_config.get("minimum_leaf_samples", 2)
@@ -1135,6 +1264,24 @@ def main() -> int:
         name: np.asarray(indices, dtype=int)
         for name, indices in manifest["feature_sets"].items()
     }
+    configured_feature_sets_by_task = dict(
+        model_config.get("candidate_feature_sets_by_task") or {}
+    )
+    feature_sets_by_task: dict[str, tuple[str, ...]] = {}
+    for task in TASK_ORDER:
+        requested_feature_sets = tuple(
+            str(name)
+            for name in configured_feature_sets_by_task.get(task)
+            or feature_sets.keys()
+        )
+        unknown_feature_sets = sorted(set(requested_feature_sets) - set(feature_sets))
+        if unknown_feature_sets:
+            raise ValueError(
+                f"{task} requested unknown feature sets: {unknown_feature_sets}"
+            )
+        if not requested_feature_sets:
+            raise ValueError(f"{task} candidate feature-set list is empty")
+        feature_sets_by_task[task] = requested_feature_sets
     position_labels = [
         label for label in POSITION_ORDER if np.any(position == label)
     ]
@@ -1142,7 +1289,11 @@ def main() -> int:
     rows: list[dict[str, Any]] = []
     predictions_by_id: dict[str, np.ndarray] = {}
     for feature_set, feature_indices in feature_sets.items():
-        for model_type in candidate_model_types:
+        for model_type in (
+            candidate_models_by_task["contact"]
+            if feature_set in feature_sets_by_task["contact"]
+            else ()
+        ):
             contact_metrics, contact_prediction = (
                 _fit_grouped_classification(
                     task="contact",
@@ -1159,6 +1310,7 @@ def main() -> int:
                     estimator_count=cross_validation_estimator_count,
                     minimum_leaf_samples=minimum_leaf_samples,
                     seed=seed + 100,
+                    n_jobs=cpu_threads,
                 )
             )
             contact_id = f"contact_{model_type}_{feature_set}"
@@ -1166,6 +1318,11 @@ def main() -> int:
             rows.append(contact_metrics)
             predictions_by_id[contact_id] = contact_prediction
 
+        for model_type in (
+            candidate_models_by_task["position"]
+            if feature_set in feature_sets_by_task["position"]
+            else ()
+        ):
             position_metrics, position_prediction = (
                 _fit_grouped_classification(
                     task="position",
@@ -1182,6 +1339,7 @@ def main() -> int:
                     estimator_count=cross_validation_estimator_count,
                     minimum_leaf_samples=minimum_leaf_samples,
                     seed=seed + 200,
+                    n_jobs=cpu_threads,
                 )
             )
             position_id = f"position_{model_type}_{feature_set}"
@@ -1189,6 +1347,11 @@ def main() -> int:
             rows.append(position_metrics)
             predictions_by_id[position_id] = position_prediction
 
+        for model_type in (
+            candidate_models_by_task["force"]
+            if feature_set in feature_sets_by_task["force"]
+            else ()
+        ):
             force_metrics, force_prediction = _fit_grouped_force(
                 model_type=model_type,
                 feature_set=feature_set,
@@ -1202,6 +1365,7 @@ def main() -> int:
                 estimator_count=cross_validation_estimator_count,
                 minimum_leaf_samples=minimum_leaf_samples,
                 seed=seed + 300,
+                n_jobs=cpu_threads,
             )
             force_id = f"force_{model_type}_{feature_set}"
             force_metrics["model_id"] = force_id
@@ -1234,6 +1398,7 @@ def main() -> int:
             estimator_count=final_estimator_count,
             minimum_leaf_samples=minimum_leaf_samples,
             seed=seed + 1000 + index,
+            n_jobs=cpu_threads,
         )
         selected["final_model_size_mb"] = _serialized_size_mb(model)
         fitted_models[task] = {
@@ -1308,11 +1473,17 @@ def main() -> int:
         "models": fitted_models,
         "candidate_models_requested": requested_candidate_model_types,
         "candidate_models_evaluated": candidate_model_types,
+        "candidate_models_requested_by_task": (
+            requested_candidate_models_by_task
+        ),
+        "candidate_models_evaluated_by_task": candidate_models_by_task,
+        "candidate_feature_sets_by_task": feature_sets_by_task,
         "skipped_candidate_models": skipped_candidate_models,
         "cross_validation_tree_estimators": (
             cross_validation_estimator_count
         ),
         "final_tree_estimators": final_estimator_count,
+        "cpu_threads": cpu_threads,
         "baseline_contract": dict(config.get("baseline") or {}),
         "label_contract": dict(config.get("labels") or {}),
     }
@@ -1399,6 +1570,10 @@ def main() -> int:
         "deployment_status": "candidate_not_deployed_pending_live_validation",
         "candidate_models_requested": requested_candidate_model_types,
         "candidate_models_evaluated": candidate_model_types,
+        "candidate_models_requested_by_task": (
+            requested_candidate_models_by_task
+        ),
+        "candidate_models_evaluated_by_task": candidate_models_by_task,
         "skipped_candidate_models": skipped_candidate_models,
         "all_candidates": rows,
         "selected_candidates": {
@@ -1441,26 +1616,48 @@ def main() -> int:
         best_force_prediction[force_mask],
         output_dir / "force_oof_scatter.png",
     )
-    _plot_comparison(rows, output_dir / "candidate_model_comparison.png")
+    _plot_comparison(
+        rows,
+        output_dir / "candidate_model_comparison.png",
+        dataset_id=str(manifest["dataset_id"]),
+    )
 
+    incremental_provenance = dict(
+        manifest.get("incremental_training_provenance") or {}
+    )
+    source_root = manifest.get("source_root")
+    if not source_root:
+        source_root = ", ".join(
+            str(source)
+            for source in (manifest.get("source_batch_counts") or {})
+        ) or "multiple_sources_see_source_inventory"
     isolation_report = [
         "# Dataset Isolation Report",
         "",
         f"- Dataset ID: `{manifest['dataset_id']}`",
-        f"- Source root: `{manifest['source_root']}`",
+        f"- Source root or batches: `{source_root}`",
         "- Historical datasets included: no.",
         f"- Independent sessions: {manifest['session_count']}.",
         f"- Synchronized frames: {manifest['frame_count']}.",
         f"- Batch SHA-256: `{manifest['batch_content_sha256']}`.",
-        "- Selection rule: `latest_n_by_position` "
-        "(P11=5, P12=5, P21=5).",
-        "- Latest P11/P12/P21 sessions enter formal training; their earlier "
-        "sessions are quarantined for manual review.",
+        f"- Source policy: `{manifest.get('source_policy', 'not_recorded')}`.",
+        f"- Selection rule: `{manifest.get('selection_rule', 'not_recorded')}`.",
         "- Formal split: grouped by `session_id`.",
         "- Random frame split: prohibited and not used.",
-        "- Source inventory covers only metadata, aligned Fz summaries, and "
-        "full spectra under the strict `new data` root.",
+        f"- Source inventory: `{manifest.get('source_inventory_path')}`.",
     ]
+    if incremental_provenance:
+        isolation_report.extend(
+            [
+                "- Blind3 is included as unblinded labelled training data.",
+                "- Blind3 filenames were not obfuscated; it is not an "
+                "independent blind benchmark.",
+                "- Its pre-unblinding prediction artifacts remain frozen for "
+                "audit only and do not restore blind-test validity after fit.",
+                "- Incremental baseline policy: "
+                f"`{incremental_provenance.get('baseline_policy')}`.",
+            ]
+        )
     if challenge_metrics is not None:
         isolation_report.extend(
             [
@@ -1486,8 +1683,8 @@ def main() -> int:
         "",
         "- This run uses only the force-referenced sessions selected by the "
         "current strict-batch dataset manifest.",
-        "- Historical static, temporal, blind-test, and legacy model data are "
-        "not included.",
+        f"- Historical-data policy: "
+        f"`{manifest.get('historical_data_policy', 'not_recorded')}`.",
         f"- {manifest['session_count']} independent sessions and "
         f"{manifest['frame_count']} synchronized frames were available.",
         "- Frames are repeated measurements within sessions, not independent "
@@ -1517,6 +1714,15 @@ def main() -> int:
         f"{best['force']['r2']:.4f}, active MAE "
         f"{best['force']['active_force_mae_n']:.4f} N.",
     ]
+    if incremental_provenance:
+        report.extend(
+            [
+                "- Blind3 contributes labelled training sessions after "
+                "unblinding; its filenames were not obfuscated.",
+                "- Blind3 results from this run are grouped out-of-fold "
+                "training diagnostics, not independent blind-test evidence.",
+            ]
+        )
     if skipped_candidate_models:
         report.extend(
             [

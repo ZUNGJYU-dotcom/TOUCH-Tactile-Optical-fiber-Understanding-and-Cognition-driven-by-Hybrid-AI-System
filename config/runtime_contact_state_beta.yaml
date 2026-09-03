@@ -1,0 +1,120 @@
+schema_version: touch_runtime_contact_state_beta_v4
+
+# Use a short but representative high-sensitivity window. This is startup
+# settling time, not response latency after the stream is ready.
+runtime_startup_baseline:
+  enabled: true
+  minimum_frames: 12
+  minimum_span_sec: 0.18
+  max_shape_motion_rms: 0.0085
+  max_common_gain_motion: 0.0160
+  maximum_force_abs_n: 0.10
+  require_force_release_if_available: true
+  policy: high_sensitivity_current_session_settled_median
+
+runtime_baseline_recovery:
+  enabled: true
+  prime_temporal_history_with_baseline: true
+  baseline_preroll_frames: 20
+  max_shape_motion_rms: 0.0085
+  max_common_gain_motion: 0.0160
+  activity_shape_motion_rms: 0.0100
+  activity_common_gain_motion: 0.0200
+  quiet_hold_sec: 0.30
+  minimum_quiet_physical_frames: 6
+  release_candidate_timeout_sec: 12.0
+  contact_probability_arm: 0.65
+  contact_arm_physical_frames: 2
+  minimum_contact_baseline_distance: 0.0060
+  minimum_contact_distance_growth: 0.0005
+  release_probability_threshold: 0.40
+  no_contact_probability_support: 0.55
+  minimum_recovery_fraction: 0.20
+  minimum_contact_probability_drop: 0.15
+  minimum_spatial_contact_confidence: 0.60
+  minimum_slow_release_recovery_fraction: 0.45
+  release_activity_memory_sec: 0.40
+  stationary_rest_fallback_enabled: true
+  stationary_rest_candidate_delay_sec: 0.30
+  stationary_rest_max_baseline_distance: 0.0050
+  # The captured idle drift stayed below 0.255 position confidence, while
+  # genuine light touches usually exceeded 0.30. Keep a measured safety gap
+  # without delaying ordinary low-force contact.
+  rest_unlock_position_confidence_min: 0.30
+  # The 600-frame no-contact capture peaked at about 0.0127 baseline distance.
+  # A larger sustained departure is independent evidence for a real touch.
+  rest_unlock_strong_baseline_distance: 0.0140
+  locked_rest_reanchor_min_distance: 0.0040
+  locked_rest_reanchor_max_distance: 0.0250
+  fallback_requires_new_contact_after_reanchor: true
+  recontact_probability_threshold: 0.75
+  recontact_distance_growth_fraction: 0.15
+  recontact_distance_growth_absolute: 0.0040
+  # The high-sensitivity classifier is trained against a clean session
+  # baseline. Runtime rest detection may suppress contact, but it must not
+  # replace that model reference with a stationary press or source drift.
+  auto_update_runtime_baseline: false
+  allow_model_baseline_reanchor: false
+  # Release can leave the contact classifier saturated even after the complete
+  # nine-FBG spectrum has moved most of the way back from its contact peak.
+  # Require two quiet, low-confidence physical frames so a held plateau cannot
+  # be mistaken for release.
+  residual_release_enabled: true
+  residual_release_minimum_recovery_fraction: 0.60
+  residual_release_max_position_confidence: 0.35
+  residual_release_max_baseline_distance: 0.0250
+  residual_release_minimum_physical_frames: 2
+  residual_release_hold_sec: 0.18
+  policy: high_sensitivity_fixed_session_model_baseline_plus_rest_gate
+
+all_source_runtime_gate:
+  enabled: true
+  contact_probability_off: 0.55
+  position_confidence_min: 0.45
+  position_margin_min: 0.08
+  model_consensus_contact_probability_on: 0.70
+  model_consensus_minimum_baseline_distance: 0.0025
+  model_consensus_contact_arm_frames: 2
+  # Contact onset must be a distributed response across the complete 9-FBG
+  # spectrum. A sparse peak-tracking disturbance cannot drive the twin.
+  coupled_signature_enabled: true
+  coupled_signature_low_response_threshold: 0.005
+  coupled_signature_nominal_response_threshold: 0.010
+  coupled_signature_minimum_low_response_channels: 5
+  coupled_signature_minimum_nominal_response_channels: 3
+  # Preserve genuine very-light contacts when the full-spectrum models are
+  # exceptionally certain even if only two channels have crossed 0.010 yet.
+  coupled_signature_model_contact_probability: 0.97
+  coupled_signature_model_position_confidence: 0.45
+  coupled_signature_model_position_margin: 0.08
+  visual_position_fallback_enabled: true
+  visual_position_confidence_min: 0.18
+  visual_position_margin_min: 0.015
+  visual_position_confirm_frames: 2
+  # Let onset transients self-correct, then protect a held single-point press
+  # from weak neighbouring-class flicker. A genuine in-contact move must supply
+  # a much stronger and sustained nine-FBG fingerprint before the UI switches.
+  visual_position_settle_sec: 2.00
+  visual_position_switch_confidence_min: 0.55
+  visual_position_switch_margin_min: 0.15
+  visual_position_switch_frames: 8
+  visual_contact_probability_on: 0.35
+  visual_contact_probability_off: 0.20
+  visual_force_on_n: 0.08
+  visual_force_off_n: 0.03
+  visual_force_full_scale_n: 2.5
+  visual_force_gamma: 0.55
+  visual_deformation_floor: 0.12
+  visual_contact_arm_frames: 2
+  position_probability_ema_alpha: 0.55
+  position_hold_sec: 0.25
+  position_switch_frames: 2
+  require_baseline_separation: true
+  baseline_release_distance: 0.0050
+  release_near_baseline_frames: 2
+  contact_arm_physical_frames: 1
+  ambiguous_quiet_release_sec: 0.20
+  release_ambiguous_frames: 2
+  activity_memory_sec: 0.20
+  activity_shape_motion_rms: 0.0100
+  activity_common_gain_motion: 0.0200

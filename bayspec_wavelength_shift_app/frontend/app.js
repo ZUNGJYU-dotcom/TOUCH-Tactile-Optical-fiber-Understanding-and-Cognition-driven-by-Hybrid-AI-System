@@ -64,7 +64,8 @@ const settingsWholeHandButton = document.getElementById("settingsWholeHandButton
 const settingsThumbHolderButton = document.getElementById("settingsThumbHolderButton");
 const settingsSurfaceOnlyButton = document.getElementById("settingsSurfaceOnlyButton");
 const settingsResetCameraButton = document.getElementById("settingsResetCameraButton");
-const spectrumIntegrationSelect = document.getElementById("spectrumIntegrationSelect");
+const spectrumSensorModeSelect = document.getElementById("spectrumSensorModeSelect");
+const spectrumIntegrationInput = document.getElementById("spectrumIntegrationInput");
 const spectrumOverlayToggle = document.getElementById("spectrumOverlayToggle");
 const spectrumBackgroundToggle = document.getElementById("spectrumBackgroundToggle");
 const spectrumBaselineToggle = document.getElementById("spectrumBaselineToggle");
@@ -321,7 +322,7 @@ const DEMO_TRACE_WINDOW_POINTS = 80;
 // Poll often enough that a completed SDK frame is normally observed within
 // one display frame. Requests never overlap and duplicate physical frames are
 // cached by the backend, so this does not repeat model inference.
-const LIVE_MODEL_POLL_INTERVAL_MS = 50;
+const LIVE_MODEL_POLL_INTERVAL_MS = 25;
 const LIVE_SOURCE_PROBE_INTERVAL_MS = 1500;
 const PX6D_UI_POLL_INTERVAL_MS = 100;
 const PX6D_CAPTURE_POLL_INTERVAL_MS = 500;
@@ -374,8 +375,8 @@ const THREE_SURFACE_ARRAY_TO_SCENE_Z_SIGN = -1;
 const THREE_SURFACE_AXIS_MODE = "swap_array_xy";
 const WAVELENGTH_PLAN_ORDER = ["P11", "P12", "P13", "P21", "P22", "P23", "P31", "P32", "P33"];
 const GLOBAL_RECOGNITION_SCOPE = "optical_contact_position_and_continuous_fz";
-const CURRENT_RUNTIME_MODEL_SOURCE = "ordinary_fbg_all_data_beta_v1";
-const OPERATOR_VISUALIZATION_CONTRACT_VERSION = "touch_operator_visualization_v1";
+const CURRENT_RUNTIME_MODEL_SOURCE = "ordinary_fbg_same_day_joint_nine_fbg_beta_v4";
+const OPERATOR_VISUALIZATION_CONTRACT_VERSION = "touch_operator_visualization_v2";
 const OPTICAL_FORCE_CALIBRATED_MAX_N = 5;
 const OPTICAL_FORCE_MIN_DISPLAY_MAX_N = 5;
 const GLOBAL_CANDIDATE_IDS = Array.from({ length: 9 }, (_, index) => `FBG${String(index + 1).padStart(2, "0")}`);
@@ -387,6 +388,17 @@ const GLOBAL_EVENT_MIN_CONDITIONING_FRAMES = 12;
 const GLOBAL_EVENT_SINGLE_PEAK_TRIGGER_PM = 18;
 const GLOBAL_EVENT_PRIMARY_TRIGGER_PM = 8;
 const GLOBAL_EVENT_SECONDARY_TRIGGER_PM = 3;
+
+function currentRuntimeModelSource(frame = null, contract = null) {
+  return String(
+    contract?.classification_model_source ||
+    contract?.model_source ||
+    frame?.classification_model_source ||
+    frame?.runtime_model?.classification_model_source ||
+    frame?.active_spectral_model_source ||
+    CURRENT_RUNTIME_MODEL_SOURCE
+  );
+}
 
 function opticalForceAxisStep(maximumN) {
   const roughStep = Math.max(OPTICAL_FORCE_MIN_DISPLAY_MAX_N, Number(maximumN) || 0) / 4;
@@ -524,7 +536,9 @@ function resetRuntimeTraceHistory() {
 }
 
 function appendCurrentRuntimeTrace(rawRecord, contract) {
-  const source = String(rawRecord?.source || contract?.source || CURRENT_RUNTIME_MODEL_SOURCE);
+  const sourceName = String(rawRecord?.source || contract?.source || CURRENT_RUNTIME_MODEL_SOURCE);
+  const sourceSession = contract?.source_session_id ?? rawRecord?.source_session_id ?? "";
+  const source = `${sourceName}|${String(sourceSession)}`;
   if (state.runtimeTraceSource && state.runtimeTraceSource !== source) {
     resetRuntimeTraceHistory();
   }
@@ -1000,7 +1014,8 @@ const state = {
   liveRequested: false,
   spectrumProcessing: {
     settings: {
-      integration_us: 5000,
+      integration_us: 300,
+      sensor_mode: 0,
       update_overlay_data: true,
       subtract_background: false,
       baseline_correction: true,
@@ -1316,7 +1331,7 @@ function updatePx6dPanel(payload = {}) {
     "diagnosticPx6dCompressionSign",
     Number.isFinite(compressionSign)
       ? compressionSign < 0
-        ? "raw 鈭扚z = compression"
+        ? "raw -Fz = compression"
         : "raw +Fz = compression"
       : "--"
   );
@@ -1341,7 +1356,7 @@ function updatePx6dPanel(payload = {}) {
     Number.isFinite(sequenceStart)
       ? sequenceStart === sequenceEnd
         ? `#${sequenceStart}`
-        : `#${sequenceStart}鈥?{sequenceEnd}`
+        : `#${sequenceStart}-${sequenceEnd}`
       : sample?.sequence_id
         ? `#${sample.sequence_id}`
         : "--"
@@ -1450,7 +1465,7 @@ function updateCaptureReadiness() {
   const opticalActive = Boolean(
     state.sdkLiveActive || state.exportWatchActive || state.dataStreamActive || state.liveRequested
   );
-  const opticalReady = opticalActive && Boolean(state.lastRenderedSourceFrameKey);
+  const opticalReady = opticalActive && frameSourceIsFresh(state.frame);
   const forceState = state.px6dUiStatus || {};
   const forceReady = Boolean(forceState.connected && forceState.tareReady && forceState.fresh);
   const position = String(px6dCapturePosition?.value || "");
@@ -1523,6 +1538,7 @@ function updatePx6dCapturePanel(payload = {}) {
   state.px6dCaptureStatus = payload;
   const running = payload?.running === true;
   const captured = Number(payload?.captured_timeline_frames ?? payload?.captured_paired_frames ?? 0);
+  const capturedFrameRate = Number(payload?.captured_frame_rate_hz);
   const ratioValue = payload?.paired_frame_ratio;
   const ratio = ratioValue === null || ratioValue === undefined ? NaN : Number(ratioValue);
   const syncOffset = Number(payload?.last_sync_offset_ms);
@@ -1530,7 +1546,12 @@ function updatePx6dCapturePanel(payload = {}) {
   const endedAt = running ? Date.now() / 1000 : Number(payload?.ended_at_epoch_sec);
   const duration = Number.isFinite(startedAt) && Number.isFinite(endedAt) ? Math.max(0, endedAt - startedAt) : 0;
   setText("px6dCaptureDuration", formatCaptureDuration(duration));
-  setText("px6dCaptureFrames", String(captured));
+  setText(
+    "px6dCaptureFrames",
+    Number.isFinite(capturedFrameRate)
+      ? `${captured} / ${capturedFrameRate.toFixed(1)} Hz`
+      : String(captured)
+  );
   const selectedOutputs = Array.isArray(payload?.selected_outputs) ? payload.selected_outputs : selectedCaptureOutputs();
   const syncRelevant = selectedOutputs.includes("force") && selectedOutputs.some((value) => value !== "force");
   setText("px6dCaptureRatio", syncRelevant && Number.isFinite(ratio) ? `${(ratio * 100).toFixed(1)}%` : "N/A");
@@ -2044,11 +2065,11 @@ function levelLabel(level) {
     light_press: "light",
     normal_press: "normal",
     hard_press: "hard",
-    baseline_required: "set 位0 baseline",
+    baseline_required: "set reference baseline",
     wavelength_tracking_warning: "wavelength tracking warning",
     uncertain: "uncertain",
   };
-  if (clean.startsWith("baseline_collecting")) return "collecting 位0";
+  if (clean.startsWith("baseline_collecting")) return "collecting baseline";
   return labels[clean] || clean.replaceAll("_", " ");
 }
 
@@ -2348,7 +2369,7 @@ function operatorAlertState({ record, sourceState, operatorQa, measurementAvaila
       severity: "WARNING",
       message: globalFrame
         ? "Global FBG01-FBG09 baseline required. Remove contact, wait for a stable spectrum, then press Set baseline."
-        : "位0 baseline required. Remove contact, then press Set 位0.",
+        : "Reference baseline required. Remove contact, then press Set baseline.",
     };
   }
   if (
@@ -2595,6 +2616,19 @@ function makeIdleFrame() {
     sdk_live: { active: false, freshness: "idle" },
     sense_control: {},
   };
+}
+
+function clearStoppedLivePresentation() {
+  invalidateFrameRequestContext();
+  resetRuntimeTraceHistory();
+  state.dataStreamActive = false;
+  state.exportWatchActive = false;
+  state.sdkLiveActive = false;
+  state.liveRequested = false;
+  const idleFrame = makeIdleFrame();
+  state.frame = idleFrame;
+  updateUI(idleFrame);
+  snapDisplayedFrameToCurrentTargets();
 }
 
 function responseText(record) {
@@ -3058,7 +3092,7 @@ function drawTrace(records) {
           ? "Collecting optical force history"
           : modelResponseTrace
             ? "Collecting model response history"
-            : "Collecting 螖位 history"
+            : "Collecting wavelength-shift history"
         : "No response history",
       18,
       30
@@ -3233,10 +3267,10 @@ function drawTrace(records) {
     : modelResponseTrace
       ? "Trained model visual response (%)"
     : globalEventTrace
-    ? "Global event peak |螖位| (pm)"
+    ? "Global event peak |shift| (pm)"
     : state.arrayDemoActive
-      ? "Surface peak |螖位| (pm)"
-      : `${state.frame?.selected_channel || state.selectedChannel} 螖位 (pm)`;
+      ? "Surface peak |shift| (pm)"
+      : `${state.frame?.selected_channel || state.selectedChannel} shift (pm)`;
   traceCanvas.dataset.scope = opticalForceTrace
     ? "continuous_optical_force_n"
     : modelResponseTrace
@@ -6775,13 +6809,17 @@ function updateChannelGrid(grid, selected) {
   for (const item of sortedChannels(grid)) {
     const cell = document.createElement("div");
     cell.className = `channel-cell${item.channel_id === selected || item.valid ? " active" : ""}${item.enabled ? "" : " disabled"}`;
-    const response = Number(item.wavelength_shift_response_ratio ?? item.response_value);
+    const observedResponse = Number(item.observed_coupled_response_ratio);
+    const inferredProbability = Number(item.inferred_contact_probability);
+    const response = Number.isFinite(observedResponse)
+      ? observedResponse
+      : Number(item.wavelength_shift_response_ratio ?? item.response_value);
     if (Number.isFinite(response)) {
       const color = colorForAttenuation(Math.max(0, Math.min(1, response)));
       cell.style.background = `rgba(${Math.round(color.r * 255)}, ${Math.round(color.g * 255)}, ${Math.round(color.b * 255)}, 0.16)`;
     }
     const status = item.valid ? item.qa_status || "valid" : item.enabled ? "no data" : "disabled";
-    cell.innerHTML = `<strong>${item.channel_id}</strong><span>x,y ${formatNumber(item.x, 1)}, ${formatNumber(item.y, 1)}</span><span>shift ${formatPm(item.delta_wavelength_pm, 1, true)}</span><span>normalized ${formatNumber(item.wavelength_shift_response_ratio ?? item.response_value, 3)}</span><span>${item.coupling_status || status}</span>`;
+    cell.innerHTML = `<strong>${item.channel_id}</strong><span>x,y ${formatNumber(item.x, 1)}, ${formatNumber(item.y, 1)}</span><span>observed coupled ${formatNumber(observedResponse, 3)}</span><span>inferred probability ${formatNumber(inferredProbability, 3)}</span><span>${item.coupling_status || status}</span>`;
     channelGrid.appendChild(cell);
   }
 }
@@ -7531,7 +7569,7 @@ function updateDemoReadout(record) {
   setText(
     "demoReadoutNote",
     state.demoAutoplay
-      ? "Auto demo is cycling synchronized 螖位 and shifted-spectrum frames; not live data."
+      ? "Auto demo is cycling synchronized wavelength-shift and shifted-spectrum frames; not live data."
       : "Manual demo frame with synchronized Bragg wavelength-shift input."
   );
 }
@@ -7614,7 +7652,11 @@ function updateUI(inputFrame) {
   const globalRecognitionFrame = frame?.scope === GLOBAL_RECOGNITION_SCOPE;
   const completeGlobalRecognitionFrame = isGlobalSpectrumFrame(frame, record);
   const globalDominantPeak = globalRecognitionFrame ? dominantGlobalCandidate(record) : null;
-  const dominantChannel = (currentModelDisplay ? record?.model_position_id : null) || surfaceMetrics.dominant_channel || record?.dominant_channel || globalDominantPeak?.candidate_id || arrayFrame?.dominant_channel || frame?.selected_channel || state.selectedChannel;
+  const dominantChannel = (
+    currentModelDisplay
+      ? surfaceMetrics.inferred_dominant_channel || surfaceMetrics.dominant_channel || record?.model_position_id
+      : null
+  ) || surfaceMetrics.dominant_channel || record?.dominant_channel || globalDominantPeak?.candidate_id || arrayFrame?.dominant_channel || frame?.selected_channel || state.selectedChannel;
   const measurementAvailable = frameHasMeasurement(frame);
   const responseAvailable = frameResponseIsUsable(frame);
   const sourceDisplayState = acquisitionDisplayState(watcher, sdkLive);
@@ -7858,7 +7900,7 @@ function updateUI(inputFrame) {
   setText("dominantChannel", measurementAvailable ? dominantChannel || "--" : "--");
   setText("selectedView", syncDiag.status || "--");
   setText("stageAttenuation", formatPm(globalRecognitionFrame ? globalEventShiftPm : displayRecord?.delta_wavelength_pm, 1, true));
-  setText("stageRelative", globalRecognitionFrame ? "event 螖位 after residual compensation" : displayRecord?.shift_direction || "--");
+  setText("stageRelative", globalRecognitionFrame ? "event wavelength shift after residual compensation" : displayRecord?.shift_direction || "--");
   setText(
     "stagePeak",
     measurementAvailable
@@ -8119,7 +8161,7 @@ function updateUI(inputFrame) {
       ? "Optical response"
       : currentModelDisplay
         ? "Visual response"
-        : "Peak |螖位|"
+        : "Peak |shift|"
   );
   const surfacePeakElement = document.getElementById("surfacePeak");
   if (surfacePeakElement) {
@@ -8311,10 +8353,12 @@ function updateUI(inputFrame) {
 function normalizeCanonicalVisualizationFrame(frame, contract) {
   const rawRecord = frame.latest || {};
   const prediction = contract.prediction || null;
+  const runtimeModelSource = currentRuntimeModelSource(frame, contract);
   const responseAllowed = contract.response_allowed === true;
   const responseState = responseAllowed && contract.response_state === "contact"
     ? "contact"
     : "no_contact";
+  const surfaceActive = responseState === "contact";
   const positionId = responseState === "contact"
     ? String(contract?.position?.display_label || contract?.surface?.position_id || "") || null
     : null;
@@ -8324,20 +8368,49 @@ function normalizeCanonicalVisualizationFrame(frame, contract) {
   const surfaceGrid = ARRAY_DISPLAY_ROWS.map((row, rowIndex) =>
     row.map((_channelId, columnIndex) => {
       const value = finiteNumberOrNull(suppliedGrid?.[rowIndex]?.[columnIndex]);
-      return responseAllowed && responseState === "contact"
+      return surfaceActive
         ? Math.max(0, Math.min(1, value ?? 0))
         : 0;
     })
   );
   const metricSource = contract?.surface?.surface_metrics || {};
+  const inferredDominantChannel = surfaceActive
+    ? String(
+        metricSource.inferred_dominant_channel ||
+        metricSource.dominant_channel ||
+        contract?.surface?.inferred_dominant_channel ||
+        ""
+      ) || null
+    : null;
+  const observedResponse = contract?.surface?.observed_coupled_spectral_response || {};
+  const observedDominantChannel = String(
+    metricSource.observed_dominant_channel ||
+    contract?.surface?.observed_dominant_channel ||
+    observedResponse?.dominant_channel ||
+    ""
+  ) || null;
+  const rawProbabilityGrid = Array.isArray(
+    contract?.surface?.inferred_contact_probability_grid
+  )
+    ? contract.surface.inferred_contact_probability_grid
+    : [];
+  const suppliedProbabilityGrid = ARRAY_DISPLAY_ROWS.map((row, rowIndex) =>
+    row.map((_channelId, columnIndex) => {
+      const value = finiteNumberOrNull(rawProbabilityGrid?.[rowIndex]?.[columnIndex]);
+      return surfaceActive ? Math.max(0, Math.min(1, value ?? 0)) : 0;
+    })
+  );
+  const observedGrid = Array.isArray(observedResponse?.response_grid)
+    ? observedResponse.response_grid
+    : [];
   const flatGrid = surfaceGrid.flat();
-  const surfacePeak = responseAllowed
+  const surfacePeak = surfaceActive
     ? Math.max(0, Math.min(1, finiteNumberOrNull(metricSource.surface_peak) ?? Math.max(...flatGrid)))
     : 0;
-  const surfaceMean = responseAllowed
+  const surfaceMean = surfaceActive
     ? Math.max(0, finiteNumberOrNull(metricSource.surface_mean) ?? (flatGrid.reduce((sum, value) => sum + value, 0) / flatGrid.length))
     : 0;
-  const respondingChannelIds = responseAllowed
+  const respondingChannelIds = surfaceActive
     ? ARRAY_DISPLAY_ORDER.filter((channelId) => {
         const coordinate = ARRAY_CHANNEL_COORDS[channelId];
         const rowIndex = 1 - Number(coordinate?.y || 0);
@@ -8345,7 +8418,7 @@ function normalizeCanonicalVisualizationFrame(frame, contract) {
         return (surfaceGrid?.[rowIndex]?.[columnIndex] || 0) >= 0.055;
       })
     : [];
-  const activeArea = responseAllowed
+  const activeArea = surfaceActive
     ? Math.max(
         0,
         Math.min(
@@ -8362,16 +8435,19 @@ function normalizeCanonicalVisualizationFrame(frame, contract) {
     surface_mean: surfaceMean,
     surface_area_active: activeArea,
     surface_area_active_percent: activeArea * 100,
-    surface_centroid_x: responseAllowed
+    surface_centroid_x: surfaceActive
       ? finiteNumberOrNull(metricSource.surface_centroid_x) ?? 0
       : 0,
-    surface_centroid_y: responseAllowed
+    surface_centroid_y: surfaceActive
       ? finiteNumberOrNull(metricSource.surface_centroid_y) ?? 0
       : 0,
-    surface_spread: responseAllowed
+    surface_spread: surfaceActive
       ? finiteNumberOrNull(metricSource.surface_spread) ?? 0.24
-      : 0.24,
-    dominant_channel: positionId,
+      : 0,
+    dominant_channel: inferredDominantChannel,
+    semantic_position_id: positionId,
+    inferred_dominant_channel: inferredDominantChannel,
+    observed_dominant_channel: observedDominantChannel,
     enabled_channel_count: ARRAY_DISPLAY_ORDER.length,
     responding_channel_count: respondingChannelIds.length,
     responding_channel_ids: respondingChannelIds,
@@ -8379,13 +8455,27 @@ function normalizeCanonicalVisualizationFrame(frame, contract) {
     quality_status: responseAllowed
       ? "current_runtime_model"
       : String(contract.response_block_reason || "current_runtime_model_not_ready"),
-    recognition_source: CURRENT_RUNTIME_MODEL_SOURCE,
+    recognition_source: runtimeModelSource,
     estimated_force_fz_n: displayForceN,
   };
   const channels = ARRAY_DISPLAY_ROWS.flatMap((row, rowIndex) =>
     row.map((channelId, columnIndex) => {
       const coordinate = ARRAY_CHANNEL_COORDS[channelId] || { x: null, y: null };
       const responseValue = surfaceGrid[rowIndex][columnIndex];
+      const inferredProbability = Math.max(
+        0,
+        Math.min(
+          1,
+          finiteNumberOrNull(suppliedProbabilityGrid?.[rowIndex]?.[columnIndex]) ?? 0
+        )
+      );
+      const observedResponseRatio = Math.max(
+        0,
+        Math.min(
+          1,
+          finiteNumberOrNull(observedGrid?.[rowIndex]?.[columnIndex]) ?? 0
+        )
+      );
       return {
         channel_id: channelId,
         provisional_channel_id: channelId,
@@ -8393,11 +8483,13 @@ function normalizeCanonicalVisualizationFrame(frame, contract) {
         y: coordinate.y,
         enabled: true,
         valid: true,
-        response_enabled: responseAllowed,
+        response_enabled: surfaceActive,
         wavelength_shift_response_ratio: responseValue,
         response_value: responseValue,
-        qa_status: responseAllowed ? "current_runtime_model_response" : "current_runtime_model_waiting",
-        spectral_mapping_status: "model_position_proxy_no_individual_peak_assignment",
+        inferred_contact_probability: inferredProbability,
+        observed_coupled_response_ratio: observedResponseRatio,
+        qa_status: surfaceActive ? "current_runtime_model_response" : "current_runtime_model_waiting",
+        spectral_mapping_status: "provisional_fbg_mapping_coupled_observation",
       };
     })
   );
@@ -8426,11 +8518,11 @@ function normalizeCanonicalVisualizationFrame(frame, contract) {
     response_level: responseState,
     response_value: surfacePeak,
     wavelength_shift_response_ratio: surfacePeak,
-    dominant_channel: positionId,
-    provisional_dominant_channel: null,
+    dominant_channel: inferredDominantChannel,
+    provisional_dominant_channel: observedDominantChannel,
     model_position_id: positionId,
     active_spectral_prediction: prediction,
-    active_spectral_model_source: CURRENT_RUNTIME_MODEL_SOURCE,
+    active_spectral_model_source: runtimeModelSource,
     active_spectral_model_status: String(contract.prediction_status || "unavailable"),
     active_spectral_model_loaded: frame?.runtime_model?.loaded === true,
     active_spectral_model_progress: frame?.runtime_model?.warming || null,
@@ -8464,17 +8556,28 @@ function normalizeCanonicalVisualizationFrame(frame, contract) {
     operator_visualization_frame: contract,
     surface_metrics: surfaceMetrics,
     surface_grid: surfaceGrid,
+    inferred_contact_probability_grid: suppliedProbabilityGrid,
+    observed_coupled_spectral_response: observedResponse,
     channels,
     coupling_status: surfaceMetrics.coupling_status,
     physical_channel_mapping_final: false,
     trained_position_label_mapping_available: responseAllowed,
-    surface_visualization_semantics: "current_runtime_optical_force_proxy_not_measured_force_field",
-    local_response_estimate_available: responseAllowed,
+    surface_visualization_semantics: String(
+      contract?.surface?.map_semantics ||
+      "runtime_position_posterior_ema_scaled_by_optical_force_not_measured_pressure"
+    ),
+    raw_inferred_contact_probabilities: surfaceActive
+      ? contract?.surface?.raw_inferred_contact_probabilities || {}
+      : {},
+    smoothed_inferred_contact_probabilities: surfaceActive
+      ? contract?.surface?.smoothed_inferred_contact_probabilities || {}
+      : {},
+    local_response_estimate_available: surfaceActive,
     provisional_spatial_proxy_available: false,
     response_allowed: responseAllowed,
     response_block_reason: blockReason,
     active_spectral_prediction: prediction,
-    active_spectral_model_source: CURRENT_RUNTIME_MODEL_SOURCE,
+    active_spectral_model_source: runtimeModelSource,
     estimated_force_fz_n: displayForceN,
     optical_force_estimate: responseAllowed ? contract.force || null : null,
   };
@@ -8486,7 +8589,7 @@ function normalizeCanonicalVisualizationFrame(frame, contract) {
     model_assisted_display_allowed: responseAllowed,
     model_assisted_display_block_reason: blockReason,
     active_spectral_prediction: prediction,
-    active_spectral_model_source: CURRENT_RUNTIME_MODEL_SOURCE,
+    active_spectral_model_source: runtimeModelSource,
     active_spectral_model_status: String(contract.prediction_status || "unavailable"),
     latest,
     trace: appendCurrentRuntimeTrace(rawRecord, contract),
@@ -8517,11 +8620,42 @@ function normalizeGlobalSpectrumFrame(frame) {
 
 function sourceFrameRenderKey(rawFrame) {
   const latest = rawFrame?.latest || {};
+  const visualization = rawFrame?.operator_visualization_frame || {};
   const frameId = latest.frame_id ?? rawFrame?.frame_id;
   const timestamp = latest.timestamp ?? rawFrame?.timestamp;
   const source = latest.source ?? rawFrame?.source ?? "unknown";
-  if (frameId == null && timestamp == null) return null;
-  return `${source}|${String(frameId ?? "")}|${String(timestamp ?? "")}`;
+  const sourceSession =
+    rawFrame?.sdk_live?.acquisition_session_id ??
+    rawFrame?.export_watcher?.acquisition_session_id ??
+    "";
+  const runtimeUniqueFrame =
+    rawFrame?.active_spectral_prediction?.unique_frame_count ??
+    rawFrame?.runtime_prediction?.unique_frame_count ??
+    latest?.active_spectral_prediction?.unique_frame_count ??
+    latest?.runtime_prediction?.unique_frame_count;
+  const gateSignature = [
+    rawFrame?.source_fresh === true ? "fresh" : "stale",
+    rawFrame?.operator_display_valid === true ? "display" : "blocked",
+    String(rawFrame?.model_assisted_display_block_reason || ""),
+    visualization?.prediction_ready === true ? "prediction-ready" : "prediction-waiting",
+    visualization?.response_allowed === true ? "response-allowed" : "response-blocked",
+    String(visualization?.response_state || ""),
+    String(visualization?.response_block_reason || ""),
+  ].join(":");
+  if (
+    frameId == null &&
+    timestamp == null &&
+    runtimeUniqueFrame == null &&
+    !gateSignature
+  ) return null;
+  return [
+    source,
+    String(sourceSession),
+    String(frameId ?? ""),
+    String(timestamp ?? ""),
+    String(runtimeUniqueFrame ?? ""),
+    gateSignature,
+  ].join("|");
 }
 
 function invalidateLiveSourceProbe() {
@@ -8745,8 +8879,11 @@ function renderSpectrumProcessingStatus(payload = state.spectrumProcessing) {
     settings,
   };
 
-  if (spectrumIntegrationSelect) {
-    spectrumIntegrationSelect.value = String(Number(settings.integration_us) || 5000);
+  if (spectrumSensorModeSelect) {
+    spectrumSensorModeSelect.value = String(Number(settings.sensor_mode) === 1 ? 1 : 0);
+  }
+  if (spectrumIntegrationInput) {
+    spectrumIntegrationInput.value = String(Number(settings.integration_us) || 300);
   }
   if (spectrumOverlayToggle) {
     spectrumOverlayToggle.checked = Boolean(settings.update_overlay_data);
@@ -8847,10 +8984,15 @@ async function updateSpectrumProcessingSettings(updates, { restartLive = false }
     const integration = Number(
       payload?.spectrum_processing?.settings?.integration_us
       || state.spectrumProcessing?.settings?.integration_us
-      || 5000
+      || 300
+    );
+    const sensorMode = Number(
+      payload?.spectrum_processing?.settings?.sensor_mode
+      ?? state.spectrumProcessing?.settings?.sensor_mode
+      ?? 0
     );
     const livePayload = await requestJSON(
-      `/api/live/start?channel_id=${channel}&interval_sec=0.1&integration=${integration}&control_sense=false&source=direct_sdk`,
+      `/api/live/start?channel_id=${channel}&interval_sec=0.01&integration=${integration}&sensor_mode=${sensorMode}&control_sense=false&source=direct_sdk`,
       { method: "POST" },
       { timeoutMs: 12000 }
     );
@@ -9098,6 +9240,7 @@ exportWatchButton.addEventListener("click", () => {
       state.dataStreamActive = true;
       if (stopping) {
         await requestJSON("/api/export_watch/stop", { method: "POST" });
+        clearStoppedLivePresentation();
       } else {
         resetRuntimeTraceHistory();
         if (state.sdkLiveActive) {
@@ -9106,7 +9249,7 @@ exportWatchButton.addEventListener("click", () => {
         const channel = encodeURIComponent(state.selectedChannel);
         await requestJSON(`/api/export_watch/start?channel_id=${channel}&interval_sec=0.35`, { method: "POST" });
       }
-      await fetchFrame({ force: true });
+      if (!stopping) await fetchFrame({ force: true });
     },
   });
 });
@@ -9133,19 +9276,21 @@ liveTwinButton.addEventListener("click", () => {
       try {
         if (stopping) {
           await requestJSON("/api/live/stop?control_sense=false", { method: "POST" }, { timeoutMs: 12000 });
+          clearStoppedLivePresentation();
         } else {
           resetRuntimeTraceHistory();
           const source = inputSourceSelect.value === "export_watch" ? "export_watch" : "direct_sdk";
           const controlSense = source === "export_watch" ? "true" : "false";
-          const sourceIntervalSec = source === "direct_sdk" ? 0.02 : 0.1;
-          const integration = Number(state.spectrumProcessing?.settings?.integration_us) || 5000;
+          const sourceIntervalSec = source === "direct_sdk" ? 0.01 : 0.1;
+          const integration = Number(state.spectrumProcessing?.settings?.integration_us) || 300;
+          const sensorMode = Number(state.spectrumProcessing?.settings?.sensor_mode) === 1 ? 1 : 0;
           await requestJSON(
-            `/api/live/start?channel_id=${channel}&interval_sec=${sourceIntervalSec}&integration=${integration}&control_sense=${controlSense}&source=${source}`,
+            `/api/live/start?channel_id=${channel}&interval_sec=${sourceIntervalSec}&integration=${integration}&sensor_mode=${sensorMode}&control_sense=${controlSense}&source=${source}`,
             { method: "POST" },
             { timeoutMs: 12000 }
           );
         }
-        await fetchFrame({ force: true });
+        if (!stopping) await fetchFrame({ force: true });
       } catch (error) {
         state.liveRequested = previousLiveRequested;
         throw error;
@@ -9461,16 +9606,43 @@ settingsResetCameraButton?.addEventListener("click", () => {
   state.threeNeedsRefresh = true;
 });
 
-spectrumIntegrationSelect?.addEventListener("change", async () => {
-  spectrumIntegrationSelect.disabled = true;
+spectrumSensorModeSelect?.addEventListener("change", async () => {
+  spectrumSensorModeSelect.disabled = true;
   try {
-    const integrationUs = Number(spectrumIntegrationSelect.value) || 5000;
+    const sensorMode = Number(spectrumSensorModeSelect.value) === 1 ? 1 : 0;
+    await updateSpectrumProcessingSettings(
+      { sensor_mode: sensorMode },
+      { restartLive: true }
+    );
+    setCommandFeedback(
+      `BaySpec mode set to ${sensorMode === 0 ? "High sensitivity" : "High dynamic range"}.`,
+      "success",
+      { autoHideMs: 2400 }
+    );
+  } catch (error) {
+    console.error("[BaySpec sensor mode]", error);
+    setCommandFeedback(commandErrorMessage(error, "Sensor mode update failed"), "error", {
+      autoHideMs: 7000,
+    });
+    await loadSpectrumProcessingStatus();
+  } finally {
+    spectrumSensorModeSelect.disabled = false;
+  }
+});
+
+spectrumIntegrationInput?.addEventListener("change", async () => {
+  spectrumIntegrationInput.disabled = true;
+  try {
+    const integrationUs = Math.max(
+      1,
+      Math.min(10000000, Math.round(Number(spectrumIntegrationInput.value) || 300))
+    );
     await updateSpectrumProcessingSettings(
       { integration_us: integrationUs },
       { restartLive: true }
     );
     setCommandFeedback(
-      `Exposure set to ${(integrationUs / 1000).toFixed(0)} ms.`,
+      `Exposure set to ${integrationUs} µs.`,
       "success",
       { autoHideMs: 2400 }
     );
@@ -9481,7 +9653,7 @@ spectrumIntegrationSelect?.addEventListener("change", async () => {
     });
     await loadSpectrumProcessingStatus();
   } finally {
-    spectrumIntegrationSelect.disabled = false;
+    spectrumIntegrationInput.disabled = false;
   }
 });
 
@@ -9931,8 +10103,12 @@ px6dCaptureStopButton?.addEventListener("click", async () => {
     if (Number(payload.captured_timeline_frames ?? payload.captured_paired_frames ?? 0) > 0) {
       nextCaptureTrialId();
     }
+    const savedFrameRate = Number(payload.captured_frame_rate_hz);
+    const savedRateText = Number.isFinite(savedFrameRate)
+      ? ` at ${savedFrameRate.toFixed(1)} Hz`
+      : "";
     setCommandFeedback(
-      `Saved ${payload.captured_timeline_frames ?? payload.captured_paired_frames ?? 0} frames.`,
+      `Saved ${payload.captured_timeline_frames ?? payload.captured_paired_frames ?? 0} frames${savedRateText}.`,
       Number(payload.captured_timeline_frames ?? payload.captured_paired_frames ?? 0) > 0 ? "success" : "warning",
       { autoHideMs: 4000 }
     );

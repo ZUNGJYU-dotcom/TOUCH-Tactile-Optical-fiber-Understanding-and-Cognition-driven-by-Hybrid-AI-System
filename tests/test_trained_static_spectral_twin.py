@@ -228,7 +228,26 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
             baseline_result["current_runtime_spectrum_baseline_status"],
             "stable_post_release_recovery_baseline",
         )
-        ready = backend_main._predict_current_runtime()
+        generic_baseline_blocked = backend_main._predict_current_runtime()
+        self.assertFalse(generic_baseline_blocked["ok"])
+        self.assertIn(
+            generic_baseline_blocked["status"],
+            {
+                "startup_baseline_collecting",
+                "startup_baseline_waiting_for_stability",
+            },
+        )
+
+        ready = None
+        for index in range(20, 27):
+            backend_main.bridge.ingest(
+                {**baseline_frame, "timestamp": 1000.0 + 0.04 * index}
+            )
+            ready = backend_main._predict_current_runtime()
+            if ready.get("ok"):
+                break
+
+        self.assertIsNotNone(ready)
         self.assertTrue(ready["ok"])
         self.assertEqual(ready["status"], "ready")
         self.assertEqual(ready["runtime_role"], "deployed_current_model_only")
@@ -276,6 +295,7 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
     def test_global_api_contract_keeps_model_position_and_physical_map_semantics_separate(self) -> None:
         backend_main.export_watcher.stop()
         backend_main.sdk_live_reader.stop()
+        backend_main._reset_current_runtime("unit_test_global_api_contract")
         backend_main.bridge.reset(keep_baseline=False)
         baseline_frame = {
             "channel_id": "P22",
@@ -283,14 +303,19 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
             "intensity": self.baseline_intensity,
             "source": "unit_test_fixture",
         }
-        for index in range(24):
+        startup_prediction = None
+        for index in range(5):
             backend_main.bridge.ingest(
                 {**baseline_frame, "timestamp": 1000.0 + 0.04 * index}
             )
-        baseline_result = backend_main.bridge.set_baseline(
-            {"channel_id": "P22", "baseline_method": "frozen_baseline"}
+            startup_prediction = backend_main._predict_current_runtime()
+        self.assertIsNotNone(startup_prediction)
+        self.assertTrue(startup_prediction["ok"])
+        baseline_pair = backend_main.bridge.spectral_model_input(channel_id="P22")
+        self.assertEqual(
+            baseline_pair["baseline_spectrum_status"],
+            "stable_current_session_startup_baseline",
         )
-        self.assertTrue(baseline_result["current_runtime_spectrum_baseline_ready"])
 
         # A current-runtime integration probe must use the same wavelength grid
         # as its frozen baseline. Legacy static fixtures use a different grid.
@@ -314,7 +339,7 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
         )
         self.assertEqual(
             frame["active_spectral_model_source"],
-            "ordinary_fbg_all_data_beta_v1",
+            frame["runtime_model"]["classification_model_source"],
         )
         self.assertEqual(
             frame["runtime_model"]["runtime_role"],
@@ -323,9 +348,12 @@ class TrainedStaticSpectrumTwinTests(unittest.TestCase):
         contract = frame["operator_visualization_frame"]
         self.assertEqual(
             contract["contract_version"],
-            "touch_operator_visualization_v1",
+            "touch_operator_visualization_v2",
         )
-        self.assertEqual(contract["model_source"], "ordinary_fbg_all_data_beta_v1")
+        self.assertEqual(
+            contract["model_source"],
+            frame["runtime_model"]["classification_model_source"],
+        )
         self.assertTrue(contract["prediction_ready"])
         self.assertEqual(contract["response_state"], "no_contact")
         self.assertFalse(contract["force"]["upper_limit_applied"])

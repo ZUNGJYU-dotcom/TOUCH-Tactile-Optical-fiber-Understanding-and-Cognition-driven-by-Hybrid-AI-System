@@ -74,6 +74,44 @@ class Px6dSessionDatasetTests(unittest.TestCase):
             ["20260803_P11_current"],
         )
 
+    def test_software_build_filter_isolates_same_day_capture_batches(self) -> None:
+        descriptors = (
+            SessionDescriptor(
+                session_dir=Path("older"),
+                session_id="20260902_P11_older",
+                trial_id="1",
+                position_label="P11",
+                qa_status="pass",
+                finding_codes=(),
+                software_version="0.19.16-beta",
+                software_build_id="older-build",
+            ),
+            SessionDescriptor(
+                session_dir=Path("current"),
+                session_id="20260902_P11_current",
+                trial_id="1",
+                position_label="P11",
+                qa_status="pass",
+                finding_codes=(),
+                software_version="0.19.19-beta",
+                software_build_id="joint-signature-build",
+            ),
+        )
+
+        selected = filter_session_descriptors(
+            descriptors,
+            {
+                "include_session_id_prefixes": ["20260902_"],
+                "include_software_versions": ["0.19.19-beta"],
+                "include_software_build_ids": ["joint-signature-build"],
+            },
+        )
+
+        self.assertEqual(
+            [descriptor.session_id for descriptor in selected],
+            ["20260902_P11_current"],
+        )
+
     def test_session_loader_sorts_capture_and_point_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_root:
             session_dir = Path(temporary_root)
@@ -310,6 +348,85 @@ class Px6dSessionDatasetTests(unittest.TestCase):
                 {
                     "required_capture_root_name": "new data",
                     "required_session_id_prefix": "20260731_",
+                    "require_qa_for_every_session": True,
+                },
+            )
+
+    def test_strict_source_contract_rejects_acquisition_domain_mismatch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            capture_root = Path(temporary_root) / "new data"
+            session_dir = capture_root / "session"
+            session_dir.mkdir(parents=True)
+            descriptor = SessionDescriptor(
+                session_dir=session_dir,
+                session_id="20260831_P11_current",
+                trial_id="1",
+                position_label="P11",
+                qa_status="pass",
+                finding_codes=(),
+                software_version="0.19.11-beta",
+                software_build_id="older-exposure-build",
+                optical_source="direct_bayspec_usb20bs_sdk_helper",
+                integration_us=5000,
+            )
+
+            with self.assertRaisesRegex(ValueError, "expected software version"):
+                validate_strict_source_contract(
+                    capture_root,
+                    (descriptor,),
+                    {
+                        "required_capture_root_name": "new data",
+                        "required_session_id_prefix": "20260831_",
+                        "required_software_version": "0.19.12-beta",
+                        "required_software_build_id": (
+                            "beta-bayspec-high-sensitivity-300us-v19-12-20260831"
+                        ),
+                        "required_optical_source": (
+                            "direct_bayspec_usb20bs_sdk_helper"
+                        ),
+                        "required_integration_us": 300,
+                        "require_qa_for_every_session": True,
+                    },
+                )
+
+    def test_strict_source_contract_accepts_matching_acquisition_domain(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_root:
+            capture_root = Path(temporary_root) / "new data"
+            session_dir = capture_root / "session"
+            session_dir.mkdir(parents=True)
+            descriptor = SessionDescriptor(
+                session_dir=session_dir,
+                session_id="20260831_P11_current",
+                trial_id="1",
+                position_label="P11",
+                qa_status="pass",
+                finding_codes=(),
+                software_version="0.19.12-beta",
+                software_build_id=(
+                    "beta-bayspec-high-sensitivity-300us-v19-12-20260831"
+                ),
+                optical_source="direct_bayspec_usb20bs_sdk_helper",
+                integration_us=300,
+            )
+
+            validate_strict_source_contract(
+                capture_root,
+                (descriptor,),
+                {
+                    "required_capture_root_name": "new data",
+                    "required_session_id_prefix": "20260831_",
+                    "required_software_version": "0.19.12-beta",
+                    "required_software_build_id": (
+                        "beta-bayspec-high-sensitivity-300us-v19-12-20260831"
+                    ),
+                    "required_optical_source": (
+                        "direct_bayspec_usb20bs_sdk_helper"
+                    ),
+                    "required_integration_us": 300,
                     "require_qa_for_every_session": True,
                 },
             )

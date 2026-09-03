@@ -322,7 +322,7 @@ class OperatorResponsiveLayoutContractTests(unittest.TestCase):
         self.assertIn('data-lucide="radio-tower"', live_command)
 
     def test_frontend_status_text_has_no_mojibake_separators(self) -> None:
-        for damaged_text in ("路", "卤"):
+        for damaged_text in ("路", "卤", "螖"):
             self.assertNotIn(damaged_text, self.app_js)
         for source_label in ("SDK | idle", "Watch | idle", "HTTP | idle"):
             self.assertIn(source_label, self.app_js)

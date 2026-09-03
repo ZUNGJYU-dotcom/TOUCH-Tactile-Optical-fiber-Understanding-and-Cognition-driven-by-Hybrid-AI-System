@@ -2,6 +2,256 @@
 
 ## Unreleased
 
+## v0.19.25 - 2026-09-03
+
+### v0.19.25 Stable promotion
+
+- Promote the user-validated v0.19.25 Beta runtime without changing the
+  deployed model artifact, feature schema, thresholds, or release repair.
+- Publish a true Windows x64 single-file Stable executable containing the
+  current model, deployment record, frontend, 3D assets, Python runtime,
+  configuration, BaySpec x86 helper, and vendor user-mode SDK DLL.
+- Give Stable its own High Sensitivity / 300 us processing settings and its
+  own copy of the validated contact-state configuration, preventing legacy
+  5000 us settings or later Beta experiments from changing Stable behavior.
+- Package only the deployed current model and its hash-bound deployment
+  metadata. Beta and the v0.19.23 rollback build remain separate.
+- Record live validation with 54 press/release capture frames, no frame-order
+  regressions, a released final state, and 31 subsequent idle frames with zero
+  false activation.
+
+### v0.19.25 Beta release-latch repair
+
+- Ignore late SDK frames that arrive out of order when concurrent Operator and
+  Record requests snapshot adjacent spectra. Such frames no longer rewind the
+  temporal adapter or erase the physical contact peak used for release.
+- Add a conservative nine-FBG residual-recovery release path for cases where
+  the contact classifier remains saturated after the finger is removed. It
+  requires an armed contact, at least 60% recovery from the observed contact
+  peak, a quiet complete spectrum, no recent spectral activity, low position
+  confidence, and two physical frames spanning at least 180 ms.
+- Preserve the fixed clean-session model baseline and the isolated current-only
+  model bundle. The Stable edition, deployed estimator artifacts, and training
+  data are unchanged.
+- Replay Blind1, Blind3, and Blind4 through the exact adapter with zero
+  dedicated-idle activations. The only additional suppressed active frame is a
+  0.085 N release-tail sample; all three batches retain 100% session accuracy.
+
+### v0.19.24 Beta same-day joint nine-FBG runtime
+
+- Train one same-day runtime from 161 complete High Sensitivity / 300 us
+  sessions and 49,853 frames spanning the two regular batches plus the
+  answer-known Blind1, Blind3, and Blind4 batches. Blind2 remains excluded;
+  these formerly blind batches are training data now and are not presented as
+  independent blind evidence.
+- Require the complete optical fingerprint for every task. Contact and force
+  use 339 features made from the 264-value baseline-relative full-spectrum
+  view plus 75 joint nine-FBG features; position uses the 75-value joint
+  nine-FBG view. No task treats one grating as sufficient evidence.
+- Deploy LightGBM for contact, random forest for position, and histogram
+  gradient boosting for optical Fz. Complete-session grouped evaluation gives
+  98.06% raw position accuracy and 0.310 N force MAE; leave-one-acquisition-
+  batch-out runtime stress gives 99.09% position accuracy and zero dedicated-
+  idle activations.
+- Replay all 161 sessions through the exact Beta adapter and state machine:
+  0/10,589 dedicated-idle activations, 99.85% active-contact recall, zero
+  emitted wrong-position frames, and 100% accuracy whenever a position is
+  emitted. Forty-four position frames are deliberately withheld by the
+  confirmation gate rather than assigned to another point.
+- Bind promotion to the staged-model SHA-256 and exact-replay artifact, archive
+  the preceding deployed model before replacement, and keep the complete
+  v0.19.23 executable as an immediate desktop rollback. New-date live
+  validation remains required.
+
+### v0.19.23 Beta Blind4-validated incremental model
+
+- Extend the isolated High Sensitivity / 300 us training set with the 14
+  unblinded Blind3 sessions, for 69 complete sessions and 26,862 frames. The
+  newly collected Blind4 sessions remain excluded from training.
+- Deploy histogram gradient boosting for contact, random forest for position,
+  and Extra Trees for optical Fz, all using the complete 264-feature
+  baseline-relative nine-FBG fingerprint.
+- Freeze Blind4 predictions before opening its answer folders and verify zero
+  overlap with training. The candidate identifies all 18 position sessions and
+  all five no-contact sessions, with no activation in 766 dedicated idle
+  frames and 97.47% position accuracy when optical contact is active.
+- Re-run the deployed model through the complete Beta contact state machine as
+  an explicitly marked post-unblind deployment check. It retains 23/23 session
+  decisions, 0/766 dedicated-idle activations, 97.20% active-frame display
+  coverage, and zero wrong displayed positions on active reference frames.
+- Retain optical force as experimental: Blind4 active-frame MAE is 0.552 N and
+  forces above 5 N remain underestimated. Preserve the preceding runtime as a
+  hash-verified rollback and require a post-deployment live check.
+
+### v0.19.22 Beta position episode lock and synchronized display exports
+
+- Keep the selected position stable for the active contact episode after a
+  two-second onset-settling window. Weak or ambiguous neighbouring-class
+  fluctuations can no longer move a sustained P11 press to P13; a real
+  in-contact move still switches after eight consecutive frames with strong
+  nine-FBG evidence.
+- Preserve the established position through temporary classifier ambiguity
+  until the existing contact-release state machine confirms release. This
+  removes visible blanking and relabelling without changing the deployed model
+  artifact or its training data.
+- Replay the untouched blind set with answer labels excluded from inference.
+  All 14 sessions retain the correct session identity, and P11 improves from
+  56/117 P11 display votes to 117/117. A separate 27-session training-domain
+  state-machine replay contains no cross-position assignments and reaches
+  99.80% active-frame display accuracy.
+- Extend synchronized Record outputs with the exact contact state, position,
+  confidence, margin, and optical force shown by Operator on the same frame,
+  while retaining separate formal and raw model labels for comparison.
+
+### v0.19.20 Beta new-data model and gradual recontact repair
+
+- Train an isolated model from the complete 2026-09-02 `0.19.19-beta`
+  acquisition batch: 55 synchronized sessions, 24,785 frames, ten no-contact
+  sessions, and five independent trials for every P11-P33 position. Earlier
+  acquisition modes and dates remain excluded.
+- Use all 264 baseline-relative full-spectrum features for contact, position,
+  and optical Fz. The selected models are LightGBM, random forest, and Extra
+  Trees respectively; whole-session five-fold validation reaches 98.44%
+  contact accuracy, 99.63% position accuracy, and 0.209 N force MAE.
+- Fix a release-state lock that could suppress a genuine gradual second press
+  at high frame rates. A sustained high-confidence nine-FBG position/contact
+  signature plus clear movement away from the session baseline can now re-arm
+  contact without requiring one large inter-frame motion spike.
+- Replay all 45 labelled sessions through the exact Beta state machine. P11
+  continuous coverage improves from 1,664/1,973 to 1,973/1,973; aggregate
+  active display accuracy is 99.84%, there are no cross-position assignments,
+  and no non-P33 sample is displayed as P33. Seven displayed frames remain in
+  one P23 post-release residual sequence (0.41% of idle-labelled frames).
+- Preserve the previous deployed model as a hash-verified rollback and mark
+  this build for final live idle and labelled-press validation.
+
+### v0.19.19 Beta nine-FBG joint contact signature
+
+- Evaluate every contact onset from the complete nine-grating response rather
+  than allowing a single peak disturbance to drive the tactile twin. The
+  explicit 36-value local signature contains wavelength, area, height, and
+  shape changes for all nine FBG candidates alongside the existing 512-point
+  full-spectrum classifiers.
+- Require a distributed measured response across at least five low-response
+  and three nominal-response gratings. Retain a conservative light-contact
+  path only when the full-spectrum contact and position models are both highly
+  confident.
+- Apply the joint signature to formal contact, model-consensus contact, low
+  force visual activation, and trusted-rest unlock. Do not re-gate an already
+  established stationary plateau, preserving sustained P11-P33 response.
+- Replay all 45 High Sensitivity / 300 us labelled sessions: 0/1,815 idle
+  visual activations, 11,494/11,513 correct active position displays, no
+  cross-position confusion, and 11,243/11,243 correct sustained-interior
+  frames. All 19 omitted frames were 0.25-0.5 N boundary samples.
+- Keep the deployed v3 model artifact unchanged; this release modifies runtime
+  evidence validation only.
+
+### v0.19.17 Beta 2026-09-02 acquisition-domain model
+
+- Train a new isolated High Sensitivity / 300 us candidate from 55 complete
+  synchronized sessions recorded on 2026-09-02: ten no-contact sessions and
+  five independent trials for each of P11-P33, totalling 17,254 frames.
+- Keep every earlier acquisition date out of fitting and candidate selection.
+  All formal metrics use five-fold whole-session holdout, never a random frame
+  split.
+- Select histogram gradient boosting for contact, random forest for position,
+  and Extra Trees for continuous optical Fz. Grouped out-of-fold performance is
+  98.05% contact accuracy, 99.44% position accuracy, 0.181 N force MAE, and
+  0.971 R2 over the measured 0-6.04 N range.
+- Preserve unlimited positive force extrapolation instead of clipping at the
+  calibration maximum.
+- Save the immediately preceding deployed model as a hash-verified rollback on
+  every promotion. The deployment tool now accepts explicit candidate and
+  dataset directories rather than being tied to the 2026-08-31 run.
+- Validate the final runtime gate with a fresh current-session baseline: 0%
+  visual idle activation over 1,815 idle frames, 99.86% active position
+  accuracy over 11,513 active frames, and no non-P23 false-P23 assignments.
+  This gate replay is a training-domain compatibility check; grouped OOF
+  metrics remain the independent generalization evidence.
+- Retain the fixed model baseline policy. A deliberately stale recorded
+  reference degraded the long-duration replay, so live validation must begin
+  from the startup-settled no-contact baseline and optical drift requires an
+  explicit refresh or application restart.
+
+### v0.19.16 Beta fixed-session baseline and high-rate Record
+
+- Keep the model's startup-settled baseline fixed for the complete live session;
+  rest recovery may suppress idle output but cannot rewrite the
+  baseline-relative position coordinate system.
+- Decouple synchronized raw spectrum/PX6D capture from model inference. Record
+  accepts an inference result only when the exact same spectrum frame is
+  already cached; otherwise the aligned response row is explicitly marked for
+  offline reconstruction instead of blocking capture or reusing stale output.
+- Poll Record at 10 ms and durably flush batches every 10 frames or 250 ms.
+  A 512-point spectrum + response + force benchmark sustained 43.2 frames/s,
+  compared with about 3 frames/s in the previous synchronous inference path.
+- Report the measured capture rate in Diagnostics and preserve exact timeline
+  equality across all selected CSV streams and the lossless JSONL sidecar.
+- Package only the High Sensitivity / 300 us deployed model in Beta and remove
+  the remaining all-data/three-date runtime labels from Diagnostics, health
+  metadata, and launcher validation. Historical artifacts remain outside the
+  Beta runtime for research traceability and Stable rollback only.
+- Prevent the fixed-baseline rest lock from entering an automatic-reanchor
+  candidate that cannot complete when model-baseline updates are disabled.
+  The final 18-session replay produced 0% idle activation across 545 idle
+  frames and 99.64% correct nine-position output across 2800 active frames.
+
+### v0.19.15 Beta baseline-response latency repair
+
+- Keep the trusted-rest baseline and formal two-frame contact confirmation,
+  while allowing a fresh, baseline-separated, spatially credible optical press
+  to arm the operator visual contact path on its first physical frame.
+- Retain two-frame position confirmation so a single P23 classifier spike
+  cannot capture the tactile surface position.
+- Preserve the v0.19.14 grouped replay results: 0.55% idle visual tail rate,
+  98.39% active visual coverage, 98.32% position accuracy, and zero non-P23
+  false-P23 assignments.
+
+### v0.19.14 Beta intermittent idle-contact repair
+
+- Add a true one-file Windows Beta build containing the only deployed model,
+  frontend, configuration, BaySpec x86 helper, and vendor SDK DLL, plus a
+  current-user Setup EXE, portable ZIP, and SHA-256 release manifest.
+- Latch an operator-confirmed or startup-settled spectrum as trusted rest so
+  isolated High Sensitivity noise cannot bypass no-contact through a single
+  activity frame.
+- Unlock real contact after two physical frames using either credible spatial
+  evidence or a baseline-relative spectral departure above the measured idle
+  envelope; this retains low-force response while suppressing idle drift.
+- Re-anchor moderate stationary rest drift without accepting it as contact,
+  and clear stale surface, trace, position, and force visuals immediately when
+  Live or Watch acquisition stops.
+- Validate against a 600-frame 300 us High Sensitivity no-contact capture with
+  zero formal contact, zero visual activation, and zero position output. A
+  grouped nine-position press replay retained 98.39% visual coverage and
+  98.32% position accuracy using a current-session baseline.
+
+### v0.19.13 Beta isolated 300 us model and low-latency SDK stream
+
+- Deploy the isolated 2026-08-31 High Sensitivity / 300 us model for Beta
+  hardware evaluation while preserving the previous runtime as a hash-verified
+  rollback artifact; Stable is unchanged.
+- Use one persistent x86 BaySpec SDK process for continuous acquisition and
+  restart it only after a stream failure or an explicit setting change.
+- Reduce the default inter-frame interval from 20 ms to 10 ms. The 300 us
+  detector exposure is unchanged and remains adjustable.
+- Keep the grouped out-of-session evidence visible as candidate evidence:
+  contact accuracy 0.978, position accuracy 0.998, and optical-force MAE
+  0.152 N. Live hardware validation remains required.
+
+### v0.19.12 Beta BaySpec high-sensitivity acquisition
+
+- Make BaySpec sensor mode `0` (`High Sensitivity`) the explicit Beta default
+  instead of relying on the helper's previous implicit mode selection.
+- Set the default detector exposure to `300 us` and expose an exact
+  `1-10000000 us` numeric control in Settings.
+- Restart an active direct-SDK session when either sensor mode or exposure
+  changes, and reject helper frames whose echoed mode/exposure differs from
+  the requested acquisition contract.
+- Isolate Beta acquisition preferences in
+  `%LOCALAPPDATA%/TOUCH/spectrum_processing_beta.json`, leaving Stable's
+  existing settings untouched.
+
 ### v0.19.7 Stable and Beta status-text hotfix
 
 - Removed the corrupted status separator that rendered as Chinese `路` in source labels such as `SDK idle`.

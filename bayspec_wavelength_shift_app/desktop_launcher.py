@@ -29,9 +29,11 @@ APP_EXPANDED_TITLE = (
 DEFAULT_PORT = 8640
 FALLBACK_PORT_COUNT = 10
 EXPECTED_BACKEND_APP = "TOUCH"
-EXPECTED_BACKEND_MODE = "standalone_touch_all_data_spectral_runtime"
+EXPECTED_BACKEND_MODE = "standalone_touch_high_sensitivity_300us_spectral_runtime"
 EXPECTED_BACKEND_CONTRACT_VERSION = "touch_current_runtime_api_v1"
-EXPECTED_RUNTIME_MODEL = "ordinary_fbg_all_data_beta_v1"
+EXPECTED_RUNTIME_MODEL = "ordinary_fbg_same_day_joint_nine_fbg_beta_v4"
+EXPECTED_RUNTIME_SCHEMA = "same_day_joint_nine_fbg_v4"
+EXPECTED_RUNTIME_DATASET_ID = "ordinary_fbg_20260902_same_day_joint_fingerprint_v2"
 
 GWL_STYLE = -16
 WS_SYSMENU = 0x00080000
@@ -551,6 +553,20 @@ def show_error(title: str, message: str) -> None:
 def configure_runtime_paths() -> Path:
     app_root = bundle_root()
     os.environ["BAYSPEC_WAVELENGTH_APP_ROOT"] = str(app_root)
+    version_candidates = (
+        app_root / "VERSION.json",
+        app_root / "release_manifests" / "beta" / "VERSION.json",
+        app_root.parent / "VERSION.json",
+    )
+    for version_path in version_candidates:
+        try:
+            version_payload = json.loads(version_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        release_channel = str(version_payload.get("release_channel") or "").strip()
+        if release_channel:
+            os.environ["TOUCH_RELEASE_CHANNEL"] = release_channel
+            break
     if is_frozen():
         # Keep experiment evidence outside the replaceable application bundle.
         documents_root = Path(
@@ -648,6 +664,10 @@ def health_payload_is_expected(payload: object) -> bool:
         and isinstance(runtime_model, dict)
         and runtime_model.get("loaded") is True
         and runtime_model.get("runtime_role") == "deployed_current_model_only"
+        and runtime_model.get("active_runtime_schema") == EXPECTED_RUNTIME_SCHEMA
+        and runtime_model.get("active_dataset_id") == EXPECTED_RUNTIME_DATASET_ID
+        and runtime_model.get("current_only_bundle") is True
+        and runtime_model.get("legacy_fallback_enabled") is False
         and isinstance(recognition_runtime, dict)
         and recognition_runtime.get("active_model_id") == EXPECTED_RUNTIME_MODEL
         and recognition_runtime.get("switchable") is False
@@ -681,6 +701,8 @@ def run_self_test() -> int:
         recognition_runtime = payload.get("recognition_runtime", {})
         checks["single_runtime_model_contract"] = bool(
             runtime_model.get("runtime_role") == "deployed_current_model_only"
+            and runtime_model.get("current_only_bundle") is True
+            and runtime_model.get("legacy_fallback_enabled") is False
             and recognition_runtime.get("model_count") == 1
             and recognition_runtime.get("switchable") is False
         )

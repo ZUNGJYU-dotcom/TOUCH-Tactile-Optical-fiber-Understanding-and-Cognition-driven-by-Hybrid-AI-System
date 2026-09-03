@@ -10,6 +10,31 @@ from .features import PeakWindow
 
 
 EPSILON = 1.0e-9
+LOCAL_FEATURE_SUFFIXES = (
+    "centroid_shift_pm",
+    "log_area_ratio",
+    "log_height_ratio",
+    "shape_rmse",
+)
+GLOBAL_FEATURE_NAMES = (
+    "global_log_gain",
+    "global_normalized_shape_rms",
+    "global_normalized_shape_peak",
+    "global_derivative_residual_energy",
+)
+
+
+def baseline_relative_frame_feature_names(
+    peak_windows: Iterable[PeakWindow],
+) -> tuple[str, ...]:
+    """Return the fixed 40-value live frame contract without loading a model."""
+
+    local = tuple(
+        f"{window.candidate_id.lower()}_{suffix}"
+        for window in peak_windows
+        for suffix in LOCAL_FEATURE_SUFFIXES
+    )
+    return local + GLOBAL_FEATURE_NAMES
 
 
 def _local_peak_features(
@@ -59,12 +84,7 @@ def _local_peak_features(
             shape_rmse,
         ]
     )
-    names = (
-        f"{prefix}_centroid_shift_pm",
-        f"{prefix}_log_area_ratio",
-        f"{prefix}_log_height_ratio",
-        f"{prefix}_shape_rmse",
-    )
+    names = tuple(f"{prefix}_{suffix}" for suffix in LOCAL_FEATURE_SUFFIXES)
     return values, names
 
 
@@ -122,14 +142,7 @@ def extract_baseline_relative_frame_features(
             ]
         )
     )
-    feature_names.extend(
-        [
-            "global_log_gain",
-            "global_normalized_shape_rms",
-            "global_normalized_shape_peak",
-            "global_derivative_residual_energy",
-        ]
-    )
+    feature_names.extend(GLOBAL_FEATURE_NAMES)
     feature_matrix = np.column_stack(feature_blocks)
     feature_matrix = np.nan_to_num(feature_matrix, nan=0.0, posinf=0.0, neginf=0.0)
     shifts = feature_matrix[:, shift_columns]
@@ -151,4 +164,7 @@ def extract_baseline_relative_frame_features(
     return feature_matrix, tuple(feature_names), response_components, component_names
 
 
-__all__ = ["extract_baseline_relative_frame_features"]
+__all__ = [
+    "baseline_relative_frame_feature_names",
+    "extract_baseline_relative_frame_features",
+]

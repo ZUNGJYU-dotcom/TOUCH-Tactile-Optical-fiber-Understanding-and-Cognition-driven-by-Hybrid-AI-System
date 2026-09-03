@@ -18,13 +18,34 @@ class OperatorResponsePresentationContractTests(unittest.TestCase):
         )[0]
 
         self.assertIn(
-            'OPERATOR_VISUALIZATION_CONTRACT_VERSION = "touch_operator_visualization_v1"',
+            'OPERATOR_VISUALIZATION_CONTRACT_VERSION = "touch_operator_visualization_v2"',
             app_js,
         )
         self.assertIn("appendCurrentRuntimeTrace(rawRecord, contract)", canonical)
         self.assertIn("operator_visualization_frame: contract", canonical)
         self.assertIn("contract?.force?.display_n", canonical)
         self.assertIn("contract?.surface?.surface_grid", canonical)
+        self.assertIn(
+            "contract?.surface?.inferred_contact_probability_grid",
+            canonical,
+        )
+        self.assertIn(
+            "contract?.surface?.observed_coupled_spectral_response",
+            canonical,
+        )
+        self.assertIn("inferred_contact_probability: inferredProbability", canonical)
+        self.assertIn(
+            "observed_coupled_response_ratio: observedResponseRatio",
+            canonical,
+        )
+        self.assertIn(
+            "contract?.surface?.raw_inferred_contact_probabilities",
+            canonical,
+        )
+        self.assertIn(
+            "contract?.surface?.smoothed_inferred_contact_probabilities",
+            canonical,
+        )
         self.assertIn("force_frame_id: sync.force_frame_id ?? frameId", canonical)
         self.assertNotIn("trained_static_spectral_prediction", canonical)
         self.assertNotIn("dynamic_temporal_shadow", canonical)
@@ -32,6 +53,32 @@ class OperatorResponsePresentationContractTests(unittest.TestCase):
         self.assertIn("return contract?.prediction || null", active_prediction)
         self.assertNotIn("all_source_beta_model", app_js)
         self.assertNotIn("trainedStaticModelSurface", app_js)
+
+    def test_operator_summary_follows_the_same_inferred_dominant_as_the_map(self) -> None:
+        app_js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+        render = app_js.split("function updateUI(inputFrame)", 1)[1].split(
+            "function normalizeCanonicalVisualizationFrame", 1
+        )[0]
+
+        self.assertIn(
+            "surfaceMetrics.inferred_dominant_channel || surfaceMetrics.dominant_channel || record?.model_position_id",
+            render,
+        )
+        self.assertNotIn(
+            "(currentModelDisplay ? record?.model_position_id : null) || surfaceMetrics.dominant_channel",
+            render,
+        )
+
+    def test_diagnostics_channel_grid_separates_observed_and_inferred_values(self) -> None:
+        app_js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+        channel_grid = app_js.split("function updateChannelGrid", 1)[1].split(
+            "function updateOperatorFootprint", 1
+        )[0]
+
+        self.assertIn("item.observed_coupled_response_ratio", channel_grid)
+        self.assertIn("item.inferred_contact_probability", channel_grid)
+        self.assertIn("observed coupled", channel_grid)
+        self.assertIn("inferred probability", channel_grid)
 
     def test_operator_response_state_is_contact_not_force_band(self) -> None:
         app_js = (APP_ROOT / "frontend" / "app.js").read_text(encoding="utf-8")

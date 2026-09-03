@@ -85,7 +85,8 @@ class SpectrumDisplayProcessorTests(unittest.TestCase):
             )
             processor = self.processor(config_path)
             settings = processor.status()["settings"]
-            self.assertEqual(settings["integration_us"], 1000)
+            self.assertEqual(settings["integration_us"], 1)
+            self.assertEqual(settings["sensor_mode"], 0)
             self.assertLessEqual(settings["smoothing_window"], 31)
             self.assertEqual(settings["smoothing_window"] % 2, 1)
 

@@ -1,27 +1,47 @@
 # Portable Release
 
-The Windows build is `TOUCH\TOUCH.exe` and uses local port `8640`. The release
-Beta archive is `TOUCH-v0.18.5-beta-windows-x64.zip`.
+## Stable v0.19.25 one-file release
 
-Keep the executable beside its `_internal` directory. Live acquisition also
-requires the matching BaySpec driver and vendor SDK/runtime on the target
-computer. Captures default to `%USERPROFILE%\Documents\TOUCH\captures`, outside
-the replaceable application folder.
+The formal transferable application is:
 
-The archive must contain the same `VERSION.json` identity exposed by
-`GET /api/health`. It must not contain or replace the separate PD-voltage or
-earlier optical-intensity editions.
+`TOUCH-Stable-v0.19.25-Windows-x64.exe`
 
-Before hardware use, run:
+- Size: 103,285,538 bytes (98.50 MiB)
+- SHA-256: `7963470D59CDA9541EDC7120F66B342D2A451190EB2EE0AC0182D8B139B4EF94`
+
+The single EXE embeds the current hash-bound model, deployment metadata, Python
+runtime, frontend and 3D assets, Stable runtime configuration, BaySpec x86
+acquisition helper, and the vendor user-mode SDK DLL. It does not require a
+neighboring `_internal` folder or a Python installation.
+
+Before connecting hardware, run:
 
 ```powershell
-.\TOUCH\TOUCH.exe --self-test
+& '.\TOUCH-Stable-v0.19.25-Windows-x64.exe' --self-test
 ```
 
-The self-test validates bundled frontend, backend contract, SDK helper, model,
-mFBG configuration, and release resources without starting acquisition.
+The self-test validates the embedded frontend, backend contract, SDK helper,
+runtime model, mFBG configuration, and release identity without opening
+hardware or binding port `8640`. A successful self-test returns exit code `0`.
+Details are written to `%LOCALAPPDATA%\TOUCH\logs\desktop_launcher.log`.
 
-Version 0.17.1 retains the 5 ms BaySpec display path and adds bounded PX6D
-reconnect backoff plus Windows child-process cleanup. Recognition and recording
-still consume the raw 512-point spectrum. Live PX6D validation requires COM3
-to be released by the CH343 driver on the target machine.
+The first launch can be slower than the folder-based build because PyInstaller
+extracts the embedded runtime to a private temporary directory. Verify the
+published SHA-256 value before transfer or installation.
+
+## Target-computer hardware requirements
+
+The BaySpec helper and vendor SDK DLL are embedded, but a matching Windows USB
+kernel driver must still be installed on the target computer. PX6D use also
+requires its serial/USB driver. System drivers are not silently installed by
+the application package.
+
+Windows 10/11 x64 and Microsoft Edge WebView2 Runtime are required. WebView2 is
+normally present on supported Windows systems.
+
+## Release boundary
+
+The one-file package contains the complete TOUCH user-mode application but does
+not install kernel drivers. Stable remains the ordinary-FBG BaySpec edition;
+the separate mFBG research Beta must retain independent models, configuration,
+ports, release directories, and shortcuts.

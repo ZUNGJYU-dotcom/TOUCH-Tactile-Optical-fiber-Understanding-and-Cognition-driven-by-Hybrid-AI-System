@@ -356,7 +356,7 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
         self.assertEqual(payload["blockers"], payload["global_frame_qa"]["blockers"])
         self.assertEqual(
             payload["active_spectral_model_source"],
-            "ordinary_fbg_all_data_beta_v1",
+            payload["runtime_model"]["classification_model_source"],
         )
         self.assertEqual(
             payload["runtime_model"]["runtime_role"],
@@ -364,7 +364,235 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["operator_visualization_frame"]["contract_version"],
-            "touch_operator_visualization_v1",
+            "touch_operator_visualization_v2",
+        )
+
+    def test_global_endpoint_does_not_run_model_for_qa_invalid_frame(self) -> None:
+        latest = {
+            "frame_id": 901,
+            "timestamp": 12.5,
+            "ingested_at": time.time(),
+            "source": "static_http_ingest",
+            "peak_axis_type": "wavelength_nm",
+            "qa_status": "invalid",
+            "qa_flags": ["spectrum_length_mismatch"],
+            "wavelength_nm": [1540.0, 1540.1, 1540.2],
+            "intensity": [100.0, 110.0, 105.0],
+            "spectrum_peaks": [],
+        }
+        frame = {
+            "frame_id": 901,
+            "latest": latest,
+            "trace": [],
+            "array_frame": None,
+        }
+        stopped = {"active": False, "freshness": "stopped"}
+
+        with (
+            patch.object(backend_main.bridge, "frame", return_value=frame),
+            patch.object(backend_main.export_watcher, "status", return_value=stopped),
+            patch.object(backend_main.sdk_live_reader, "status", return_value=stopped),
+            patch.object(backend_main, "_predict_current_runtime") as predict,
+        ):
+            payload = backend_main.global_spectrum_frame(
+                trace_limit=8,
+                include_spectrum=True,
+            )
+
+        predict.assert_not_called()
+        self.assertFalse(payload["formal_recognition_allowed"])
+        self.assertFalse(payload["global_frame_qa"]["runtime_baseline_ready"])
+        self.assertEqual(
+            payload["model_assisted_display_block_reason"],
+            "spectrum_qa_invalid_for_formal_recognition",
+        )
+        self.assertFalse(payload["operator_visualization_frame"]["prediction_ready"])
+
+    def test_same_live_frame_is_neutralized_when_source_turns_stale(self) -> None:
+        latest = {
+            "frame_id": 902,
+            "timestamp": 12.6,
+            "ingested_at": time.time(),
+            "source": "bayspec_direct_sdk",
+            "peak_axis_type": "wavelength_nm",
+            "qa_status": "ok",
+            "qa_flags": [],
+            "wavelength_nm": [1540.0, 1540.1, 1540.2],
+            "intensity": [100.0, 110.0, 105.0],
+            "spectrum_peaks": [],
+        }
+        frame = {
+            "frame_id": 902,
+            "latest": latest,
+            "trace": [],
+            "array_frame": None,
+        }
+        watcher_stopped = {"active": False, "freshness": "stopped"}
+        sdk_fresh = {
+            "active": True,
+            "freshness": "live",
+            "acquisition_session_id": 44,
+        }
+        sdk_stale = {
+            "active": True,
+            "freshness": "stale",
+            "acquisition_session_id": 44,
+        }
+        runtime_status = {
+            "loaded": True,
+            "classification_model_source": "current_classifier",
+            "force_model_source": "current_force_model",
+            "runtime_startup_baseline": {"state": {"ready": True}},
+        }
+        active_prediction = {
+            "ok": True,
+            "status": "ready",
+            "classification_model_source": "current_classifier",
+            "force_model_source": "current_force_model",
+            "contact": {
+                "label": "contact",
+                "confidence": 0.93,
+                "contact_probability": 0.96,
+            },
+            "position": {"label": "P21", "visual_label": "P21"},
+            "force_fz": {"estimated_n": 2.0, "visual_drive_n": 2.0},
+            "digital_twin": {
+                "active": True,
+                "visual_active": True,
+                "position_id": "P21",
+                "surface_grid": [
+                    [0.05, 0.82, 0.04],
+                    [0.03, 0.20, 0.02],
+                    [0.01, 0.02, 0.01],
+                ],
+                "surface_metrics": {
+                    "surface_peak": 0.82,
+                    "surface_mean": 0.13,
+                    "surface_area_active": 2 / 9,
+                    "dominant_channel": "P21",
+                },
+            },
+        }
+
+        with (
+            patch.object(
+                backend_main.bridge,
+                "frame",
+                side_effect=lambda **_kwargs: {
+                    **frame,
+                    "latest": dict(latest),
+                    "trace": list(frame["trace"]),
+                },
+            ),
+            patch.object(
+                backend_main.export_watcher,
+                "status",
+                return_value=watcher_stopped,
+            ),
+            patch.object(
+                backend_main.sdk_live_reader,
+                "status",
+                side_effect=[sdk_fresh, sdk_stale],
+            ),
+            patch.object(
+                backend_main,
+                "_current_runtime_status",
+                return_value=runtime_status,
+            ),
+            patch.object(
+                backend_main,
+                "_predict_current_runtime",
+                return_value=active_prediction,
+            ) as predict,
+        ):
+            fresh_payload = backend_main.global_spectrum_frame(
+                trace_limit=8,
+                include_spectrum=True,
+            )
+            stale_payload = backend_main.global_spectrum_frame(
+                trace_limit=8,
+                include_spectrum=True,
+            )
+
+        self.assertEqual(predict.call_count, 1)
+        fresh_contract = fresh_payload["operator_visualization_frame"]
+        stale_contract = stale_payload["operator_visualization_frame"]
+        self.assertEqual(fresh_contract["frame_id"], stale_contract["frame_id"])
+        self.assertEqual(fresh_contract["source_session_id"], 44)
+        self.assertEqual(stale_contract["source_session_id"], 44)
+        self.assertTrue(fresh_contract["prediction_ready"])
+        self.assertEqual(fresh_contract["response_state"], "contact")
+        self.assertGreater(
+            fresh_contract["surface"]["surface_metrics"]["surface_peak"],
+            0.0,
+        )
+        self.assertFalse(stale_contract["prediction_ready"])
+        self.assertEqual(stale_contract["response_state"], "no_contact")
+        self.assertEqual(
+            stale_contract["response_block_reason"],
+            "stale_or_mismatched_live_source",
+        )
+        self.assertEqual(
+            stale_contract["surface"]["surface_metrics"]["surface_peak"],
+            0.0,
+        )
+        self.assertEqual(
+            stale_contract["surface"]["surface_grid"],
+            [[0.0, 0.0, 0.0] for _ in range(3)],
+        )
+
+    def test_operator_contract_reports_concrete_runtime_model_sources(self) -> None:
+        contract = backend_main._build_operator_visualization_frame(
+            {
+                "frame_id": 42,
+                "timestamp": 12.5,
+                "source": "unit_test_spectrum",
+            },
+            {
+                "ok": True,
+                "status": "ready",
+                "classification_model_source": "classification_candidate_v3",
+                "force_model_source": "force_candidate_v4",
+                "contact": {"label": "no_contact"},
+                "digital_twin": {"active": False, "visual_active": False},
+            },
+            ready=True,
+            block_reason=None,
+            source_session_id=17,
+        )
+
+        self.assertEqual(contract["model_source"], "classification_candidate_v3")
+        self.assertEqual(
+            contract["classification_model_source"],
+            "classification_candidate_v3",
+        )
+        self.assertEqual(contract["force_model_source"], "force_candidate_v4")
+        self.assertEqual(
+            contract["logical_model_id"],
+            "ordinary_fbg_same_day_joint_nine_fbg_beta_v4",
+        )
+        self.assertEqual(contract["source_session_id"], 17)
+
+    def test_operator_contract_does_not_report_sync_without_a_source_frame(self) -> None:
+        contract = backend_main._build_operator_visualization_frame(
+            None,
+            {
+                "ok": False,
+                "status": "current_runtime_source_blocked",
+            },
+            ready=False,
+            block_reason="stale_or_mismatched_live_source",
+        )
+
+        self.assertIsNone(contract["frame_id"])
+        self.assertEqual(contract["response_state"], "no_contact")
+        self.assertEqual(contract["response_block_reason"], "no_source_frame")
+        self.assertEqual(contract["sync"]["status"], "no_frame")
+        self.assertIsNone(contract["sync"]["spectrum_frame_id"])
+        self.assertIsNone(contract["sync"]["surface_frame_id"])
+        self.assertEqual(
+            contract["surface"]["surface_grid"],
+            [[0.0, 0.0, 0.0] for _ in range(3)],
         )
 
     def test_frontend_global_normalization_marks_stale_frames(self) -> None:
@@ -377,7 +605,7 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
             app_js,
         )
         self.assertIn(
-            'const CURRENT_RUNTIME_MODEL_SOURCE = "ordinary_fbg_all_data_beta_v1"',
+            'const CURRENT_RUNTIME_MODEL_SOURCE = "ordinary_fbg_same_day_joint_nine_fbg_beta_v4"',
             app_js,
         )
         self.assertIn("function normalizeCanonicalVisualizationFrame(frame, contract)", app_js)
@@ -404,6 +632,200 @@ class BaySpecBridgeCoreLogicTests(unittest.TestCase):
         self.assertIn("snapDisplayedFrameToCurrentTargets();", app_js)
         self.assertIn('state.arrayDemoPlaybackMode !== "loop"', app_js)
         self.assertIn('const frameScenario = actionFinished ? "no_contact"', app_js)
+
+    def test_operator_contract_keeps_semantic_inferred_and_observed_positions_separate(
+        self,
+    ) -> None:
+        latest = {
+            "frame_id": 42,
+            "timestamp": 12.5,
+            "source": "unit_test_spectrum",
+        }
+        prediction = {
+            "ok": True,
+            "status": "ready",
+            "contact": {"label": "contact", "contact_probability": 0.94},
+            "position": {"label": "P11", "visual_label": "P11"},
+            "force_fz": {"visual_drive_n": 1.2, "estimated_n": 1.2},
+            "observed_coupled_spectral_response": {
+                "dominant_channel": "P33",
+                "response_grid": [
+                    [0.04, 0.06, 0.08],
+                    [0.03, 0.05, 0.09],
+                    [0.02, 0.04, 0.72],
+                ],
+            },
+            "digital_twin": {
+                "active": True,
+                "visual_active": True,
+                "position_id": "P11",
+                "inferred_dominant_channel": "P21",
+                "deformation_proxy": 0.7,
+                "surface_grid": [
+                    [0.30, 0.70, 0.10],
+                    [0.10, 0.15, 0.05],
+                    [0.04, 0.03, 0.02],
+                ],
+                "inferred_contact_probability_grid": [
+                    [0.22, 0.52, 0.08],
+                    [0.08, 0.06, 0.02],
+                    [0.01, 0.005, 0.005],
+                ],
+                "raw_inferred_contact_probabilities": {
+                    "P11": 0.28,
+                    "P21": 0.62,
+                    "P31": 0.10,
+                },
+                "inferred_contact_probabilities": {
+                    "P11": 0.22,
+                    "P21": 0.70,
+                    "P31": 0.08,
+                },
+                "surface_metrics": {
+                    "surface_peak": 0.70,
+                    "surface_mean": 0.165,
+                    "surface_area_active": 5 / 9,
+                    "dominant_channel": "P21",
+                },
+            },
+        }
+
+        contract = backend_main._build_operator_visualization_frame(
+            latest,
+            prediction,
+            ready=True,
+            block_reason=None,
+        )
+
+        self.assertEqual(contract["contract_version"], "touch_operator_visualization_v2")
+        self.assertEqual(contract["surface"]["semantic_position_id"], "P11")
+        self.assertEqual(contract["surface"]["inferred_dominant_channel"], "P21")
+        self.assertEqual(contract["surface"]["observed_dominant_channel"], "P33")
+        self.assertEqual(
+            contract["surface"]["raw_inferred_contact_probabilities"]["P21"],
+            0.62,
+        )
+        self.assertEqual(
+            contract["surface"]["smoothed_inferred_contact_probabilities"]["P21"],
+            0.70,
+        )
+        self.assertEqual(contract["surface"]["surface_metrics"]["dominant_channel"], "P21")
+        self.assertEqual(
+            contract["surface"]["observed_coupled_spectral_response"]["dominant_channel"],
+            "P33",
+        )
+        self.assertEqual(contract["sync"]["surface_frame_id"], 42)
+        self.assertEqual(contract["sync"]["spectrum_frame_id"], 42)
+
+    def test_operator_contract_masks_stale_inference_when_visual_contact_is_inactive(
+        self,
+    ) -> None:
+        latest = {
+            "frame_id": 43,
+            "timestamp": 12.6,
+            "source": "unit_test_spectrum",
+        }
+        prediction = {
+            "ok": True,
+            "status": "ready",
+            "contact": {
+                "label": "contact",
+                "confidence": 0.82,
+                "contact_probability": 0.82,
+            },
+            "position": {
+                "label": "P23",
+                "visual_label": "P23",
+                "confidence": 0.91,
+                "visual_confidence": 0.91,
+                "raw_probabilities": {"P23": 0.91, "P22": 0.09},
+                "visual_probabilities": {"P23": 0.88, "P22": 0.12},
+            },
+            "force_fz": {
+                "estimated_n": 0.42,
+                "continuous_estimated_n": 0.42,
+                "visual_drive_n": 0.0,
+            },
+            "digital_twin": {
+                "active": False,
+                "visual_active": False,
+                "position_id": "P23",
+                "inferred_dominant_channel": "P23",
+                "surface_grid": [
+                    [0.02, 0.06, 0.10],
+                    [0.04, 0.15, 0.35],
+                    [0.03, 0.20, 0.82],
+                ],
+                "inferred_contact_probability_grid": [
+                    [0.01, 0.03, 0.06],
+                    [0.02, 0.10, 0.28],
+                    [0.02, 0.14, 0.88],
+                ],
+                "raw_inferred_contact_probabilities": {"P23": 0.91},
+                "inferred_contact_probabilities": {"P23": 0.88},
+                "observed_coupled_spectral_response": {
+                    "dominant_channel": "P32",
+                    "response_grid": [
+                        [0.01, 0.02, 0.03],
+                        [0.04, 0.05, 0.06],
+                        [0.07, 0.08, 0.09],
+                    ],
+                },
+                "surface_metrics": {
+                    "surface_peak": 0.82,
+                    "surface_mean": 0.20,
+                    "surface_area_active": 0.44,
+                    "surface_centroid_x": 0.6,
+                    "surface_centroid_y": -0.7,
+                    "surface_spread": 0.31,
+                    "dominant_channel": "P23",
+                    "coupling_status": "stale_contact_value",
+                },
+            },
+        }
+
+        contract = backend_main._build_operator_visualization_frame(
+            latest,
+            prediction,
+            ready=True,
+            block_reason=None,
+        )
+
+        self.assertTrue(contract["prediction_ready"])
+        self.assertEqual(contract["response_state"], "no_contact")
+        self.assertEqual(contract["contact"]["label"], "no_contact")
+        self.assertIsNone(contract["position"]["display_label"])
+        self.assertIsNone(contract["position"]["formal_label"])
+        self.assertEqual(contract["position"]["raw_probabilities"], {})
+        self.assertEqual(contract["position"]["smoothed_visual_probabilities"], {})
+        self.assertEqual(
+            contract["surface"]["surface_grid"],
+            [[0.0, 0.0, 0.0] for _ in range(3)],
+        )
+        self.assertEqual(
+            contract["surface"]["inferred_contact_probability_grid"],
+            [[0.0, 0.0, 0.0] for _ in range(3)],
+        )
+        self.assertEqual(contract["surface"]["raw_inferred_contact_probabilities"], {})
+        self.assertEqual(
+            contract["surface"]["smoothed_inferred_contact_probabilities"], {}
+        )
+        metrics = contract["surface"]["surface_metrics"]
+        self.assertEqual(metrics["surface_peak"], 0.0)
+        self.assertEqual(metrics["surface_mean"], 0.0)
+        self.assertEqual(metrics["surface_area_active"], 0.0)
+        self.assertEqual(metrics["surface_centroid_x"], 0.0)
+        self.assertEqual(metrics["surface_centroid_y"], 0.0)
+        self.assertEqual(metrics["surface_spread"], 0.0)
+        self.assertIsNone(metrics["dominant_channel"])
+        self.assertEqual(metrics["coupling_status"], "optical_model_no_contact")
+        self.assertEqual(contract["trace_sample"]["surface_peak"], 0.0)
+        self.assertEqual(contract["trace_sample"]["value_n"], 0.0)
+        self.assertEqual(
+            contract["surface"]["observed_coupled_spectral_response"]["dominant_channel"],
+            "P32",
+        )
+        self.assertEqual(contract["sync"]["spectrum_frame_id"], 43)
 
     def test_operator_spectrum_entry_uses_accessible_card_without_redundant_icon(self) -> None:
         index_html = (APP_ROOT / "frontend" / "index.html").read_text(encoding="utf-8")

@@ -39,6 +39,10 @@ class SessionDescriptor:
     qa_status: str
     finding_codes: tuple[str, ...]
     started_at_epoch_sec: float = 0.0
+    software_version: str = ""
+    software_build_id: str = ""
+    optical_source: str = ""
+    integration_us: int | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,11 @@ def discover_sessions(
     descriptors: list[SessionDescriptor] = []
     for metadata_path in sorted(capture_root.rglob("session_metadata.json")):
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        provenance = dict(metadata.get("provenance") or {})
+        start_provenance = dict(provenance.get("start") or {})
+        software = dict(start_provenance.get("software") or {})
+        optical_device = dict(start_provenance.get("optical_device") or {})
+        raw_integration = optical_device.get("integration")
         session_id = str(metadata.get("session_id") or metadata_path.parent.name)
         qa = qa_by_session.get(session_id, {})
         findings = tuple(
@@ -103,6 +112,14 @@ def discover_sessions(
                 started_at_epoch_sec=float(
                     metadata.get("started_at_epoch_sec") or 0.0
                 ),
+                software_version=str(software.get("version") or ""),
+                software_build_id=str(software.get("build_id") or ""),
+                optical_source=str(optical_device.get("source") or ""),
+                integration_us=(
+                    int(raw_integration)
+                    if raw_integration is not None
+                    else None
+                ),
             )
         )
     return tuple(descriptors)
@@ -114,25 +131,46 @@ def filter_session_descriptors(
 ) -> tuple[SessionDescriptor, ...]:
     """Restrict a shared capture root to explicitly named collection batches."""
     source = tuple(descriptors)
-    configured = data_config.get("include_session_id_prefixes")
-    if configured is None:
-        return source
-    if isinstance(configured, str):
-        prefixes = (configured.strip(),)
-    else:
-        prefixes = tuple(str(value).strip() for value in configured)
-    prefixes = tuple(value for value in prefixes if value)
-    if not prefixes:
-        raise ValueError("include_session_id_prefixes must not be empty")
-    selected = tuple(
-        descriptor
-        for descriptor in source
-        if descriptor.session_id.startswith(prefixes)
-    )
+    selected = source
+
+    configured_prefixes = data_config.get("include_session_id_prefixes")
+    if configured_prefixes is not None:
+        if isinstance(configured_prefixes, str):
+            prefixes = (configured_prefixes.strip(),)
+        else:
+            prefixes = tuple(str(value).strip() for value in configured_prefixes)
+        prefixes = tuple(value for value in prefixes if value)
+        if not prefixes:
+            raise ValueError("include_session_id_prefixes must not be empty")
+        selected = tuple(
+            descriptor
+            for descriptor in selected
+            if descriptor.session_id.startswith(prefixes)
+        )
+
+    for config_key, attribute in (
+        ("include_software_versions", "software_version"),
+        ("include_software_build_ids", "software_build_id"),
+    ):
+        configured_values = data_config.get(config_key)
+        if configured_values is None:
+            continue
+        if isinstance(configured_values, str):
+            values = (configured_values.strip(),)
+        else:
+            values = tuple(str(value).strip() for value in configured_values)
+        values = tuple(value for value in values if value)
+        if not values:
+            raise ValueError(f"{config_key} must not be empty")
+        selected = tuple(
+            descriptor
+            for descriptor in selected
+            if str(getattr(descriptor, attribute)) in values
+        )
+
     if not selected:
         raise ValueError(
-            "no sessions matched include_session_id_prefixes: "
-            + ", ".join(prefixes)
+            "no sessions matched the configured collection-batch filters"
         )
     return selected
 
@@ -253,6 +291,21 @@ def validate_strict_source_contract(
     required_prefix = str(
         data_config.get("required_session_id_prefix") or ""
     ).strip()
+    required_version = str(
+        data_config.get("required_software_version") or ""
+    ).strip()
+    required_build_id = str(
+        data_config.get("required_software_build_id") or ""
+    ).strip()
+    required_optical_source = str(
+        data_config.get("required_optical_source") or ""
+    ).strip()
+    raw_required_integration = data_config.get("required_integration_us")
+    required_integration = (
+        int(raw_required_integration)
+        if raw_required_integration is not None
+        else None
+    )
     require_qa = bool(data_config.get("require_qa_for_every_session", False))
     session_ids: list[str] = []
     errors: list[str] = []
@@ -267,6 +320,32 @@ def validate_strict_source_contract(
         if required_prefix and not descriptor.session_id.startswith(required_prefix):
             errors.append(
                 f"{descriptor.session_id}: expected session prefix {required_prefix!r}"
+            )
+        if required_version and descriptor.software_version != required_version:
+            errors.append(
+                f"{descriptor.session_id}: expected software version "
+                f"{required_version!r}, got {descriptor.software_version!r}"
+            )
+        if required_build_id and descriptor.software_build_id != required_build_id:
+            errors.append(
+                f"{descriptor.session_id}: expected software build "
+                f"{required_build_id!r}, got {descriptor.software_build_id!r}"
+            )
+        if (
+            required_optical_source
+            and descriptor.optical_source != required_optical_source
+        ):
+            errors.append(
+                f"{descriptor.session_id}: expected optical source "
+                f"{required_optical_source!r}, got {descriptor.optical_source!r}"
+            )
+        if (
+            required_integration is not None
+            and descriptor.integration_us != required_integration
+        ):
+            errors.append(
+                f"{descriptor.session_id}: expected integration "
+                f"{required_integration} us, got {descriptor.integration_us!r}"
             )
         if require_qa and descriptor.qa_status == "not_audited":
             errors.append(f"{descriptor.session_id}: no matching QA result")
@@ -790,6 +869,12 @@ def save_dataset(
         "source_policy": inventory_payload["source_policy"],
         "source_root": str(source_root.resolve()),
         "historical_data_included": False,
+        "historical_data_policy": str(
+            data_config.get("historical_data_policy") or ""
+        ),
+        "acquisition_contract": dict(
+            config_payload.get("acquisition") or {}
+        ),
         "selection_role": selection_role,
         "selection_rule": dict(data_config.get("primary_selection") or {}),
         "reference_validity": (

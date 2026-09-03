@@ -17,11 +17,43 @@ import time
 from typing import Any
 
 from bridge import configured_device_id, configured_sense_export_root
+from process_lifecycle import (
+    attach_process_to_kill_on_close_job,
+    close_windows_handle,
+)
 from spectrum_processing import SpectrumDisplayProcessor
 
 
-DEFAULT_INTEGRATION_US = 5000
-DEFAULT_INTERVAL_MS = 20
+SENSOR_MODE_HIGH_SENSITIVITY = 0
+SENSOR_MODE_HIGH_DYNAMIC_RANGE = 1
+SENSOR_MODE_LABELS: dict[int, str] = {
+    SENSOR_MODE_HIGH_SENSITIVITY: "High Sensitivity",
+    SENSOR_MODE_HIGH_DYNAMIC_RANGE: "High Dynamic Range",
+}
+DEFAULT_SENSOR_MODE = SENSOR_MODE_HIGH_SENSITIVITY
+SDK_INTEGRATION_MIN_US = 1
+SDK_INTEGRATION_MAX_US = 10_000_000
+DEFAULT_INTEGRATION_US = 300
+DEFAULT_INTERVAL_MS = 10
+
+
+def normalize_sensor_mode(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"unsupported_sensor_mode:{value!r}")
+    if value not in SENSOR_MODE_LABELS:
+        raise ValueError(f"unsupported_sensor_mode:{value!r}")
+    return int(value)
+
+
+def normalize_integration_us(value: Any) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < SDK_INTEGRATION_MIN_US
+        or value > SDK_INTEGRATION_MAX_US
+    ):
+        raise ValueError(f"unsupported_integration_us:{value!r}")
+    return int(value)
 
 
 class BaySpecSdkLiveReader:
@@ -30,6 +62,8 @@ class BaySpecSdkLiveReader:
     MAX_HELPER_STDERR_CHARS = 64 * 1024
     MAX_HELPER_MESSAGES = 8
     MAX_SPECTRUM_POINTS = 16_384
+    MIN_FRAME_FRESHNESS_SEC = 1.25
+    FRAME_FRESHNESS_CYCLES = 3.5
 
     def __init__(self, bridge: Any, app_root: Path) -> None:
         self.bridge = bridge
@@ -44,11 +78,14 @@ class BaySpecSdkLiveReader:
         )
         self.lock = threading.RLock()
         self.process: subprocess.Popen[str] | None = None
+        self.process_job_handle: int | None = None
+        self.process_job_pid: int | None = None
         self.thread: threading.Thread | None = None
         self.stderr_thread: threading.Thread | None = None
         self.channel_id = "P22"
         self.interval_ms = DEFAULT_INTERVAL_MS
         self.integration = DEFAULT_INTEGRATION_US
+        self.sensor_mode = DEFAULT_SENSOR_MODE
         self.started_at: float | None = None
         self.last_frame_time: float | None = None
         self.last_status: dict[str, Any] | None = None
@@ -63,7 +100,7 @@ class BaySpecSdkLiveReader:
         self.generation = 0
         self.restart_count = 0
         self.last_exit_code: int | None = None
-        self.acquisition_strategy = "single_frame_process_restart"
+        self.acquisition_strategy = "persistent_sdk_stream_with_restart"
         self.lifecycle_status = "stopped"
         self.last_operation_status = "idle"
         self.consecutive_failure_count = 0
@@ -86,12 +123,49 @@ class BaySpecSdkLiveReader:
     def helper_path(self) -> Path:
         return self.app_root / "sdk_probe" / "BaySpecSdkStream.exe"
 
+    def _helper_command(
+        self,
+        *,
+        integration: int,
+        sensor_mode: int,
+        interval_ms: int | None = None,
+        frame_count: int = 0,
+    ) -> list[str]:
+        requested_interval_ms = max(
+            5,
+            min(int(self.interval_ms if interval_ms is None else interval_ms), 2000),
+        )
+        return [
+            str(self.helper_path),
+            "--interval-ms",
+            str(requested_interval_ms),
+            "--integration",
+            str(normalize_integration_us(integration)),
+            "--sensor-mode",
+            str(normalize_sensor_mode(sensor_mode)),
+            "--frames",
+            str(int(frame_count)),
+        ]
+
+    def _frame_freshness_limit_sec(self) -> float:
+        configured_cycle_sec = max(0.001, self.interval_ms / 1000.0)
+        measured_cycle_sec = max(
+            0.0,
+            float(self.last_acquisition_duration_ms or 0.0) / 1000.0,
+        )
+        expected_cycle_sec = max(configured_cycle_sec, measured_cycle_sec)
+        return max(
+            self.MIN_FRAME_FRESHNESS_SEC,
+            expected_cycle_sec * self.FRAME_FRESHNESS_CYCLES,
+        )
+
     def status(self) -> dict[str, Any]:
         with self.lock:
             worker_alive = bool(self.thread is not None and self.thread.is_alive())
             running = self.process is not None and self.process.poll() is None
             now = time.time()
             age = now - self.last_frame_time if self.last_frame_time is not None else None
+            freshness_limit_sec = self._frame_freshness_limit_sec()
             active = bool(self.desired_active and worker_alive)
             if self._start_in_progress and not active:
                 freshness = "starting"
@@ -103,7 +177,7 @@ class BaySpecSdkLiveReader:
                 freshness = "error"
             elif self.last_frame_time is None:
                 freshness = "error" if self.last_error else "waiting_for_sdk_frame"
-            elif age is not None and age <= max(3.0, self.interval_ms / 1000.0 * 12):
+            elif age is not None and age <= freshness_limit_sec:
                 freshness = "live"
             else:
                 freshness = "stale"
@@ -123,12 +197,20 @@ class BaySpecSdkLiveReader:
                 "channel_id": self.channel_id,
                 "interval_ms": self.interval_ms,
                 "integration": self.integration,
+                "sensor_mode": self.sensor_mode,
+                "sensor_mode_label": SENSOR_MODE_LABELS[self.sensor_mode],
                 "helper_path": str(self.helper_path),
                 "helper_exists": self.helper_path.exists(),
                 "process_id": self.process.pid if running and self.process is not None else None,
+                "process_job_guard_active": bool(
+                    running
+                    and self.process_job_handle
+                    and self.process_job_pid == getattr(self.process, "pid", None)
+                ),
                 "started_at": self.started_at,
                 "last_frame_time": self.last_frame_time,
                 "seconds_since_last_frame": age,
+                "frame_freshness_limit_sec": freshness_limit_sec,
                 "freshness": freshness,
                 "frame_count": self.frame_count,
                 "received_frame_count": self.received_frame_count,
@@ -158,6 +240,39 @@ class BaySpecSdkLiveReader:
                 "spectrum_processing": self.spectrum_processor.status(),
             }
 
+    def gate_status(self) -> dict[str, Any]:
+        """Return the acquisition gate state without waiting on the SDK lock.
+
+        Record calls this for every captured spectrum. All referenced values are
+        scalar snapshots written atomically by the acquisition worker; a
+        transition can therefore only produce a conservative non-live result.
+        """
+
+        desired_active = bool(self.desired_active)
+        worker = self.thread
+        worker_alive = bool(worker is not None and worker.is_alive())
+        active = bool(desired_active and worker_alive)
+        last_frame_time = self.last_frame_time
+        age = (
+            time.time() - last_frame_time
+            if last_frame_time is not None
+            else None
+        )
+        freshness_limit_sec = self._frame_freshness_limit_sec()
+        freshness = (
+            "live"
+            if active and age is not None and age <= freshness_limit_sec
+            else "waiting_for_sdk_frame"
+            if active and last_frame_time is None
+            else "stale"
+            if active
+            else "stopped"
+        )
+        return {
+            "active": active,
+            "freshness": freshness,
+        }
+
     def processing_status(self) -> dict[str, Any]:
         return self.spectrum_processor.status()
 
@@ -175,7 +290,10 @@ class BaySpecSdkLiveReader:
         channel_id: str = "P22",
         interval_ms: int = DEFAULT_INTERVAL_MS,
         integration: int = DEFAULT_INTEGRATION_US,
+        sensor_mode: int = DEFAULT_SENSOR_MODE,
     ) -> dict[str, Any]:
+        requested_integration = normalize_integration_us(integration)
+        requested_sensor_mode = normalize_sensor_mode(sensor_mode)
         with self.lock:
             # Start is intentionally idempotent. A duplicate UI/API request must
             # not wait on the live worker or turn a healthy session into an
@@ -209,7 +327,8 @@ class BaySpecSdkLiveReader:
             result = self._start_reserved(
                 channel_id=channel_id,
                 interval_ms=interval_ms,
-                integration=integration,
+                integration=requested_integration,
+                sensor_mode=requested_sensor_mode,
                 previous_thread=previous_thread,
             )
         finally:
@@ -219,12 +338,37 @@ class BaySpecSdkLiveReader:
                 self._start_done_event.set()
         return {**result, **self.status()}
 
+    def _guard_process(self, process: subprocess.Popen[str]) -> None:
+        """Bind a native helper to this parent process on Windows."""
+
+        process_id = int(getattr(process, "pid", 0) or 0)
+        handle = attach_process_to_kill_on_close_job(process_id)
+        with self.lock:
+            stale_handle = self.process_job_handle
+            self.process_job_handle = handle
+            self.process_job_pid = process_id if handle else None
+        close_windows_handle(stale_handle)
+
+    def _release_process_guard(
+        self,
+        process: subprocess.Popen[str] | None = None,
+    ) -> None:
+        process_id = int(getattr(process, "pid", 0) or 0) if process else None
+        with self.lock:
+            if process_id and self.process_job_pid not in {None, process_id}:
+                return
+            handle = self.process_job_handle
+            self.process_job_handle = None
+            self.process_job_pid = None
+        close_windows_handle(handle)
+
     def _start_reserved(
         self,
         *,
         channel_id: str,
         interval_ms: int,
         integration: int,
+        sensor_mode: int,
         previous_thread: threading.Thread | None,
     ) -> dict[str, Any]:
         if previous_thread is not None and previous_thread.is_alive():
@@ -244,9 +388,11 @@ class BaySpecSdkLiveReader:
             if orphan_process is not None and orphan_process.poll() is not None:
                 if self.process is orphan_process:
                     self.process = None
+                self._release_process_guard(orphan_process)
                 orphan_process = None
         if orphan_process is not None:
             cleanup_error = self._kill_and_reap(orphan_process)
+            self._release_process_guard(orphan_process)
             process_still_alive = orphan_process.poll() is None
             with self.lock:
                 if not process_still_alive and self.process is orphan_process:
@@ -266,8 +412,9 @@ class BaySpecSdkLiveReader:
                     }
         with self.lock:
             requested_channel = channel_id
-            requested_interval = max(20, min(int(interval_ms), 2000))
-            requested_integration = max(1, int(integration))
+            requested_interval = max(5, min(int(interval_ms), 2000))
+            requested_integration = normalize_integration_us(integration)
+            requested_sensor_mode = normalize_sensor_mode(sensor_mode)
             if self._start_cancel_requested:
                 self.lifecycle_status = "stopped"
                 self.last_operation_status = "start_cancelled"
@@ -290,6 +437,7 @@ class BaySpecSdkLiveReader:
             self.channel_id = requested_channel
             self.interval_ms = requested_interval
             self.integration = requested_integration
+            self.sensor_mode = requested_sensor_mode
 
             helper = self.helper_path
             if not helper.exists():
@@ -330,7 +478,7 @@ class BaySpecSdkLiveReader:
             self.generation += 1
             generation = self.generation
             worker = threading.Thread(
-                target=self._supervisor_loop,
+                target=self._persistent_supervisor_loop,
                 args=(generation,),
                 name=f"bayspec-sdk-session-{generation}",
                 daemon=True,
@@ -391,6 +539,7 @@ class BaySpecSdkLiveReader:
                 self.desired_active = False
                 self._stop_event.set()
                 self.process = None
+                self._release_process_guard(process)
                 self.thread = None
                 self.lifecycle_status = "stopped"
                 self.last_operation_status = (
@@ -420,6 +569,7 @@ class BaySpecSdkLiveReader:
                         "SDK helper termination failed: "
                         f"{type(exc).__name__}: {exc}"
                     )
+        self._release_process_guard(process)
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=3.0)
         with self.lock:
@@ -585,6 +735,262 @@ class BaySpecSdkLiveReader:
             "cleanup_error": cleanup_error,
         }
 
+    def _persistent_supervisor_loop(self, generation: int) -> None:
+        """Keep one SDK helper open and restart only after a real stream failure."""
+
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            while True:
+                with self.lock:
+                    if (
+                        self._stop_event.is_set()
+                        or not self.desired_active
+                        or generation != self.generation
+                    ):
+                        return
+                    helper = self.helper_path
+                    interval_ms = self.interval_ms
+                    integration = self.integration
+                    sensor_mode = self.sensor_mode
+
+                process: subprocess.Popen[str] | None = None
+                session_started = time.monotonic()
+                previous_frame_time: float | None = None
+                session_had_frame = False
+                session_failed = False
+                stderr_chars = 0
+                stderr_done = threading.Event()
+                stderr_worker: threading.Thread | None = None
+                try:
+                    process = subprocess.Popen(
+                        self._helper_command(
+                            integration=integration,
+                            sensor_mode=sensor_mode,
+                            interval_ms=interval_ms,
+                            frame_count=0,
+                        ),
+                        cwd=str(helper.parent),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        stdin=subprocess.DEVNULL,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                        creationflags=creationflags,
+                    )
+                    self._guard_process(process)
+                    with self.lock:
+                        self.process = process
+                        self.restart_count += 1
+                        self.last_exit_code = None
+                    if process.stdout is None or process.stderr is None:
+                        raise RuntimeError("SDK helper pipes are unavailable")
+
+                    def drain_stderr() -> None:
+                        nonlocal stderr_chars
+                        try:
+                            for stderr_line in process.stderr:
+                                stderr_chars += len(stderr_line)
+                                cleaned = stderr_line.strip()
+                                if cleaned:
+                                    with self.lock:
+                                        self.last_stderr = cleaned[
+                                            -self.MAX_HELPER_STDERR_CHARS :
+                                        ]
+                        finally:
+                            stderr_done.set()
+
+                    stderr_worker = threading.Thread(
+                        target=drain_stderr,
+                        name=f"bayspec-sdk-stderr-{generation}",
+                        daemon=True,
+                    )
+                    self.stderr_thread = stderr_worker
+                    stderr_worker.start()
+
+                    stdout_chars = 0
+                    for raw_line in process.stdout:
+                        if (
+                            self._stop_event.is_set()
+                            or not self.desired_active
+                            or generation != self.generation
+                        ):
+                            return
+                        stdout_chars += len(raw_line)
+                        with self.lock:
+                            self.last_helper_stdout_chars = stdout_chars
+                            self.last_helper_stderr_chars = stderr_chars
+                        if len(raw_line) > self.MAX_HELPER_STDOUT_CHARS:
+                            with self.lock:
+                                self.helper_output_overflow_count += 1
+                                self.last_error = (
+                                    "SDK helper emitted an oversized JSON line"
+                                )
+                            session_failed = True
+                            break
+                        line = raw_line.strip().lstrip("\ufeff")
+                        if not line:
+                            continue
+                        try:
+                            message = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            with self.lock:
+                                self.invalid_helper_message_count += 1
+                                self.last_error = f"invalid SDK JSON: {exc}"
+                            session_failed = True
+                            break
+                        if not isinstance(message, dict):
+                            with self.lock:
+                                self.invalid_helper_message_count += 1
+                                self.last_error = "SDK message must be a JSON object"
+                            session_failed = True
+                            break
+
+                        message_type = message.get("type")
+                        accepted = self._handle_message(
+                            message,
+                            generation=generation,
+                        )
+                        if message_type == "error":
+                            session_failed = True
+                            break
+                        if message_type == "status":
+                            if (
+                                message.get("sensor_mode") != sensor_mode
+                                or message.get("integration") != integration
+                            ):
+                                session_failed = True
+                                break
+                            continue
+                        if message_type == "spectrum":
+                            if not accepted:
+                                session_failed = True
+                                break
+                            now = time.monotonic()
+                            frame_interval_sec = (
+                                now - previous_frame_time
+                                if previous_frame_time is not None
+                                else now - session_started
+                            )
+                            previous_frame_time = now
+                            session_had_frame = True
+                            with self.lock:
+                                self.last_acquisition_duration_ms = (
+                                    max(0.0, frame_interval_sec) * 1000.0
+                                )
+                                self.last_cycle_delay_ms = 0.0
+                                self.consecutive_failure_count = 0
+                                self.retry_backoff_sec = 0.0
+                                self.last_error = None
+                                self.lifecycle_status = "running"
+                                self.last_operation_status = "streaming"
+
+                    try:
+                        process.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    with self.lock:
+                        self.last_exit_code = process.poll()
+                    if (
+                        not self._stop_event.is_set()
+                        and self.desired_active
+                        and generation == self.generation
+                    ):
+                        session_failed = True
+                        if self.last_error is None:
+                            code = process.poll()
+                            self.last_error = (
+                                "SDK persistent helper exited unexpectedly"
+                                if code in (0, None)
+                                else f"SDK persistent helper exited with code {code}"
+                            )
+                except OSError as exc:
+                    session_failed = True
+                    with self.lock:
+                        self.last_error = f"failed to start SDK helper: {exc}"
+                except Exception as exc:
+                    session_failed = True
+                    with self.lock:
+                        self.last_error = (
+                            "unexpected SDK streaming failure: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                finally:
+                    if process is not None and process.poll() is None:
+                        cleanup_error = self._kill_and_reap(process)
+                        if cleanup_error:
+                            with self.lock:
+                                self.last_error = (
+                                    f"{self.last_error}; cleanup: {cleanup_error}"
+                                    if self.last_error
+                                    else f"SDK helper cleanup failed: {cleanup_error}"
+                                )
+                    self._release_process_guard(process)
+                    if stderr_worker is not None:
+                        stderr_done.wait(timeout=0.5)
+                    with self.lock:
+                        self.last_helper_stderr_chars = stderr_chars
+                        if self.process is process:
+                            self.process = None
+                        if self.stderr_thread is stderr_worker:
+                            self.stderr_thread = None
+
+                if (
+                    self._stop_event.is_set()
+                    or not self.desired_active
+                    or generation != self.generation
+                ):
+                    return
+                with self.lock:
+                    if session_failed and not session_had_frame:
+                        self.consecutive_failure_count += 1
+                        self.retry_backoff_sec = min(
+                            2.0,
+                            0.1 * (2 ** min(self.consecutive_failure_count - 1, 4)),
+                        )
+                    else:
+                        self.consecutive_failure_count = 0
+                        self.retry_backoff_sec = 0.05
+                    delay_sec = max(0.05, self.retry_backoff_sec)
+                    self.last_cycle_delay_ms = delay_sec * 1000.0
+                    self.lifecycle_status = "restarting_stream"
+                    self.last_operation_status = "stream_restart"
+                if self._stop_event.wait(delay_sec):
+                    return
+        finally:
+            orphan_process: subprocess.Popen[str] | None = None
+            with self.lock:
+                current = threading.current_thread()
+                if self.thread is current:
+                    self.thread = None
+                    if self.desired_active and generation == self.generation:
+                        self.desired_active = False
+                        self.lifecycle_status = "worker_exited"
+                        self.last_operation_status = "worker_exited"
+                        if self.last_error is None:
+                            self.last_error = (
+                                "SDK acquisition worker exited unexpectedly"
+                            )
+                    elif not self.desired_active:
+                        self.lifecycle_status = "stopped"
+                if self.process is not None:
+                    if self.process.poll() is None:
+                        orphan_process = self.process
+                    self.process = None
+            if orphan_process is not None:
+                cleanup_error = self._kill_and_reap(orphan_process)
+                self._release_process_guard(orphan_process)
+                if cleanup_error:
+                    with self.lock:
+                        self.last_error = (
+                            f"{self.last_error}; cleanup: {cleanup_error}"
+                            if self.last_error
+                            else f"SDK orphan helper cleanup failed: {cleanup_error}"
+                        )
+            else:
+                self._release_process_guard()
+
     def _supervisor_loop(self, generation: int) -> None:
         """Acquire one hardware frame per helper process and restart safely.
 
@@ -607,15 +1013,13 @@ class BaySpecSdkLiveReader:
                     helper = self.helper_path
                     interval_ms = self.interval_ms
                     integration = self.integration
-                args = [
-                    str(helper),
-                    "--interval-ms",
-                    "20",
-                    "--integration",
-                    str(integration),
-                    "--frames",
-                    "1",
-                ]
+                    sensor_mode = self.sensor_mode
+                args = self._helper_command(
+                    integration=integration,
+                    sensor_mode=sensor_mode,
+                    interval_ms=interval_ms,
+                    frame_count=1,
+                )
                 process: subprocess.Popen[str] | None = None
                 acquisition_failed = False
                 frame_ingested = False
@@ -631,6 +1035,7 @@ class BaySpecSdkLiveReader:
                         errors="replace",
                         creationflags=creationflags,
                     )
+                    self._guard_process(process)
                     with self.lock:
                         self.process = process
                         if (
@@ -814,6 +1219,8 @@ class BaySpecSdkLiveReader:
                             f"{type(exc).__name__}: {exc}"
                         )
                         self.restart_count += 1
+                finally:
+                    self._release_process_guard(process)
 
                 with self.lock:
                     if generation != self.generation or not self.desired_active:
@@ -884,6 +1291,10 @@ class BaySpecSdkLiveReader:
                             if self.last_error
                             else cleanup_error
                         )
+                finally:
+                    self._release_process_guard(orphan_process)
+            else:
+                self._release_process_guard()
 
     def _stdout_loop(self) -> None:
         process = self.process
@@ -950,6 +1361,18 @@ class BaySpecSdkLiveReader:
         if message_type == "status":
             with self.lock:
                 self.last_status = message
+                helper_mode = message.get("sensor_mode")
+                helper_integration = message.get("integration")
+                if helper_mode != self.sensor_mode:
+                    self.last_error = (
+                        "SDK helper sensor mode mismatch: "
+                        f"requested={self.sensor_mode}, reported={helper_mode}"
+                    )
+                elif helper_integration != self.integration:
+                    self.last_error = (
+                        "SDK helper exposure mismatch: "
+                        f"requested={self.integration}, reported={helper_integration}"
+                    )
             return False
         if message_type == "error":
             with self.lock:
@@ -957,6 +1380,16 @@ class BaySpecSdkLiveReader:
             return False
         if message_type != "spectrum":
             return False
+
+        with self.lock:
+            helper_status = self.last_status
+            if isinstance(helper_status, dict):
+                if helper_status.get("sensor_mode") != self.sensor_mode:
+                    self.last_error = "SDK spectrum rejected after sensor mode mismatch"
+                    return False
+                if helper_status.get("integration") != self.integration:
+                    self.last_error = "SDK spectrum rejected after exposure mismatch"
+                    return False
 
         counts = message.get("counts")
         if not isinstance(counts, list) or not counts:
@@ -995,6 +1428,10 @@ class BaySpecSdkLiveReader:
             "sdk_timestamp_ms": message.get("timestamp_ms"),
             "sdk_snapshot_result": message.get("snapshot_result"),
             "integration_ms": self.integration / 1000.0,
+            "integration_us": self.integration,
+            "sensor_mode": self.sensor_mode,
+            "sensor_mode_label": SENSOR_MODE_LABELS[self.sensor_mode],
+            "sensor_mode_setting_provenance": "sdk_set_request_not_device_readback",
         }
         if wavelength_grid:
             channel_payload["wavelength_nm"] = wavelength_grid

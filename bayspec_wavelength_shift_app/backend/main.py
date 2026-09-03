@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import csv
 import ctypes
 import copy
@@ -18,7 +19,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Annotated, Any
 
 import numpy as np
 from fastapi import FastAPI, Query, Request
@@ -48,6 +49,9 @@ from backend.recorded_demo import RecordedDemoLibrary
 from sdk_live import (
     DEFAULT_INTEGRATION_US,
     DEFAULT_INTERVAL_MS,
+    DEFAULT_SENSOR_MODE,
+    SDK_INTEGRATION_MAX_US,
+    SDK_INTEGRATION_MIN_US,
     BaySpecSdkLiveReader,
 )
 from src.array_surface.surface_mapper import SurfaceConfig, map_surface, matrices_from_channels
@@ -101,6 +105,9 @@ async def _read_limited_ingest_body(request: Request) -> bytes:
     return bytes(body)
 PROJECT_ROOT = APP_ROOT if getattr(sys, "frozen", False) else APP_ROOT.parent
 CURRENT_RUNTIME_ENABLED = True
+CURRENT_RUNTIME_LOGICAL_MODEL_ID = "ordinary_fbg_same_day_joint_nine_fbg_beta_v4"
+CURRENT_RUNTIME_SCHEMA = "same_day_joint_nine_fbg_v4"
+CURRENT_RUNTIME_DATASET_ID = "ordinary_fbg_20260902_same_day_joint_fingerprint_v2"
 THUMB_SCENE_CONFIG_PATH = PROJECT_ROOT / "config" / "thumb_holder_scene.yaml"
 HYBRID_SPECTRUM_CHANNEL_CONFIG_PATH = (
     PROJECT_ROOT / "config" / "hybrid_spectrum_channels.yaml"
@@ -111,8 +118,16 @@ CURRENT_RUNTIME_MODEL_PATH = (
     / "deployed"
     / "ordinary_fbg_current_runtime.joblib"
 )
-RUNTIME_CONTACT_STATE_CONFIG_PATH = (
-    PROJECT_ROOT / "config" / "runtime_contact_state.yaml"
+_RELEASE_CHANNEL = os.environ.get("TOUCH_RELEASE_CHANNEL", "").strip().lower()
+_RUNTIME_CONTACT_CONFIG_BY_RELEASE = {
+    "beta": "runtime_contact_state_beta.yaml",
+    "stable": "runtime_contact_state_stable.yaml",
+}
+RUNTIME_CONTACT_STATE_CONFIG_PATH = PROJECT_ROOT / "config" / (
+    _RUNTIME_CONTACT_CONFIG_BY_RELEASE.get(
+        _RELEASE_CHANNEL,
+        "runtime_contact_state.yaml",
+    )
 )
 PX6D_REFERENCE_CONFIG_PATH = PROJECT_ROOT / "config" / "px6d_reference.yaml"
 MEASUREMENT_ANALYSIS_CONFIG_PATH = (
@@ -120,11 +135,16 @@ MEASUREMENT_ANALYSIS_CONFIG_PATH = (
 )
 VERSION_PATH = PROJECT_ROOT / "VERSION.json"
 LIVE_SOURCE_CONTROL_LOCK = threading.RLock()
-CURRENT_RUNTIME_LOCK = threading.Lock()
+CURRENT_RUNTIME_LOCK = threading.RLock()
 CURRENT_RUNTIME_BASELINE_TOKEN: str | None = None
 CURRENT_RUNTIME_LAST_FRAME_KEY: tuple[Any, ...] | None = None
+CURRENT_RUNTIME_LAST_SOURCE_TIMESTAMP_SEC: float | None = None
 CURRENT_RUNTIME_UNIQUE_FRAME_COUNT = 0
 CURRENT_RUNTIME_LAST_PAYLOAD: dict[str, Any] | None = None
+CURRENT_RUNTIME_PREDICTION_CACHE_LIMIT = 128
+CURRENT_RUNTIME_PREDICTION_CACHE: OrderedDict[
+    tuple[Any, ...], dict[str, Any]
+] = OrderedDict()
 CURRENT_RUNTIME_STARTUP_BASELINE_FRAMES: list[dict[str, Any]] = []
 CURRENT_RUNTIME_STARTUP_BASELINE_LAST_FRAME_KEY: tuple[Any, ...] | None = None
 CURRENT_RUNTIME_STARTUP_BASELINE_STATUS: dict[str, Any] = {
@@ -139,6 +159,22 @@ GLOBAL_BASELINE_ATTESTATION: dict[str, Any] = {
     "force_evidence": None,
     "status": "not_attested",
 }
+
+
+def _invalidate_global_baseline_attestation(reason: str) -> dict[str, Any]:
+    """Invalidate operator evidence when its acquisition baseline is cleared."""
+
+    global GLOBAL_BASELINE_ATTESTATION
+    GLOBAL_BASELINE_ATTESTATION = {
+        "confirmed": False,
+        "attested_at_epoch_sec": None,
+        "attested_by": None,
+        "force_evidence": None,
+        "status": "baseline_attestation_invalidated",
+        "invalidation_reason": str(reason),
+        "invalidated_at_epoch_sec": time.time(),
+    }
+    return copy.deepcopy(GLOBAL_BASELINE_ATTESTATION)
 
 
 def _sha256_file(path: Path) -> str | None:
@@ -310,7 +346,9 @@ def _load_px6d_reference_config() -> dict[str, Any]:
         "sync_good_max_offset_ms": 150.0,
         "sync_acceptable_max_offset_ms": 250.0,
         "capture_output_directory": "data/px6d_synchronized",
-        "capture_poll_interval_sec": 0.05,
+        "capture_poll_interval_sec": 0.01,
+        "capture_durable_flush_interval_sec": 0.25,
+        "capture_durable_flush_frame_count": 10,
         "capture_require_software_tare": True,
     }
     if yaml is None or not PX6D_REFERENCE_CONFIG_PATH.exists():
@@ -480,6 +518,14 @@ def _load_px6d_reference_config() -> dict[str, Any]:
             "capture_poll_interval_sec": capture_config.get(
                 "poll_interval_sec", defaults["capture_poll_interval_sec"]
             ),
+            "capture_durable_flush_interval_sec": capture_config.get(
+                "durable_flush_interval_sec",
+                defaults["capture_durable_flush_interval_sec"],
+            ),
+            "capture_durable_flush_frame_count": capture_config.get(
+                "durable_flush_frame_count",
+                defaults["capture_durable_flush_frame_count"],
+            ),
             "capture_require_software_tare": capture_config.get(
                 "require_software_tare",
                 defaults["capture_require_software_tare"],
@@ -492,15 +538,39 @@ def _load_px6d_reference_config() -> dict[str, Any]:
 def _spectrum_fingerprint(
     wavelength: list[float], intensity: list[float]
 ) -> tuple[Any, ...]:
-    midpoint = len(intensity) // 2
+    """Return a compact identity that changes with every spectral sample.
+
+    Some acquisition sources can reuse a frame id or timestamp after reconnecting.
+    A few scalar samples and the total intensity are therefore not sufficient for
+    duplicate-frame detection: distinct spectra can share those values.  Hashing
+    both complete vectors keeps the cache safe while avoiding a large tuple key.
+    """
+
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(struct.pack("<Q", len(wavelength)))
+    digest.update(struct.pack(f"<{len(wavelength)}d", *map(float, wavelength)))
+    digest.update(struct.pack("<Q", len(intensity)))
+    digest.update(struct.pack(f"<{len(intensity)}d", *map(float, intensity)))
     return (
         len(intensity),
-        round(float(wavelength[0]), 9),
-        round(float(wavelength[-1]), 9),
-        round(float(intensity[0]), 6),
-        round(float(intensity[midpoint]), 6),
-        round(float(intensity[-1]), 6),
-        round(float(sum(intensity)), 3),
+        digest.hexdigest(),
+    )
+
+
+def _current_runtime_frame_key(latest: dict[str, Any]) -> tuple[Any, ...]:
+    """Build the exact cache identity shared by inference and Record."""
+
+    wavelength = latest.get("wavelength_nm")
+    intensity = latest.get("intensity")
+    if not isinstance(wavelength, list) or not isinstance(intensity, list):
+        raise ValueError("runtime frame requires wavelength_nm and intensity lists")
+    if not wavelength or len(wavelength) != len(intensity):
+        raise ValueError("runtime frame wavelength/intensity vectors are invalid")
+    return (
+        latest.get("frame_id"),
+        latest.get("timestamp"),
+        latest.get("source"),
+        _spectrum_fingerprint(wavelength, intensity),
     )
 
 
@@ -562,6 +632,9 @@ try:
         HYBRID_SPECTRUM_CHANNEL_CONFIG_PATH,
         runtime_recovery_config=_load_runtime_baseline_recovery_config(),
         runtime_gate_config=_load_all_source_runtime_gate_config(),
+        expected_runtime_schema=CURRENT_RUNTIME_SCHEMA,
+        expected_dataset_id=CURRENT_RUNTIME_DATASET_ID,
+        require_current_only=True,
     )
     CURRENT_RUNTIME_ERROR = None
 except Exception as exc:  # pragma: no cover - exposed through diagnostics
@@ -572,6 +645,7 @@ except Exception as exc:  # pragma: no cover - exposed through diagnostics
 def _reset_current_runtime(reason: str) -> dict[str, Any]:
     global CURRENT_RUNTIME_BASELINE_TOKEN
     global CURRENT_RUNTIME_LAST_FRAME_KEY
+    global CURRENT_RUNTIME_LAST_SOURCE_TIMESTAMP_SEC
     global CURRENT_RUNTIME_UNIQUE_FRAME_COUNT
     global CURRENT_RUNTIME_LAST_PAYLOAD
     global CURRENT_RUNTIME_STARTUP_BASELINE_LAST_FRAME_KEY
@@ -582,8 +656,10 @@ def _reset_current_runtime(reason: str) -> dict[str, Any]:
             CURRENT_RUNTIME_ADAPTER.clear()
         CURRENT_RUNTIME_BASELINE_TOKEN = None
         CURRENT_RUNTIME_LAST_FRAME_KEY = None
+        CURRENT_RUNTIME_LAST_SOURCE_TIMESTAMP_SEC = None
         CURRENT_RUNTIME_UNIQUE_FRAME_COUNT = 0
         CURRENT_RUNTIME_LAST_PAYLOAD = None
+        CURRENT_RUNTIME_PREDICTION_CACHE.clear()
         CURRENT_RUNTIME_STARTUP_BASELINE_FRAMES.clear()
         CURRENT_RUNTIME_STARTUP_BASELINE_LAST_FRAME_KEY = None
         CURRENT_RUNTIME_STARTUP_BASELINE_STATUS = {
@@ -601,20 +677,49 @@ def _reset_current_runtime(reason: str) -> dict[str, Any]:
 
 
 def _current_runtime_status() -> dict[str, Any]:
-    adapter = CURRENT_RUNTIME_ADAPTER
-    bundle = adapter.bundle if adapter is not None else {}
-    observed_training_range_n = (
-        [float(adapter.force_min_n), float(adapter.force_calibrated_max_n)]
-        if adapter is not None
-        else [0.0, None]
-    )
+    # Reset, baseline collection and prediction all mutate the runtime state
+    # under this lock. Snapshot every related field in the same critical
+    # section so one API response cannot combine values from two sessions.
+    with CURRENT_RUNTIME_LOCK:
+        adapter = CURRENT_RUNTIME_ADAPTER
+        bundle = adapter.bundle if adapter is not None else {}
+        active_payload = bundle.get("literature_guided_classification", {})
+        loaded = adapter is not None
+        schema_version = bundle.get("schema_version")
+        feature_schema = copy.deepcopy(bundle.get("feature_schema"))
+        runtime_schema = active_payload.get("schema_version")
+        runtime_dataset_id = active_payload.get("dataset_id")
+        current_only = bool(
+            adapter is not None
+            and getattr(adapter, "current_only_runtime", False)
+        )
+        observed_training_range_n = (
+            [float(adapter.force_min_n), float(adapter.force_calibrated_max_n)]
+            if adapter is not None
+            else [0.0, None]
+        )
+        classification_model_source = (
+            adapter.classification_model_source if adapter is not None else None
+        )
+        force_model_source = (
+            adapter.force_model_source if adapter is not None else None
+        )
+        unique_frame_count = int(CURRENT_RUNTIME_UNIQUE_FRAME_COUNT)
+        startup_baseline_state = copy.deepcopy(
+            CURRENT_RUNTIME_STARTUP_BASELINE_STATUS
+        )
+
     return {
         "enabled": CURRENT_RUNTIME_ENABLED,
-        "loaded": adapter is not None,
+        "loaded": loaded,
         "model_path": str(CURRENT_RUNTIME_MODEL_PATH),
         "model_error": CURRENT_RUNTIME_ERROR,
-        "schema_version": bundle.get("schema_version"),
-        "feature_schema": bundle.get("feature_schema"),
+        "schema_version": schema_version,
+        "feature_schema": feature_schema,
+        "active_runtime_schema": runtime_schema,
+        "active_dataset_id": runtime_dataset_id,
+        "current_only_bundle": current_only,
+        "legacy_fallback_enabled": False,
         "runtime_role": "deployed_current_model_only",
         "drives_operator_ui": CURRENT_RUNTIME_ENABLED,
         "drives_digital_twin": CURRENT_RUNTIME_ENABLED,
@@ -628,23 +733,60 @@ def _current_runtime_status() -> dict[str, Any]:
         "force_above_observed_training_range": (
             "reported_as_unvalidated_extrapolation_without_upper_clip"
         ),
-        "classification_model_source": (
-            adapter.classification_model_source if adapter is not None else None
-        ),
-        "force_model_source": (
-            adapter.force_model_source if adapter is not None else None
-        ),
-        "unique_frame_count": CURRENT_RUNTIME_UNIQUE_FRAME_COUNT,
+        "classification_model_source": classification_model_source,
+        "force_model_source": force_model_source,
+        "unique_frame_count": unique_frame_count,
         "runtime_contact_gate": _load_all_source_runtime_gate_config(),
         "runtime_startup_baseline": {
             "config": _load_runtime_startup_baseline_config(),
-            "state": copy.deepcopy(CURRENT_RUNTIME_STARTUP_BASELINE_STATUS),
+            "state": startup_baseline_state,
         },
         "runtime_baseline_recovery": _load_runtime_baseline_recovery_config(),
     }
 
 
-OPERATOR_VISUALIZATION_CONTRACT_VERSION = "touch_operator_visualization_v1"
+def _current_runtime_model_sources(
+    prediction: dict[str, Any] | None = None,
+    runtime_status: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Resolve the concrete estimators while retaining the desktop model ID."""
+
+    payload = prediction if isinstance(prediction, dict) else {}
+    if isinstance(runtime_status, dict):
+        status = runtime_status
+    else:
+        # This helper is also used in the high-rate Record path. The adapter
+        # identity fields are immutable after startup, so reading them directly
+        # avoids constructing the full Diagnostics status for every frame.
+        adapter = CURRENT_RUNTIME_ADAPTER
+        status = {
+            "classification_model_source": (
+                adapter.classification_model_source
+                if adapter is not None
+                else None
+            ),
+            "force_model_source": (
+                adapter.force_model_source if adapter is not None else None
+            ),
+        }
+    classification_source = str(
+        payload.get("classification_model_source")
+        or status.get("classification_model_source")
+        or CURRENT_RUNTIME_LOGICAL_MODEL_ID
+    ).strip()
+    force_source = str(
+        payload.get("force_model_source")
+        or status.get("force_model_source")
+        or classification_source
+    ).strip()
+    return {
+        "logical_model_id": CURRENT_RUNTIME_LOGICAL_MODEL_ID,
+        "classification_model_source": classification_source,
+        "force_model_source": force_source,
+    }
+
+
+OPERATOR_VISUALIZATION_CONTRACT_VERSION = "touch_operator_visualization_v2"
 OPERATOR_VISUALIZATION_DISPLAY_ROWS = (
     ("P11", "P21", "P31"),
     ("P12", "P22", "P32"),
@@ -682,6 +824,7 @@ def _build_operator_visualization_frame(
     *,
     ready: bool,
     block_reason: str | None,
+    source_session_id: Any = None,
 ) -> dict[str, Any]:
     """Publish the only frame allowed to drive Operator visuals.
 
@@ -691,6 +834,7 @@ def _build_operator_visualization_frame(
     """
 
     record = latest if isinstance(latest, dict) else {}
+    source_frame_present = bool(record)
     payload = prediction if isinstance(prediction, dict) else {}
     prediction_ready = bool(
         ready
@@ -707,6 +851,12 @@ def _build_operator_visualization_frame(
     force = force if isinstance(force, dict) else {}
     raw_metrics = twin.get("surface_metrics")
     raw_metrics = raw_metrics if isinstance(raw_metrics, dict) else {}
+    observed_response = twin.get("observed_coupled_spectral_response")
+    if not isinstance(observed_response, dict):
+        observed_response = payload.get("observed_coupled_spectral_response")
+    observed_response = (
+        observed_response if isinstance(observed_response, dict) else {}
+    )
 
     visual_active = bool(
         prediction_ready
@@ -725,6 +875,17 @@ def _build_operator_visualization_frame(
             or ""
         )
         or None
+    )
+    inferred_dominant_channel = (
+        str(
+            twin.get("inferred_dominant_channel")
+            or raw_metrics.get("dominant_channel")
+            or ""
+        )
+        or None
+    )
+    observed_dominant_channel = (
+        str(observed_response.get("dominant_channel") or "") or None
     )
     display_force_n = _operator_finite_float(force.get("visual_drive_n"))
     if display_force_n is None:
@@ -749,15 +910,15 @@ def _build_operator_visualization_frame(
     source = str(record.get("source") or "unknown")
     timestamp = _operator_finite_float(record.get("timestamp"))
     raw_frame_id = record.get("frame_id", record.get("spectrum_frame_id"))
-    frame_id: Any = raw_frame_id
-    if frame_id is None:
+    frame_id: Any = raw_frame_id if source_frame_present else None
+    if source_frame_present and frame_id is None:
         frame_id = f"{source}|{timestamp if timestamp is not None else 'unknown'}"
 
     response_allowed = prediction_ready
     response_state = "contact" if visual_active else "no_contact"
     peak = (
         _operator_finite_float(raw_metrics.get("surface_peak"), max(flat_grid))
-        if prediction_ready
+        if visual_active
         else 0.0
     )
     mean = (
@@ -765,7 +926,7 @@ def _build_operator_visualization_frame(
             raw_metrics.get("surface_mean"),
             sum(flat_grid) / len(flat_grid),
         )
-        if prediction_ready
+        if visual_active
         else 0.0
     )
     active_area = (
@@ -773,7 +934,7 @@ def _build_operator_visualization_frame(
             raw_metrics.get("surface_area_active"),
             sum(1 for value in flat_grid if value >= 0.055) / len(flat_grid),
         )
-        if prediction_ready
+        if visual_active
         else 0.0
     )
     responding_channel_ids = [
@@ -790,46 +951,64 @@ def _build_operator_visualization_frame(
         "surface_centroid_x": (
             _operator_finite_float(raw_metrics.get("surface_centroid_x"), 0.0)
             or 0.0
-        ),
+        ) if visual_active else 0.0,
         "surface_centroid_y": (
             _operator_finite_float(raw_metrics.get("surface_centroid_y"), 0.0)
             or 0.0
-        ),
+        ) if visual_active else 0.0,
         "surface_spread": (
             _operator_finite_float(raw_metrics.get("surface_spread"), 0.24)
             or 0.24
+        ) if visual_active else 0.0,
+        "dominant_channel": (
+            inferred_dominant_channel if visual_active else None
         ),
-        "dominant_channel": display_position if visual_active else None,
+        "semantic_position_id": display_position if visual_active else None,
+        "inferred_dominant_channel": (
+            inferred_dominant_channel if visual_active else None
+        ),
+        "observed_dominant_channel": observed_dominant_channel,
         "enabled_channel_count": 9,
         "responding_channel_count": len(responding_channel_ids),
         "responding_channel_ids": responding_channel_ids,
         "coupling_status": str(
             raw_metrics.get("coupling_status")
-            or (
-                "optical_model_continuous_force_proxy"
-                if visual_active
-                else "optical_model_no_contact"
-            )
-        ),
+            or "optical_model_continuous_force_proxy"
+        ) if visual_active else "optical_model_no_contact",
     }
+    model_sources = _current_runtime_model_sources(payload)
     resolved_block_reason = None if prediction_ready else (
-        block_reason
-        or str(payload.get("reason") or payload.get("status") or "current_runtime_model_not_ready")
+        "no_source_frame"
+        if not source_frame_present
+        else (
+            block_reason
+            or str(
+                payload.get("reason")
+                or payload.get("status")
+                or "current_runtime_model_not_ready"
+            )
+        )
     )
     return {
         "contract_version": OPERATOR_VISUALIZATION_CONTRACT_VERSION,
         "frame_id": frame_id,
         "timestamp": timestamp,
         "source": source,
+        "source_session_id": source_session_id,
         "source_kind": "full_spectrum_optical_frame",
-        "model_source": "ordinary_fbg_all_data_beta_v1",
+        "model_source": model_sources["classification_model_source"],
+        "logical_model_id": model_sources["logical_model_id"],
+        "classification_model_source": model_sources[
+            "classification_model_source"
+        ],
+        "force_model_source": model_sources["force_model_source"],
         "prediction_status": str(payload.get("status") or "unavailable"),
         "prediction_ready": prediction_ready,
         "response_allowed": response_allowed,
         "response_block_reason": resolved_block_reason,
         "response_state": response_state,
         "contact": {
-            "label": str(contact.get("label") or response_state),
+            "label": response_state,
             "visual_active": visual_active,
             "confidence": _operator_finite_float(contact.get("confidence")),
             "contact_probability": _operator_finite_float(
@@ -838,10 +1017,35 @@ def _build_operator_visualization_frame(
         },
         "position": {
             "display_label": display_position if visual_active else None,
-            "formal_label": position.get("label") if prediction_ready else None,
-            "confidence": _operator_finite_float(position.get("confidence")),
-            "visual_confidence": _operator_finite_float(
-                position.get("visual_confidence")
+            "semantic_label": display_position if visual_active else None,
+            "inferred_dominant_channel": (
+                inferred_dominant_channel if visual_active else None
+            ),
+            "observed_dominant_channel": observed_dominant_channel,
+            "formal_label": position.get("label") if visual_active else None,
+            "confidence": (
+                _operator_finite_float(position.get("confidence"))
+                if visual_active
+                else None
+            ),
+            "visual_confidence": (
+                _operator_finite_float(position.get("visual_confidence"))
+                if visual_active
+                else None
+            ),
+            "raw_probabilities": (
+                copy.deepcopy(position.get("raw_probabilities") or {})
+                if visual_active
+                else {}
+            ),
+            "smoothed_visual_probabilities": (
+                copy.deepcopy(
+                    position.get("visual_probabilities")
+                    or twin.get("inferred_contact_probabilities")
+                    or {}
+                )
+                if visual_active
+                else {}
             ),
         },
         "force": {
@@ -859,6 +1063,37 @@ def _build_operator_visualization_frame(
         "surface": {
             "active": visual_active,
             "position_id": display_position if visual_active else None,
+            "semantic_position_id": display_position if visual_active else None,
+            "inferred_dominant_channel": (
+                inferred_dominant_channel if visual_active else None
+            ),
+            "observed_dominant_channel": observed_dominant_channel,
+            "map_kind": str(
+                twin.get("map_kind") or "inferred_contact_probability"
+            ),
+            "map_source": str(twin.get("map_source") or "unavailable"),
+            "map_semantics": str(
+                twin.get("map_semantics")
+                or "current_frame_position_posterior_not_measured_pressure"
+            ),
+            "inferred_contact_probability_grid": (
+                _operator_surface_grid(twin.get("inferred_contact_probability_grid"))
+                if visual_active
+                else [[0.0, 0.0, 0.0] for _ in range(3)]
+            ),
+            "raw_inferred_contact_probabilities": (
+                copy.deepcopy(twin.get("raw_inferred_contact_probabilities") or {})
+                if visual_active
+                else {}
+            ),
+            "smoothed_inferred_contact_probabilities": (
+                copy.deepcopy(twin.get("inferred_contact_probabilities") or {})
+                if visual_active
+                else {}
+            ),
+            "observed_coupled_spectral_response": copy.deepcopy(
+                observed_response
+            ),
             "deformation_proxy": (
                 _operator_finite_float(twin.get("deformation_proxy"), 0.0)
                 if visual_active
@@ -876,7 +1111,7 @@ def _build_operator_visualization_frame(
             "response_state": response_state,
         },
         "sync": {
-            "status": "synced",
+            "status": "synced" if source_frame_present else "no_frame",
             "spectrum_frame_id": frame_id,
             "surface_frame_id": frame_id,
             "trace_frame_id": frame_id,
@@ -963,7 +1198,14 @@ def _ensure_current_runtime_startup_baseline(
     global CURRENT_RUNTIME_STARTUP_BASELINE_STATUS
 
     pair = bridge.spectral_model_input(channel_id="P22")
-    if pair.get("ok"):
+    startup_baseline_ready = bool(
+        pair.get("ok")
+        and pair.get("baseline_spectrum_status")
+        == "stable_current_session_startup_baseline"
+        and pair.get("baseline_spectrum_semantic_role")
+        == "automatic_current_session_startup_no_contact"
+    )
+    if startup_baseline_ready:
         with CURRENT_RUNTIME_LOCK:
             CURRENT_RUNTIME_STARTUP_BASELINE_STATUS = {
                 "status": "ready",
@@ -974,6 +1216,18 @@ def _ensure_current_runtime_startup_baseline(
                 "baseline_status": pair.get("baseline_spectrum_status"),
             }
         return pair
+
+    # A generic or post-release baseline can serve the wavelength display, but
+    # it must not silently become the learned model's session reference. Keep
+    # inference blocked while a fresh, explicitly tagged startup median is
+    # collected from this process and acquisition session.
+    if pair.get("ok"):
+        pair = {
+            **pair,
+            "ok": False,
+            "baseline_ready": False,
+            "reason": "current_session_startup_baseline_required",
+        }
 
     config = _load_runtime_startup_baseline_config()
     if not bool(config.get("enabled", True)):
@@ -1202,6 +1456,7 @@ def _predict_current_runtime(
 
     global CURRENT_RUNTIME_BASELINE_TOKEN
     global CURRENT_RUNTIME_LAST_FRAME_KEY
+    global CURRENT_RUNTIME_LAST_SOURCE_TIMESTAMP_SEC
     global CURRENT_RUNTIME_UNIQUE_FRAME_COUNT
     global CURRENT_RUNTIME_LAST_PAYLOAD
 
@@ -1247,15 +1502,7 @@ def _predict_current_runtime(
         baseline["wavelength_nm"],
         baseline["intensity"],
     )
-    frame_key = (
-        latest.get("frame_id"),
-        latest.get("timestamp"),
-        latest.get("source"),
-        _spectrum_fingerprint(
-            latest["wavelength_nm"],
-            latest["intensity"],
-        ),
-    )
+    frame_key = _current_runtime_frame_key(latest)
     started = time.perf_counter()
     try:
         with CURRENT_RUNTIME_LOCK:
@@ -1266,14 +1513,26 @@ def _predict_current_runtime(
                 )
                 CURRENT_RUNTIME_BASELINE_TOKEN = baseline_token
                 CURRENT_RUNTIME_LAST_FRAME_KEY = None
+                CURRENT_RUNTIME_LAST_SOURCE_TIMESTAMP_SEC = None
                 CURRENT_RUNTIME_UNIQUE_FRAME_COUNT = 0
                 CURRENT_RUNTIME_LAST_PAYLOAD = None
+                CURRENT_RUNTIME_PREDICTION_CACHE.clear()
+            cached_prediction = CURRENT_RUNTIME_PREDICTION_CACHE.get(frame_key)
+            if cached_prediction is not None:
+                cached = copy.deepcopy(cached_prediction)
+                cached["duplicate_frame_ignored"] = True
+                cached["out_of_order_frame_ignored"] = False
+                cached["cache_lookup_latency_ms"] = (
+                    time.perf_counter() - started
+                ) * 1000.0
+                return cached
             if (
                 frame_key == CURRENT_RUNTIME_LAST_FRAME_KEY
                 and CURRENT_RUNTIME_LAST_PAYLOAD is not None
             ):
                 cached = copy.deepcopy(CURRENT_RUNTIME_LAST_PAYLOAD)
                 cached["duplicate_frame_ignored"] = True
+                cached["out_of_order_frame_ignored"] = False
                 cached["cache_lookup_latency_ms"] = (
                     time.perf_counter() - started
                 ) * 1000.0
@@ -1283,6 +1542,29 @@ def _predict_current_runtime(
                 source_timestamp_sec = float(latest.get("timestamp"))
             except (TypeError, ValueError):
                 source_timestamp_sec = None
+            if (
+                source_timestamp_sec is not None
+                and CURRENT_RUNTIME_LAST_SOURCE_TIMESTAMP_SEC is not None
+                and source_timestamp_sec
+                < CURRENT_RUNTIME_LAST_SOURCE_TIMESTAMP_SEC - 1.0e-6
+                and CURRENT_RUNTIME_LAST_PAYLOAD is not None
+            ):
+                # Concurrent UI and Record requests can snapshot adjacent SDK
+                # frames before acquiring this lock, then arrive in reverse
+                # order after inference. Never feed that late frame back into
+                # the temporal adapter: it would look like a new acquisition
+                # segment and erase the contact peak needed for release.
+                cached = copy.deepcopy(CURRENT_RUNTIME_LAST_PAYLOAD)
+                cached["duplicate_frame_ignored"] = False
+                cached["out_of_order_frame_ignored"] = True
+                cached["ignored_source_timestamp_sec"] = source_timestamp_sec
+                cached["latest_processed_source_timestamp_sec"] = (
+                    CURRENT_RUNTIME_LAST_SOURCE_TIMESTAMP_SEC
+                )
+                cached["cache_lookup_latency_ms"] = (
+                    time.perf_counter() - started
+                ) * 1000.0
+                return cached
             prediction = adapter.update(
                 latest["wavelength_nm"],
                 latest["intensity"],
@@ -1333,13 +1615,17 @@ def _predict_current_runtime(
                     )
                     CURRENT_RUNTIME_BASELINE_TOKEN = baseline_token
                     CURRENT_RUNTIME_LAST_FRAME_KEY = None
+                    CURRENT_RUNTIME_LAST_SOURCE_TIMESTAMP_SEC = None
                     CURRENT_RUNTIME_LAST_PAYLOAD = None
+                    CURRENT_RUNTIME_PREDICTION_CACHE.clear()
                     runtime_baseline_update = {
                         **runtime_baseline_update,
                         "adapter_baseline_rollback_applied": True,
                         "rollback_baseline_token": baseline_token,
                     }
             CURRENT_RUNTIME_UNIQUE_FRAME_COUNT += 1
+            if source_timestamp_sec is not None:
+                CURRENT_RUNTIME_LAST_SOURCE_TIMESTAMP_SEC = source_timestamp_sec
             payload = {
                 **prediction,
                 "runtime_role": "deployed_current_model_only",
@@ -1351,11 +1637,19 @@ def _predict_current_runtime(
                 )
                 * 1000.0,
                 "duplicate_frame_ignored": False,
+                "out_of_order_frame_ignored": False,
                 "cache_lookup_latency_ms": 0.0,
                 "runtime_baseline_update": runtime_baseline_update,
             }
             CURRENT_RUNTIME_LAST_FRAME_KEY = frame_key
             CURRENT_RUNTIME_LAST_PAYLOAD = copy.deepcopy(payload)
+            CURRENT_RUNTIME_PREDICTION_CACHE[frame_key] = copy.deepcopy(payload)
+            CURRENT_RUNTIME_PREDICTION_CACHE.move_to_end(frame_key)
+            while (
+                len(CURRENT_RUNTIME_PREDICTION_CACHE)
+                > CURRENT_RUNTIME_PREDICTION_CACHE_LIMIT
+            ):
+                CURRENT_RUNTIME_PREDICTION_CACHE.popitem(last=False)
             return payload
     except Exception as exc:
         return {
@@ -1947,6 +2241,37 @@ class SenseExportWatcher:
                 "source": "sense_export_file_polling",
             }
 
+    def gate_status(self) -> dict[str, Any]:
+        """Return a conservative source-freshness snapshot without blocking."""
+
+        active = bool(self.active)
+        last_ingest_time = self.last_ingest_time
+        last_file_mtime = self.last_file_mtime
+        now = time.time()
+        age = now - last_ingest_time if last_ingest_time is not None else None
+        file_age = (
+            max(0.0, now - last_file_mtime)
+            if last_file_mtime is not None
+            else None
+        )
+        freshness_limit = max(3.0, float(self.interval_sec) * 12.0)
+        freshness = (
+            "live"
+            if active
+            and age is not None
+            and age <= freshness_limit
+            and (file_age is None or file_age <= freshness_limit)
+            else "waiting_for_export"
+            if active and last_ingest_time is None
+            else "stale"
+            if active
+            else "stopped"
+        )
+        return {
+            "active": active,
+            "freshness": freshness,
+        }
+
     def start(self, channel_id: str, export_root: str | None, interval_sec: float) -> dict:
         with self.lock:
             existing_worker_alive = bool(self.thread is not None and self.thread.is_alive())
@@ -2389,13 +2714,134 @@ def _capture_spectrum_frame() -> dict[str, Any]:
 
 
 def _capture_temporal_response(latest: dict[str, Any]) -> dict[str, Any]:
-    prediction = _predict_current_runtime(latest_override=latest)
+    source_gate = _model_display_source_gate(
+        latest,
+        export_watcher.gate_status(),
+        sdk_live_reader.gate_status(),
+    )
+    capture_response_source = "deferred_for_high_rate_capture"
+    frame_match = False
+    deferred_reason: str | None = None
+    lookup_started = time.perf_counter()
+    if not source_gate["formal_spectrum_input_allowed"]:
+        prediction = {
+            "ok": False,
+            "status": "current_runtime_source_blocked",
+            "reason": _formal_spectrum_block_reason(source_gate),
+            "runtime_role": "deployed_current_model_only",
+            "drives_operator_ui": False,
+            "drives_digital_twin": False,
+        }
+        deferred_reason = "formal_spectrum_input_blocked"
+    else:
+        try:
+            frame_key = _current_runtime_frame_key(latest)
+        except (TypeError, ValueError, OverflowError) as exc:
+            prediction = {
+                "ok": False,
+                "status": "capture_response_deferred",
+                "reason": f"invalid_runtime_frame_identity: {exc}",
+                "runtime_role": "deployed_current_model_only",
+                "drives_operator_ui": False,
+                "drives_digital_twin": False,
+            }
+            deferred_reason = "invalid_runtime_frame_identity"
+        else:
+            # Record and Operator share one stateful runtime. Wait only for the
+            # short inference critical section, then either reuse an exact
+            # result or infer the still-current spectrum while holding the
+            # re-entrant lock. Never feed an older frame back into the runtime.
+            lock_acquired = CURRENT_RUNTIME_LOCK.acquire(timeout=0.05)
+            if not lock_acquired:
+                prediction = {
+                    "ok": False,
+                    "status": "capture_response_deferred",
+                    "reason": "runtime_inference_busy_timeout",
+                    "runtime_role": "deployed_current_model_only",
+                    "drives_operator_ui": False,
+                    "drives_digital_twin": False,
+                }
+                deferred_reason = "runtime_inference_busy_timeout"
+            else:
+                try:
+                    cached_prediction = CURRENT_RUNTIME_PREDICTION_CACHE.get(
+                        frame_key
+                    )
+                    if cached_prediction is None and (
+                        frame_key == CURRENT_RUNTIME_LAST_FRAME_KEY
+                        and CURRENT_RUNTIME_LAST_PAYLOAD is not None
+                    ):
+                        cached_prediction = CURRENT_RUNTIME_LAST_PAYLOAD
+                    if cached_prediction is not None:
+                        prediction = copy.deepcopy(cached_prediction)
+                        capture_response_source = "same_frame_runtime_cache"
+                        frame_match = True
+                    else:
+                        # Only the newest spectrum identity is needed here.
+                        # bridge.frame() also assembles UI diagnostics and may
+                        # launch a cached Sense process check, which is far too
+                        # expensive for the 100 Hz Record path.
+                        current_latest = bridge.latest(
+                            channel_id="P22",
+                            include_spectrum=True,
+                        )
+                        try:
+                            current_frame_key = (
+                                _current_runtime_frame_key(current_latest)
+                                if isinstance(current_latest, dict)
+                                else None
+                            )
+                        except (TypeError, ValueError, OverflowError):
+                            current_frame_key = None
+                        if current_frame_key != frame_key:
+                            prediction = {
+                                "ok": False,
+                                "status": "capture_response_deferred",
+                                "reason": "capture_frame_no_longer_current",
+                                "runtime_role": "deployed_current_model_only",
+                                "drives_operator_ui": False,
+                                "drives_digital_twin": False,
+                            }
+                            deferred_reason = "capture_frame_no_longer_current"
+                        else:
+                            prediction = _predict_current_runtime(latest)
+                            capture_response_source = (
+                                "same_frame_runtime_inference"
+                            )
+                            frame_match = True
+                finally:
+                    CURRENT_RUNTIME_LOCK.release()
+    model_sources = _current_runtime_model_sources(prediction)
     return {
-        "model_source": "ordinary_fbg_all_data_beta_v1",
+        "model_source": model_sources["classification_model_source"],
+        "logical_model_id": model_sources["logical_model_id"],
+        "classification_model_source": model_sources[
+            "classification_model_source"
+        ],
+        "force_model_source": model_sources["force_model_source"],
         "model_status": prediction.get("status"),
         "model_ready": bool(
             prediction.get("ok") and prediction.get("status") == "ready"
         ),
+        "capture_response_source": capture_response_source,
+        "capture_response_frame_match": frame_match,
+        "capture_response_deferred_reason": deferred_reason,
+        "model_input_spectrum_frame_id": (
+            latest.get("frame_id") if frame_match else None
+        ),
+        "model_input_timestamp_epoch_sec": (
+            latest.get("ingested_at")
+            or latest.get("timestamp_epoch_sec")
+            or latest.get("timestamp")
+            if frame_match
+            else None
+        ),
+        "raw_spectrum_authoritative": True,
+        "offline_reconstruction_supported": True,
+        "capture_response_lookup_latency_ms": (
+            time.perf_counter() - lookup_started
+        )
+        * 1000.0,
         "inference_latency_ms": prediction.get(
             "backend_inference_latency_ms",
             prediction.get("inference_latency_ms"),
@@ -2405,6 +2851,10 @@ def _capture_temporal_response(latest: dict[str, Any]) -> dict[str, Any]:
         "runtime_input": "optical_spectrum_time_series",
         "drives_operator_ui": True,
         "drives_digital_twin": True,
+        "formal_spectrum_input_allowed": source_gate[
+            "formal_spectrum_input_allowed"
+        ],
+        "spectrum_input_gate": source_gate,
         **prediction,
     }
 
@@ -2557,7 +3007,13 @@ optical_force_capture = OpticalForceCaptureManager(
     force_status_provider=px6d_reader.status,
     model_provider=_capture_temporal_response,
     provenance_provider=_capture_provenance_snapshot,
-    poll_interval_sec=float(PX6D_REFERENCE_CONFIG.get("capture_poll_interval_sec") or 0.05),
+    poll_interval_sec=float(PX6D_REFERENCE_CONFIG.get("capture_poll_interval_sec") or 0.01),
+    durable_flush_interval_sec=float(
+        PX6D_REFERENCE_CONFIG.get("capture_durable_flush_interval_sec") or 0.25
+    ),
+    durable_flush_frame_count=int(
+        PX6D_REFERENCE_CONFIG.get("capture_durable_flush_frame_count") or 10
+    ),
     require_software_tare=bool(
         PX6D_REFERENCE_CONFIG.get("capture_require_software_tare", True)
     ),
@@ -2623,6 +3079,18 @@ def _operator_response_band_thresholds() -> dict[str, float | str]:
             or "normalized_surface_activity_thresholds_only"
         ),
     }
+
+
+def _formal_spectrum_block_reason(source_gate: dict[str, Any]) -> str:
+    """Report why a frame is diagnostics-only without running the model."""
+
+    if not source_gate.get("model_input_source_allowed"):
+        return "stale_or_mismatched_live_source"
+    if not source_gate.get("wavelength_axis_valid"):
+        return "wavelength_grid_required_for_formal_recognition"
+    if not source_gate.get("qa_valid"):
+        return "spectrum_qa_invalid_for_formal_recognition"
+    return "current_runtime_source_blocked"
 
 
 def _response_level_from_shift_ratio(response_ratio: float) -> str:
@@ -3663,7 +4131,7 @@ def health() -> dict:
         "build_id": RELEASE_IDENTITY.get("build_id"),
         "source_commit": RELEASE_IDENTITY.get("source_commit"),
         "release": dict(RELEASE_IDENTITY),
-        "mode": "standalone_touch_all_data_spectral_runtime",
+        "mode": "standalone_touch_high_sensitivity_300us_spectral_runtime",
         "backend_contract_version": "touch_current_runtime_api_v1",
         "previous_p22_pd_voltage_app": "kept_separate",
         "optical_intensity_edition": "kept_separate",
@@ -3677,7 +4145,7 @@ def health() -> dict:
         "array_mode": "global_spectrum_unmapped",
         "physical_channel_mapping_final": False,
         "real_3x3_enabled": False,
-        "default_operator_recognition": "ordinary_fbg_all_data_beta_v1",
+        "default_operator_recognition": CURRENT_RUNTIME_LOGICAL_MODEL_ID,
         "mfbg_intensity_profile_available": True,
         "future_primary_sensor_profile": "mfbg_intensity_3x3",
         "active_runtime_sensor_profile": "ordinary_fbg_hybrid_spectral",
@@ -3708,10 +4176,15 @@ def health() -> dict:
         "optical_force_capture": optical_force_capture.status(),
         "recorded_demo": recorded_demo_library.status(),
         "recognition_runtime": {
-            "active_model_id": "ordinary_fbg_all_data_beta_v1",
-            "display_name": "Current all-data spectral model",
+            "active_model_id": CURRENT_RUNTIME_LOGICAL_MODEL_ID,
+            "display_name": "Same-day joint nine-FBG optical model",
+            "classification_model_source": runtime_status.get(
+                "classification_model_source"
+            ),
+            "force_model_source": runtime_status.get("force_model_source"),
             "switchable": False,
             "model_count": 1,
+            "legacy_model_count": 0,
         },
     }
 
@@ -4216,6 +4689,12 @@ async def measurement_analyze(request: Request) -> dict:
 def reset(keep_baseline: bool = Query(default=True)) -> dict:
     with LIVE_SOURCE_CONTROL_LOCK:
         result = bridge.reset(keep_baseline=keep_baseline)
+        if not keep_baseline:
+            result["baseline_attestation"] = (
+                _invalidate_global_baseline_attestation(
+                    "api_reset_without_baseline"
+                )
+            )
         result["runtime_model_reset"] = _reset_current_runtime("api_reset")
         result.update({"mode": "bayspec_wavelength_shift_reset"})
         return result
@@ -4306,9 +4785,13 @@ def _begin_acquisition_session() -> dict:
         "new_acquisition_session"
     )
     result = bridge.reset(keep_baseline=False)
+    baseline_attestation = _invalidate_global_baseline_attestation(
+        "new_acquisition_session"
+    )
     return {
         **result,
         "baseline_invalidated": True,
+        "baseline_attestation": baseline_attestation,
         "baseline_requirement": "stable_current_session_post_release_recovery",
         "runtime_model_reset": runtime_model_reset,
     }
@@ -4320,6 +4803,7 @@ def _sdk_session_matches(
     channel_id: str,
     interval_ms: int,
     integration: int,
+    sensor_mode: int,
 ) -> bool:
     """Return true when a start request already describes the live session."""
 
@@ -4328,6 +4812,7 @@ def _sdk_session_matches(
         and str(status.get("channel_id") or "") == str(channel_id)
         and int(status.get("interval_ms") or 0) == int(interval_ms)
         and int(status.get("integration") or 0) == int(integration)
+        and int(status.get("sensor_mode", -1)) == int(sensor_mode)
     )
 
 
@@ -4521,17 +5006,22 @@ def export_watch_status() -> dict:
 @_serialized_live_source_control
 def sdk_start(
     channel_id: str = Query(default="P22"),
-    interval_ms: int = Query(default=DEFAULT_INTERVAL_MS, ge=20, le=2000),
-    integration: int = Query(default=DEFAULT_INTEGRATION_US, ge=1, le=10000000),
+    interval_ms: int = Query(default=DEFAULT_INTERVAL_MS, ge=5, le=2000),
+    integration: Annotated[int, Query(
+        ge=SDK_INTEGRATION_MIN_US,
+        le=SDK_INTEGRATION_MAX_US,
+    )] = DEFAULT_INTEGRATION_US,
+    sensor_mode: Annotated[int, Query(ge=0, le=1)] = DEFAULT_SENSOR_MODE,
 ) -> dict:
     existing_status = sdk_live_reader.status()
-    requested_interval_ms = max(20, min(int(interval_ms), 2000))
+    requested_interval_ms = max(5, min(int(interval_ms), 2000))
     requested_integration = max(1, int(integration))
     if _sdk_session_matches(
         existing_status,
         channel_id=channel_id,
         interval_ms=requested_interval_ms,
         integration=requested_integration,
+        sensor_mode=sensor_mode,
     ):
         return {
             "ok": True,
@@ -4557,6 +5047,7 @@ def sdk_start(
         channel_id=channel_id,
         interval_ms=requested_interval_ms,
         integration=requested_integration,
+        sensor_mode=sensor_mode,
     )
     return {
         "ok": bool(status.get("ok", status.get("active")) and status.get("active")),
@@ -4653,20 +5144,28 @@ def sense_stop() -> dict:
 def live_start(
     channel_id: str = Query(default="P22"),
     export_root: str | None = Query(default=None),
-    interval_sec: float = Query(default=0.02, ge=0.02, le=5.0),
-    integration: int = DEFAULT_INTEGRATION_US,
+    interval_sec: float = Query(default=0.01, ge=0.005, le=5.0),
+    integration: Annotated[int, Query(
+        ge=SDK_INTEGRATION_MIN_US,
+        le=SDK_INTEGRATION_MAX_US,
+    )] = DEFAULT_INTEGRATION_US,
+    sensor_mode: Annotated[int, Query(ge=0, le=1)] = DEFAULT_SENSOR_MODE,
     control_sense: bool = Query(default=True),
     source: str = Query(default="direct_sdk"),
 ) -> dict:
     if source == "direct_sdk":
-        requested_interval_ms = max(20, min(int(interval_sec * 1000), 2000))
-        requested_integration = max(1000, min(int(integration), 1000000))
+        requested_interval_ms = max(5, min(int(interval_sec * 1000), 2000))
+        requested_integration = max(
+            SDK_INTEGRATION_MIN_US,
+            min(int(integration), SDK_INTEGRATION_MAX_US),
+        )
         existing_status = sdk_live_reader.status()
         if _sdk_session_matches(
             existing_status,
             channel_id=channel_id,
             interval_ms=requested_interval_ms,
             integration=requested_integration,
+            sensor_mode=sensor_mode,
         ):
             return {
                 "ok": True,
@@ -4696,6 +5195,7 @@ def live_start(
             channel_id=channel_id,
             interval_ms=requested_interval_ms,
             integration=requested_integration,
+            sensor_mode=sensor_mode,
         )
         return {
             "ok": bool(
@@ -4716,8 +5216,8 @@ def live_start(
     if not _live_source_stop_completed(sdk_status):
         return _source_switch_blocked(source="sdk_live", status=sdk_status)
     existing_watch = export_watcher.status()
-    # Export watching is disk-bound and gains nothing from the SDK's 20 ms
-    # post-frame idle budget. Keep its established 100 ms lower bound.
+    # Export watching is disk-bound and gains nothing from the SDK cadence.
+    # Keep its established 100 ms lower bound.
     requested_interval_sec = max(0.1, min(float(interval_sec), 5.0))
     if _export_watch_session_matches(
         existing_watch,
@@ -4884,6 +5384,7 @@ def set_global_candidate_baseline(
             "channel_id": "P22",
             "baseline_method": "frozen_baseline",
             "minimum_recent_samples": minimum_frames,
+            "replace_trusted_session_anchor": True,
         }
     )
     model_baseline_ready = bool(
@@ -4932,6 +5433,9 @@ def set_global_candidate_baseline(
                 "baseline_set": bool(model_baseline.get("baseline_set")),
                 "role": "post_press_release_recovery_no_contact_full_spectrum_baseline",
                 "status": model_baseline.get("current_runtime_spectrum_baseline_status"),
+                "trusted_session_anchor_replaced": bool(
+                    model_baseline.get("trusted_session_anchor_replaced")
+                ),
                 "sample_count": (
                     model_baseline.get("baseline_spectrum_sample_count_by_channel", {})
                     or {}
@@ -5026,6 +5530,7 @@ def global_spectrum_frame(
         watcher_status,
         sdk_status,
     )
+    runtime_status = _current_runtime_status()
 
     candidate_peaks = [
         peak
@@ -5080,7 +5585,7 @@ def global_spectrum_frame(
         "diagnostic_only": True,
     }
 
-    if source_gate["model_input_source_allowed"]:
+    if source_gate["formal_spectrum_input_allowed"]:
         runtime_prediction = _predict_current_runtime(
             latest_override=latest,
         )
@@ -5088,13 +5593,13 @@ def global_spectrum_frame(
         runtime_prediction = {
             "ok": False,
             "status": "current_runtime_source_blocked",
-            "reason": (
-                "wavelength_grid_required_for_formal_recognition"
-                if not source_gate["wavelength_axis_valid"]
-                else "stale_or_mismatched_live_source"
-            ),
+            "reason": _formal_spectrum_block_reason(source_gate),
             "runtime_role": "deployed_current_model_only",
         }
+    model_sources = _current_runtime_model_sources(
+        runtime_prediction,
+        runtime_status,
+    )
     runtime_ready = bool(
         runtime_prediction.get("ok")
         and runtime_prediction.get("status") == "ready"
@@ -5109,11 +5614,37 @@ def global_spectrum_frame(
             or "current_runtime_not_ready"
         )
     )
+    startup_baseline = runtime_status.get("runtime_startup_baseline")
+    startup_baseline = (
+        startup_baseline if isinstance(startup_baseline, dict) else {}
+    )
+    startup_baseline_state = startup_baseline.get("state")
+    startup_baseline_state = (
+        startup_baseline_state
+        if isinstance(startup_baseline_state, dict)
+        else {}
+    )
+    runtime_baseline_ready = bool(
+        source_gate["formal_spectrum_input_allowed"]
+        and (
+            startup_baseline_state.get("ready") is True
+            or runtime_prediction.get("status") == "ready"
+        )
+    )
+    selected_live_source = source_gate["selected_live_source"]
+    source_session_id = (
+        sdk_status.get("acquisition_session_id")
+        if selected_live_source == "sdk"
+        else watcher_status.get("acquisition_session_id")
+        if selected_live_source == "watcher"
+        else (latest or {}).get("source_session_id")
+    )
     operator_visualization_frame = _build_operator_visualization_frame(
         latest,
         runtime_prediction,
         ready=runtime_ready,
         block_reason=block_reason,
+        source_session_id=source_session_id,
     )
 
     try:
@@ -5146,8 +5677,7 @@ def global_spectrum_frame(
         "operator_display_valid": source_gate["operator_display_valid"],
         "frame_age_sec": frame_age_sec,
         "display_available": latest is not None,
-        "runtime_baseline_ready": runtime_prediction.get("status")
-        not in {"baseline_required", "spectrum_required"},
+        "runtime_baseline_ready": runtime_baseline_ready,
         "formal_recognition_allowed": runtime_ready,
         "response_allowed": runtime_ready,
         "blockers": [] if runtime_ready else [block_reason],
@@ -5172,9 +5702,13 @@ def global_spectrum_frame(
                 "response_block_reason": block_reason,
                 "runtime_prediction": runtime_prediction,
                 "active_spectral_prediction": runtime_prediction,
-                "active_spectral_model_source": (
-                    "ordinary_fbg_all_data_beta_v1"
-                ),
+                "active_spectral_model_source": model_sources[
+                    "classification_model_source"
+                ],
+                "classification_model_source": model_sources[
+                    "classification_model_source"
+                ],
+                "force_model_source": model_sources["force_model_source"],
                 "active_spectral_model_status": runtime_prediction.get(
                     "status"
                 ),
@@ -5185,7 +5719,6 @@ def global_spectrum_frame(
         )
         result["latest"] = latest
 
-    runtime_status = _current_runtime_status()
     result.update(
         {
             "mode": "touch_current_spectral_runtime_frame",
@@ -5208,9 +5741,13 @@ def global_spectrum_frame(
             "model_assisted_display_block_reason": block_reason,
             "active_spectral_model_expected": True,
             "active_spectral_model_loaded": runtime_status["loaded"],
-            "active_spectral_model_source": (
-                "ordinary_fbg_all_data_beta_v1"
-            ),
+            "active_spectral_model_source": model_sources[
+                "classification_model_source"
+            ],
+            "classification_model_source": model_sources[
+                "classification_model_source"
+            ],
+            "force_model_source": model_sources["force_model_source"],
             "active_spectral_model_status": runtime_prediction.get(
                 "status"
             ),

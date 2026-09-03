@@ -256,9 +256,9 @@ class MfbgIntensityProfileTests(unittest.TestCase):
         runtime = payload["recognition_runtime"]
         self.assertEqual(
             runtime["active_model_id"],
-            "ordinary_fbg_all_data_beta_v1",
+            "ordinary_fbg_same_day_joint_nine_fbg_beta_v4",
         )
-        self.assertEqual(runtime["display_name"], "Current all-data spectral model")
+        self.assertEqual(runtime["display_name"], "Same-day joint nine-FBG optical model")
         self.assertFalse(runtime["switchable"])
         self.assertEqual(runtime["model_count"], 1)
         self.assertNotIn("legacy_models_enabled", runtime)

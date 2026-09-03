@@ -89,6 +89,8 @@ SUMMARY_FIELDS = [
     "model_source",
     "model_status",
     "model_ready",
+    "capture_response_source",
+    "capture_response_frame_match",
     "model_inference_latency_ms",
     "optical_estimated_fz_n",
     "optical_raw_estimated_fz_n",
@@ -100,6 +102,14 @@ SUMMARY_FIELDS = [
     "optical_force_review_reasons",
     "predicted_contact_label",
     "predicted_position_label",
+    "display_contact_active",
+    "display_position_label",
+    "display_position_confidence",
+    "display_position_margin",
+    "display_optical_force_n",
+    "display_position_source",
+    "formal_position_label",
+    "raw_position_label",
     "predicted_response_level",
     "predicted_response_confidence",
 ]
@@ -131,6 +141,11 @@ RESPONSE_FIELDS = [
     "model_source",
     "model_status",
     "model_ready",
+    "capture_response_source",
+    "capture_response_frame_match",
+    "capture_response_deferred_reason",
+    "raw_spectrum_authoritative",
+    "offline_reconstruction_supported",
     "model_inference_latency_ms",
     "optical_estimated_fz_n",
     "optical_raw_estimated_fz_n",
@@ -146,6 +161,14 @@ RESPONSE_FIELDS = [
     "no_contact_probability",
     "predicted_position_label",
     "position_confidence",
+    "display_contact_active",
+    "display_position_label",
+    "display_position_confidence",
+    "display_position_margin",
+    "display_optical_force_n",
+    "display_position_source",
+    "formal_position_label",
+    "raw_position_label",
     "response_level",
     "response_level_confidence",
     "response_level_raw_label",
@@ -281,6 +304,63 @@ def _optical_force_export_fields(model: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _display_prediction_export_fields(model: dict[str, Any]) -> dict[str, Any]:
+    """Flatten the exact model state used by the Operator visualization."""
+
+    position = model.get("position") or {}
+    contact = model.get("contact") or {}
+    force = model.get("force_fz") or {}
+    twin = model.get("digital_twin") or {}
+    ready = bool(model.get("model_ready", model.get("ready", model.get("ok"))))
+    display_position = (
+        twin.get("position_id")
+        or position.get("visual_label")
+        or position.get("label")
+    )
+    twin_has_active_state = "visual_active" in twin or "active" in twin
+    visual_active = bool(
+        ready
+        and (
+            twin.get("visual_active", twin.get("active")) is True
+            if twin_has_active_state
+            else contact.get("label") == "contact" and display_position
+        )
+    )
+    if not visual_active:
+        display_position = None
+
+    display_force = force.get("visual_drive_n", twin.get("drive_force_n"))
+    if display_force is None:
+        display_force = model.get("estimated_force_fz_n", force.get("estimated_n"))
+    try:
+        display_force_value = float(display_force)
+    except (TypeError, ValueError):
+        display_force_value = None
+    if display_force_value is not None and not math.isfinite(display_force_value):
+        display_force_value = None
+    if ready and not visual_active:
+        display_force_value = 0.0
+    if not ready:
+        display_force_value = None
+
+    return {
+        "display_contact_active": visual_active,
+        "display_position_label": display_position,
+        "display_position_confidence": position.get(
+            "visual_confidence", position.get("confidence")
+        ),
+        "display_position_margin": position.get(
+            "visual_margin", position.get("margin")
+        ),
+        "display_optical_force_n": display_force_value,
+        "display_position_source": twin.get("position_source") or (
+            "formal_position" if display_position else None
+        ),
+        "formal_position_label": position.get("label"),
+        "raw_position_label": position.get("raw_label"),
+    }
+
+
 def _json_default(value: Any) -> Any:
     if hasattr(value, "item"):
         return value.item()
@@ -365,15 +445,20 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
-def _write_text_transaction(writes: list[tuple[Any, str]]) -> None:
+def _write_text_transaction(
+    writes: list[tuple[Any, str]],
+    *,
+    durable: bool = True,
+) -> None:
     """Best-effort all-or-nothing append across the files for one capture frame."""
     checkpoints: list[tuple[Any, int]] = []
     try:
         checkpoints = [(handle, handle.tell()) for handle, _payload in writes]
         for handle, payload in writes:
             handle.write(payload)
-        for handle, _payload in writes:
-            _flush_and_sync(handle)
+        if durable:
+            for handle, _payload in writes:
+                _flush_and_sync(handle)
     except BaseException as exc:
         rollback_errors: list[str] = []
         for handle, checkpoint in checkpoints:
@@ -406,6 +491,8 @@ class OpticalForceCaptureManager:
         model_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         provenance_provider: Callable[[], dict[str, Any]] | None = None,
         poll_interval_sec: float = 0.05,
+        durable_flush_interval_sec: float = 0.25,
+        durable_flush_frame_count: int = 10,
         require_software_tare: bool = True,
     ) -> None:
         self.output_root = Path(output_root)
@@ -415,6 +502,14 @@ class OpticalForceCaptureManager:
         self.model_provider = model_provider
         self.provenance_provider = provenance_provider
         self.poll_interval_sec = max(0.01, min(1.0, float(poll_interval_sec)))
+        self.durable_flush_interval_sec = max(
+            0.05,
+            min(5.0, float(durable_flush_interval_sec)),
+        )
+        self.durable_flush_frame_count = max(
+            1,
+            min(1000, int(durable_flush_frame_count)),
+        )
         self.require_software_tare = bool(require_software_tare)
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
@@ -450,6 +545,9 @@ class OpticalForceCaptureManager:
             "spectrum_frame_rows": 0,
             "spectrum_sample_rows": 0,
             "response_rows": 0,
+            "response_same_frame_cache_rows": 0,
+            "response_deferred_rows": 0,
+            "response_provider_rows": 0,
             "force_rows": 0,
             "eligible_spectrum_frames": 0,
             "skipped_duplicate_spectrum_frames": 0,
@@ -464,6 +562,10 @@ class OpticalForceCaptureManager:
             "last_sync_offset_ms": None,
             "maximum_absolute_sync_offset_ms": None,
             "timeline_start_epoch_sec": None,
+            "last_timeline_timestamp_epoch_sec": None,
+            "durable_flush_count": 0,
+            "last_durable_capture_index": None,
+            "last_durable_flush_epoch_sec": None,
             "last_error": None,
             "recovered_interrupted_session_count": len(
                 getattr(self, "_recovered_interrupted_sessions", [])
@@ -938,6 +1040,27 @@ class OpticalForceCaptureManager:
         denominator = int(payload.get("eligible_spectrum_frames") or 0)
         paired = int(payload.get("captured_timeline_frames") or 0)
         payload["paired_frame_ratio"] = paired / denominator if denominator else None
+        timeline_start = payload.get("timeline_start_epoch_sec")
+        timeline_end = payload.get("last_timeline_timestamp_epoch_sec")
+        try:
+            timeline_span = float(timeline_end) - float(timeline_start)
+        except (TypeError, ValueError):
+            timeline_span = 0.0
+        payload["captured_frame_rate_hz"] = (
+            (paired - 1) / timeline_span
+            if paired > 1 and math.isfinite(timeline_span) and timeline_span > 0.0
+            else None
+        )
+        payload["configured_poll_interval_sec"] = self.poll_interval_sec
+        payload["configured_poll_rate_hz"] = 1.0 / self.poll_interval_sec
+        payload["durable_flush_interval_sec"] = self.durable_flush_interval_sec
+        payload["durable_flush_frame_count"] = self.durable_flush_frame_count
+        payload["recording_pipeline"] = (
+            "raw_spectrum_and_force_first_nonblocking_same_frame_model_cache"
+        )
+        payload["response_recording_policy"] = (
+            "same_frame_runtime_cache_or_explicit_deferred_for_offline_reconstruction"
+        )
         payload["force_semantics"] = "PX6D_reference_Fz_not_optical_force_prediction"
         payload["force_target_mode"] = "continuous_fz_regression"
         payload["force_target_field"] = "force_fz_n"
@@ -982,6 +1105,8 @@ class OpticalForceCaptureManager:
         last_outside_sync_key: tuple[Any, ...] | None = None
         last_invalid_spectrum_key: tuple[Any, ...] | None = None
         last_invalid_force_key: tuple[Any, ...] | None = None
+        frames_since_durable_flush = 0
+        last_durable_flush_monotonic = time.monotonic()
         try:
             with ExitStack() as stack:
                 jsonl_handle = stack.enter_context(frames_path.open("w", encoding="utf-8"))
@@ -1194,7 +1319,7 @@ class OpticalForceCaptureManager:
                         "capture_timestamp_epoch_sec": time.time(),
                         **labels,
                     }
-                    if "spectrum" in selected and latest is not None:
+                    if optical_timeline and latest is not None:
                         record["spectrum"] = {
                             "source": latest.get("source"),
                             "frame_id": latest.get("frame_id"),
@@ -1269,7 +1394,13 @@ class OpticalForceCaptureManager:
                             (jsonl_handle, jsonl_block),
                         ]
                     )
-                    _write_text_transaction(writes)
+                    frames_since_durable_flush += 1
+                    durable_commit = (
+                        frames_since_durable_flush >= self.durable_flush_frame_count
+                        or time.monotonic() - last_durable_flush_monotonic
+                        >= self.durable_flush_interval_sec
+                    )
+                    _write_text_transaction(writes, durable=durable_commit)
                     with self._lock:
                         self._state["captured_timeline_frames"] = capture_index + 1
                         self._state["captured_paired_frames"] = capture_index + 1
@@ -1280,10 +1411,26 @@ class OpticalForceCaptureManager:
                         ) + len(spectrum_rows)
                         if response_writer:
                             self._state["response_rows"] = capture_index + 1
+                            response_source = str(
+                                model.get("capture_response_source") or "provider"
+                            )
+                            if response_source == "same_frame_runtime_cache":
+                                self._state["response_same_frame_cache_rows"] = int(
+                                    self._state.get("response_same_frame_cache_rows") or 0
+                                ) + 1
+                            elif response_source == "deferred_for_high_rate_capture":
+                                self._state["response_deferred_rows"] = int(
+                                    self._state.get("response_deferred_rows") or 0
+                                ) + 1
+                            else:
+                                self._state["response_provider_rows"] = int(
+                                    self._state.get("response_provider_rows") or 0
+                                ) + 1
                         if force_writer:
                             self._state["force_rows"] = capture_index + 1
                         if latest is not None:
                             self._state["last_spectrum_frame_id"] = latest.get("frame_id")
+                        self._state["last_timeline_timestamp_epoch_sec"] = timeline_timestamp
                         if force_writer:
                             self._state["last_sync_quality"] = force.get("sync_quality")
                             self._state["last_sync_offset_ms"] = force.get("sync_offset_ms")
@@ -1303,8 +1450,39 @@ class OpticalForceCaptureManager:
                                 else max(float(previous_max), absolute_offset)
                             )
                         self._state["capture_status"] = "recording_selected_streams"
-                        self._write_journal_locked()
+                        if durable_commit:
+                            self._state["durable_flush_count"] = int(
+                                self._state.get("durable_flush_count") or 0
+                            ) + 1
+                            self._state["last_durable_capture_index"] = capture_index
+                            self._state["last_durable_flush_epoch_sec"] = time.time()
+                            self._write_journal_locked()
+                    if durable_commit:
+                        frames_since_durable_flush = 0
+                        last_durable_flush_monotonic = time.monotonic()
                     self._stop_event.wait(self.poll_interval_sec)
+                durable_handles = [
+                    handle
+                    for handle in (
+                        spectrum_handle,
+                        response_handle,
+                        force_handle,
+                        summary_handle,
+                        jsonl_handle,
+                    )
+                    if handle is not None
+                ]
+                for handle in durable_handles:
+                    _flush_and_sync(handle)
+                with self._lock:
+                    captured = int(self._state.get("captured_timeline_frames") or 0)
+                    if captured > 0:
+                        self._state["durable_flush_count"] = int(
+                            self._state.get("durable_flush_count") or 0
+                        ) + 1
+                        self._state["last_durable_capture_index"] = captured - 1
+                        self._state["last_durable_flush_epoch_sec"] = time.time()
+                        self._write_journal_locked()
         except Exception as exc:  # pragma: no cover - surfaced by API and metadata
             with self._lock:
                 self._state["last_error"] = f"{type(exc).__name__}: {exc}"
@@ -1396,21 +1574,42 @@ class OpticalForceCaptureManager:
         response_probabilities = response.get("probabilities") or {}
         release_guard = model.get("release_guard") or {}
         optical_force = _optical_force_export_fields(model)
+        display_prediction = _display_prediction_export_fields(model)
         return {
             "capture_index": record["capture_index"],
             "timeline_timestamp_epoch_sec": record["timeline_timestamp_epoch_sec"],
             "elapsed_time_sec": record["elapsed_time_sec"],
-            "model_timestamp_epoch_sec": record["timeline_timestamp_epoch_sec"],
+            "model_timestamp_epoch_sec": (
+                record["timeline_timestamp_epoch_sec"]
+                if model.get("model_ready", model.get("ready"))
+                else None
+            ),
             "model_source": model.get("model_source"),
             "model_status": model.get("model_status") or model.get("status"),
             "model_ready": model.get("model_ready", model.get("ready")),
+            "capture_response_source": model.get("capture_response_source"),
+            "capture_response_frame_match": model.get(
+                "capture_response_frame_match"
+            ),
+            "capture_response_deferred_reason": model.get(
+                "capture_response_deferred_reason"
+            ),
+            "raw_spectrum_authoritative": model.get(
+                "raw_spectrum_authoritative"
+            ),
+            "offline_reconstruction_supported": model.get(
+                "offline_reconstruction_supported"
+            ),
             **optical_force,
             "contact_label": contact.get("label"),
             "contact_confidence": contact.get("confidence"),
             "contact_probability": contact_probabilities.get("contact"),
             "no_contact_probability": contact_probabilities.get("no_contact"),
-            "predicted_position_label": position.get("label"),
+            "predicted_position_label": display_prediction[
+                "display_position_label"
+            ],
             "position_confidence": position.get("confidence"),
+            **display_prediction,
             "response_level": response.get("label"),
             "response_level_confidence": response.get("confidence"),
             "response_level_raw_label": response.get("raw_label"),
@@ -1519,6 +1718,7 @@ class OpticalForceCaptureManager:
         mechanical = force.get("mechanical") or {}
         filtered_mechanical = force.get("filtered_mechanical") or mechanical
         optical_force = _optical_force_export_fields(model)
+        display_prediction = _display_prediction_export_fields(model)
         return {
             "capture_index": record["capture_index"],
             "timeline_timestamp_epoch_sec": record["timeline_timestamp_epoch_sec"],
@@ -1590,9 +1790,16 @@ class OpticalForceCaptureManager:
             "model_source": model.get("model_source"),
             "model_status": model.get("model_status") or model.get("status"),
             "model_ready": model.get("model_ready", model.get("ready")),
+            "capture_response_source": model.get("capture_response_source"),
+            "capture_response_frame_match": model.get(
+                "capture_response_frame_match"
+            ),
             **optical_force,
             "predicted_contact_label": contact.get("label"),
-            "predicted_position_label": position.get("label"),
+            "predicted_position_label": display_prediction[
+                "display_position_label"
+            ],
+            **display_prediction,
             "predicted_response_level": response.get("label"),
             "predicted_response_confidence": response.get("confidence"),
         }

@@ -12,11 +12,13 @@ deployed_model = (
     / "deployed"
     / "ordinary_fbg_current_runtime.joblib"
 )
+deployment_metadata = deployed_model.with_suffix(".deployment.json")
 stable_version = app_dir / "release_manifests" / "stable" / "VERSION.json"
 runtime_config_names = (
     "bayspec_wavelength_shift_channels.yaml",
     "hybrid_spectrum_channels.yaml",
     "runtime_contact_state.yaml",
+    "runtime_contact_state_stable.yaml",
     "px6d_reference.yaml",
     "measurement_analysis.yaml",
     "mfbg_intensity_3x3.yaml",
@@ -24,14 +26,15 @@ runtime_config_names = (
     "thumb_holder_scene.yaml",
 )
 
-# Stable is an exact promotion of the validated 0.19.6 Beta runtime. Keep the
-# package latest-model-only so no legacy inference path can take over.
+# Stable is an exact promotion of the hardware-validated 0.19.25 Beta runtime.
+# It contains only the deployed model and its hash-bound deployment metadata.
 datas = [
     (str(app_dir / "frontend"), "frontend"),
     (str(app_dir / "sdk_probe"), "sdk_probe"),
     (str(app_dir / "assets" / "demo"), "assets/demo"),
     (str(stable_version), "."),
     (str(deployed_model), "models/deployed"),
+    (str(deployment_metadata), "models/deployed"),
     *[
         (str(project_dir / "config" / config_name), "config")
         for config_name in runtime_config_names
@@ -44,6 +47,7 @@ hiddenimports = (
     + collect_submodules("websockets")
     + collect_submodules("serial")
     + collect_submodules("lightgbm")
+    + collect_submodules("sklearn.ensemble._hist_gradient_boosting")
     + [
         "clr",
         "System",
@@ -65,8 +69,10 @@ hiddenimports = (
         "src.hybrid_spectrum.baseline_relative_features",
         "src.hybrid_spectrum.dataset",
         "src.hybrid_spectrum.features",
+        "src.hybrid_spectrum.joint_nine_fbg_features",
         "src.hybrid_spectrum.tracking",
         "src.hybrid_spectrum.runtime_baseline_guard",
+        "src.hybrid_spectrum.runtime_channel_response",
         "src.hybrid_spectrum.runtime_spectral_features",
         "src.hybrid_spectrum.runtime_temporal_features",
         "src.hybrid_spectrum.runtime_literature_features",
