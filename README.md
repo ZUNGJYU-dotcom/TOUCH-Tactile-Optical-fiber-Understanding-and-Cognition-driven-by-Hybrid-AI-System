@@ -14,6 +14,24 @@ synchronized training and validation supervision and is not required for
 optical-force inference. The retained PD-voltage and earlier optical-intensity
 applications remain separate.
 
+## Public Windows Downloads
+
+This repository is publicly readable. The current Windows x64 Stable
+application is published as a GitHub Release asset; the BaySpec USB driver
+remains a separate system-level package.
+
+| Package | Purpose | SHA-256 |
+| --- | --- | --- |
+| [TOUCH Stable v0.19.25 single-file EXE](https://github.com/ZUNGJYU-dotcom/TOUCH-Tactile-Optical-fiber-Understanding-and-Cognition-driven-by-Hybrid-AI-System/releases/download/v0.19.25/TOUCH-Stable-v0.19.25-Windows-x64.exe) | Run the self-contained application on Windows x64 | `7963470D59CDA9541EDC7120F66B342D2A451190EB2EE0AC0182D8B139B4EF94` |
+| [BaySpec BS2BASE USB driver bundle](release_packages/BaySpec_BS2BASE_USB_Driver_WIN64_20260829.zip?raw=1) | Driver installer and verification tools for `USB\VID_BA8C&PID_1688` | `4FA86011C6A6E34ADB926D9CEDDBB3D037F0C249D0149C41FA06CD4514F08BAA` |
+
+The current application is a Release attachment rather than a Git LFS source
+file. The driver archive is stored with Git LFS; source clones that need it
+should install Git LFS and run `git lfs pull`. See the
+[package notes](release_packages/README.md) for driver details and the archived
+v0.19.7 package. Install the driver only when the target BS2BASE device requires
+it.
+
 ## mFBG Expansion Contract
 
 The retained ordinary-FBG model remains the active runtime. A separate
@@ -216,9 +234,12 @@ cd bayspec_wavelength_shift_app
 run_desktop.bat
 ```
 
-For the packaged Windows build, download and run the single file
-`TOUCH-Stable-v0.19.25-Windows-x64.exe` from the v0.19.25 release. The model,
-frontend, configuration, SDK helper, and user-mode SDK DLL are embedded.
+For the packaged Windows build, download and run the
+[v0.19.25 single-file executable](https://github.com/ZUNGJYU-dotcom/TOUCH-Tactile-Optical-fiber-Understanding-and-Cognition-driven-by-Hybrid-AI-System/releases/download/v0.19.25/TOUCH-Stable-v0.19.25-Windows-x64.exe).
+The model, frontend, configuration, SDK helper, and user-mode SDK DLL are
+embedded. Install the separate
+[BaySpec driver bundle](release_packages/BaySpec_BS2BASE_USB_Driver_WIN64_20260829.zip?raw=1)
+only when the target BS2BASE device requires that Windows driver.
 
 Generate the full guided validation plan without touching hardware:
 

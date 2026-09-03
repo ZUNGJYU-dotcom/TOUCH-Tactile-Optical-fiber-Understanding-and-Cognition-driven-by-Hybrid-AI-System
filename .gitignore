@@ -33,6 +33,7 @@ data collection/
 
 # Delivery archives are published separately when needed
 *.zip
+!release_packages/*.zip
 bayspec_wavelength_shift_app/release_artifacts/
 bayspec_wavelength_shift_app/release_packages/
 
